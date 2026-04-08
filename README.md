@@ -52,7 +52,7 @@ to the repo if you want to flash without setting up the toolchain.
 
 | Gesture | Action |
 |---|---|
-| **MENU tap** (< 300 ms) | Toggle FIT ↔ CROP scaling (CROP also pauses) |
+| **MENU tap** (< 300 ms) | Cycle scaling FIT → BLEND → CROP (CROP pauses) |
 | **MENU + LEFT / RIGHT** | Volume −/+ (0..15, OSD popup) |
 | **MENU + DOWN**         | Toggle 4× fast-forward |
 | **MENU + UP**           | Cycle through six built-in palettes |
@@ -79,15 +79,23 @@ to the repo if you want to flash without setting up the toolchain.
 
 ### Display modes
 
-- **FIT** (default): the entire 256×240 NES frame is downscaled 2:1
-  to fit the 128×128 display, centred with 4 px letterbox top and
-  bottom. You see the whole screen but small text is often hard to read.
+- **FIT** (default): the entire 256×240 NES frame is nearest-neighbor
+  downscaled 2:1 to fit the 128×128 display, centred with 4 px
+  letterbox top and bottom. Crisp pixels but small text is often hard
+  to read and 1-pixel UI elements shimmer as they scroll.
+- **BLEND**: same dimensions as FIT, but each output pixel is a 2×2
+  box-average of four source pixels (channel-wise mean in RGB565).
+  Slightly softer image that hides nearest-neighbor aliasing — try
+  it on games with thin parallax or single-pixel HUD elements.
 - **CROP**: a 128×128 native 1:1 viewport into the NES frame. **Tap
-  MENU to enter; the D-pad pans the viewport** across the full 256×240
-  picture. **All NES inputs are suppressed and emulation is paused**
-  while CROP is active, so you can read text or step away from the
-  device without the cart eating frames. Tap MENU again to return to
-  FIT and resume play.
+  MENU to cycle to it; the D-pad then pans the viewport** across the
+  full 256×240 picture. **All NES inputs are suppressed and emulation
+  is paused** while CROP is active, so you can read text or step away
+  from the device without the cart eating frames. Tap MENU again to
+  return to FIT.
+
+MENU tap cycles `FIT → BLEND → CROP → FIT`. The current choice is
+persisted per-ROM.
 
 ### Palettes
 

@@ -100,13 +100,21 @@ static uint8_t read_nes_buttons(void) {
 }
 
 /* Scaling modes:
- *   FIT  — 256×240 → 128×120 nearest-neighbor downscale, centered
- *          with 4 px letterbox top + bottom. Whole frame visible,
- *          text often illegible. Default.
- *   CROP — 1:1 native pixels, showing the centre 128×128 window of
- *          the 256×240 frame (X 64..191, Y 56..183). Text readable,
- *          loses 64 px on each side and 56 px top + bottom. */
-typedef enum { SCALE_FIT = 0, SCALE_CROP = 1, SCALE_COUNT } scale_mode_t;
+ *   FIT   — 256×240 → 128×120 nearest-neighbor downscale, centred
+ *           with 4 px letterbox top + bottom. Whole frame visible,
+ *           crisp pixels, but small text often illegible and
+ *           single-pixel UI elements shimmer when they scroll.
+ *   BLEND — same output dimensions, 2×2 box-average per output
+ *           pixel (4 palette lookups, channel-wise mean in RGB565).
+ *           Slightly softer image that hides aliasing.
+ *   CROP  — 1:1 native pixels, 128×128 viewport into the 256×240
+ *           frame, pannable with the D-pad. Pauses emulation. */
+typedef enum {
+    SCALE_FIT   = 0,
+    SCALE_BLEND = 1,
+    SCALE_CROP  = 2,
+    SCALE_COUNT
+} scale_mode_t;
 
 /* 256×240 → 128×120 nearest-neighbor downscale, centered with 4 px
  * black letterbox. Source is 8-bit palette indices, NES_SCREEN_PITCH
@@ -119,6 +127,41 @@ static void blit_fit(uint16_t *fb, const uint8_t *src, int pitch,
         uint16_t      *drow = fb + (4 + dy) * 128;
         for (int dx = 0; dx < 128; dx++) {
             drow[dx] = pal[srow[dx * 2]];
+        }
+    }
+    memset(fb + (4 + 120) * 128, 0, 128 * 4 * 2);
+}
+
+/* 256×240 → 128×120 with a 2×2 box average per output pixel. Same
+ * letterbox as blit_fit. For each destination pixel we read four
+ * source palette indices, look up RGB565 for each, then average the
+ * R/G/B channels independently in their packed bit positions. ~16
+ * ops per pixel × 15360 pixels × 60 fps ≈ 15 M ops/sec — easy. */
+static void blit_blend(uint16_t *fb, const uint8_t *src, int pitch,
+                        const uint16_t *pal) {
+    memset(fb, 0, 128 * 4 * 2);
+    for (int dy = 0; dy < 120; dy++) {
+        const uint8_t *r0 = src + (dy * 2)     * pitch + 8 /* overdraw */;
+        const uint8_t *r1 = src + (dy * 2 + 1) * pitch + 8;
+        uint16_t      *drow = fb + (4 + dy) * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx = dx * 2;
+            uint16_t a = pal[r0[sx]];
+            uint16_t b = pal[r0[sx + 1]];
+            uint16_t c = pal[r1[sx]];
+            uint16_t d = pal[r1[sx + 1]];
+            /* Sum each channel across the 4 source pixels.
+             * Max channel sum: R 4*31=124, G 4*63=252, B 4*31=124. */
+            uint32_t rsum = ((a >> 11) & 0x1F) + ((b >> 11) & 0x1F)
+                          + ((c >> 11) & 0x1F) + ((d >> 11) & 0x1F);
+            uint32_t gsum = ((a >>  5) & 0x3F) + ((b >>  5) & 0x3F)
+                          + ((c >>  5) & 0x3F) + ((d >>  5) & 0x3F);
+            uint32_t bsum = (a & 0x1F) + (b & 0x1F)
+                          + (c & 0x1F) + (d & 0x1F);
+            /* Divide each channel by 4 and repack. */
+            drow[dx] = (uint16_t)(((rsum >> 2) << 11)
+                                | ((gsum >> 2) <<  5)
+                                |  (bsum >> 2));
         }
     }
     memset(fb + (4 + 120) * 128, 0, 128 * 4 * 2);
@@ -428,8 +471,9 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         const uint8_t *frame = nesc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
-            if (scale_mode == SCALE_CROP) blit_crop(fb, frame, pitch, pal, pan_x, pan_y);
-            else                          blit_fit (fb, frame, pitch, pal);
+            if      (scale_mode == SCALE_CROP)  blit_crop (fb, frame, pitch, pal, pan_x, pan_y);
+            else if (scale_mode == SCALE_BLEND) blit_blend(fb, frame, pitch, pal);
+            else                                 blit_fit  (fb, frame, pitch, pal);
             /* FPS overlay — top-left corner of the visible area.
              * Drawn directly into the RGB565 framebuffer so it
              * costs nothing extra. Toggle via MENU + LB chord. */
