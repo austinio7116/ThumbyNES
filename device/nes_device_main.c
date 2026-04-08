@@ -234,7 +234,7 @@ int main(void) {
         /* Hand off to the Nofrendo runner. Returns when the user
          * holds MENU; we then fall back through the lobby for
          * another pick. */
-        int rc = nes_run_rom(roms[sel].name, fb);
+        int rc = nes_run_rom(&roms[sel], fb);
         if (rc != 0) {
             /* Visible error: red splash held until the user presses
              * any button, so they can actually read it instead of

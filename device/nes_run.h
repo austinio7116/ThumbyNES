@@ -11,9 +11,13 @@
 
 #include <stdint.h>
 
-/* Run a ROM. `name` is a base file name in / on the FAT volume.
- * `fb` is the 128×128 RGB565 framebuffer to draw into. Returns 0
- * on clean exit (MENU held), nonzero on load error. */
-int nes_run_rom(const char *name, uint16_t *fb);
+#include "nes_picker.h"
+
+/* Run a ROM described by a picker entry. `fb` is the 128×128
+ * RGB565 framebuffer to draw into. Returns 0 on clean exit
+ * (MENU held), nonzero on load error. The entry's pal_hint is
+ * used as the default region if the per-ROM cfg doesn't yet
+ * exist. */
+int nes_run_rom(const nes_rom_entry *e, uint16_t *fb);
 
 #endif

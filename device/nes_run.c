@@ -256,7 +256,8 @@ static void scale_audio(int16_t *buf, int n, int volume) {
     }
 }
 
-int nes_run_rom(const char *name, uint16_t *fb) {
+int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
+    const char *name = e->name;
     /* Try the zero-copy XIP mmap path first. Works for any ROM
      * that lives contiguously on the flash disk (which is every
      * file written to a fresh volume). Falls back to a malloc'd
@@ -273,12 +274,15 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     }
 
     /* We need cfg before nesc_init to know the region. Peek the
-     * pal flag from the cfg file if it exists. The full cfg load
-     * happens again below — this is just to pick the system. */
+     * pal flag from the cfg file if it exists, defaulting to the
+     * picker's auto-detect hint when no cfg is present. The full
+     * cfg load happens again below — this is just to pick the
+     * region for nesc_init. */
     {
         scale_mode_t _s = SCALE_FIT;
         int _p = 0, _v = VOL_DEF;
-        bool _f = false, _b = true, _pal = false;
+        bool _f = false, _b = true;
+        bool _pal = (e->pal_hint != 0);
         cfg_load(name, &_s, &_f, &_p, &_v, &_b, &_pal);
         if (nesc_init(_pal ? NESC_SYS_PAL : NESC_SYS_NTSC, 22050) != 0)
             { free(rom_alloc); return -2; }
@@ -288,15 +292,16 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     /* Restore the battery save (if any) before the cart starts running. */
     battery_load(name);
 
-    /* Defaults: NTSC, FIT with BLEND on, fast-forward off, FPS
-     * hidden, Nofrendo palette, comfortable mid-volume. Per-ROM
-     * /<name>.cfg overrides any of these on load. */
+    /* Defaults: FIT with BLEND on, fast-forward off, FPS hidden,
+     * Nofrendo palette, comfortable mid-volume. Region defaults
+     * come from the picker's auto-detect (iNES header + filename
+     * heuristic). Per-ROM /<name>.cfg overrides any of these. */
     int          palette       = 0;
     int          volume        = VOL_DEF;
     bool         show_fps      = false;
     bool         fast_forward  = false;
     bool         blend         = true;
-    bool         pal_mode      = false;
+    bool         pal_mode      = (e->pal_hint != 0);
     scale_mode_t scale_mode    = SCALE_FIT;
 
     cfg_load(name, &scale_mode, &show_fps, &palette, &volume, &blend, &pal_mode);

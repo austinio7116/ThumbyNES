@@ -39,22 +39,69 @@ extern volatile uint64_t g_msc_last_op_us;
 
 /* --- file scan ------------------------------------------------------ */
 
-/* Pull mapper number from the iNES header. Bytes 0..3 are 'NES\x1A',
- * byte 6 holds the lower mapper nibble in its high nibble, byte 7
- * holds the upper mapper nibble in its high nibble. Returns 0xFF
- * on read failure or invalid header. */
-static uint8_t read_mapper(const char *fname) {
+/* Read the 16-byte iNES header for `fname`. Returns 0 on success
+ * and a 16-byte buffer that the caller can poke at for mapper /
+ * region / flags. Returns nonzero if the file can't be read or the
+ * iNES magic isn't present. */
+static int read_ines_header(const char *fname, uint8_t hdr[16]) {
     char path[80];
     snprintf(path, sizeof(path), "/%s", fname);
     FIL f;
-    if (f_open(&f, path, FA_READ) != FR_OK) return 0xFF;
-    uint8_t hdr[16];
+    if (f_open(&f, path, FA_READ) != FR_OK) return -1;
     UINT br = 0;
     FRESULT r = f_read(&f, hdr, 16, &br);
     f_close(&f);
-    if (r != FR_OK || br != 16) return 0xFF;
+    if (r != FR_OK || br != 16) return -2;
     if (hdr[0] != 'N' || hdr[1] != 'E' || hdr[2] != 'S' || hdr[3] != 0x1A)
-        return 0xFF;
+        return -3;
+    return 0;
+}
+
+/* Detect PAL vs NTSC from a combination of three signals — any one
+ * of them firing classifies the ROM as PAL. Headers are notoriously
+ * unreliable on real-world dumps, so the filename heuristic is the
+ * most useful in practice (no-intro / GoodNES naming flags region
+ * in parentheses).
+ *
+ *   1. iNES 2.0 byte 12 bits 0..1 == 1 → PAL
+ *   2. iNES 1.0 byte 9 bit 0 == 1     → PAL
+ *   3. Filename contains any of (E), (Europe), (PAL), (A), (Australia)
+ */
+static int filename_says_pal(const char *fname) {
+    /* Case-insensitive substring search for the common region tags. */
+    static const char *needles[] = {
+        "(e)", "(eu)", "(europe)", "(pal)", "(a)", "(australia)",
+        " (e ", " (e)", "[!p]",
+    };
+    char lower[NES_PICKER_NAME_MAX];
+    size_t L = strlen(fname);
+    if (L >= sizeof(lower)) L = sizeof(lower) - 1;
+    for (size_t i = 0; i < L; i++) {
+        char c = fname[i];
+        lower[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    lower[L] = 0;
+    for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+        if (strstr(lower, needles[i])) return 1;
+    }
+    return 0;
+}
+
+static uint8_t detect_region(const char *fname, const uint8_t hdr[16], int header_ok) {
+    if (header_ok) {
+        int is_ines2 = ((hdr[7] >> 2) & 0x03) == 2;
+        if (is_ines2) {
+            if ((hdr[12] & 0x03) == 1) return 1;   /* PAL */
+        } else {
+            if (hdr[9] & 0x01) return 1;            /* PAL */
+        }
+    }
+    if (filename_says_pal(fname)) return 1;
+    return 0;
+}
+
+/* Pull mapper number from the iNES header. */
+static uint8_t mapper_from_header(const uint8_t hdr[16]) {
     return (uint8_t)(((hdr[6] >> 4) & 0x0F) | (hdr[7] & 0xF0));
 }
 
@@ -71,8 +118,11 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         if (strcasecmp(info.fname + L - 4, ".nes") != 0) continue;
         strncpy(out[n].name, info.fname, NES_PICKER_NAME_MAX - 1);
         out[n].name[NES_PICKER_NAME_MAX - 1] = 0;
-        out[n].size   = (uint32_t)info.fsize;
-        out[n].mapper = read_mapper(info.fname);
+        out[n].size = (uint32_t)info.fsize;
+        uint8_t hdr[16];
+        int header_ok = (read_ines_header(info.fname, hdr) == 0);
+        out[n].mapper   = header_ok ? mapper_from_header(hdr) : 0xFF;
+        out[n].pal_hint = detect_region(info.fname, hdr, header_ok);
         n++;
     }
     f_closedir(&dir);

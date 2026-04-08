@@ -18,6 +18,7 @@ typedef struct {
     char     name[NES_PICKER_NAME_MAX];   /* base file name in / */
     uint32_t size;
     uint8_t  mapper;                      /* iNES mapper number, 0xFF = unknown */
+    uint8_t  pal_hint;                    /* 0 = NTSC default, 1 = PAL detected */
 } nes_rom_entry;
 
 /* Scan / for *.nes files. Returns count placed in `out`. */

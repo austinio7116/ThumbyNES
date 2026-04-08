@@ -99,13 +99,24 @@ ROM.
 
 ### Region (NTSC / PAL)
 
-Tap **MENU + B** to flip between NTSC (60 Hz, 1.79 MHz CPU,
-262 scanlines/frame) and PAL (50 Hz, 1.66 MHz CPU, 312 scanlines).
-The frame-pacing cap reads Nofrendo's effective refresh rate, so
-PAL automatically runs at 50 fps and NTSC at 60. Region is persisted
-per-ROM and **takes effect on the next launch** of that cart — the
-OSD shows `NTSC next launch` / `PAL  next launch` as a reminder.
-Default is NTSC.
+ThumbyNES auto-detects region per ROM at picker scan time using
+three signals (any one fires → PAL):
+
+1. **iNES 2.0 byte 12 bits 0..1** == 1 (most reliable, rarely set)
+2. **iNES 1.0 byte 9 bit 0** == 1 (rarely set in real-world dumps)
+3. **Filename heuristic** — case-insensitive substring match for
+   `(E)`, `(Eu)`, `(Europe)`, `(PAL)`, `(A)`, `(Australia)`. This
+   covers no-intro / GoodNES naming and is in practice the most
+   useful of the three.
+
+Tap **MENU + B** in-game to override the detection — it flips
+between NTSC (60 Hz, 1.79 MHz CPU, 262 scanlines/frame) and PAL
+(50 Hz, 1.66 MHz CPU, 312 scanlines). The frame-pacing cap reads
+Nofrendo's effective refresh rate, so PAL automatically runs at
+50 fps and NTSC at 60. Region is persisted per-ROM and **takes
+effect on the next launch** of that cart — the OSD shows
+`NTSC next launch` / `PAL  next launch` as a reminder. Once you
+set it manually the saved cfg wins over auto-detect.
 
 ### Palettes
 
