@@ -24,9 +24,20 @@
 #define NESC_BTN_LEFT    0x40
 #define NESC_BTN_RIGHT   0x80
 
-/* Initialize the NES core. sample_rate is the APU output rate (Hz),
- * typically 22050 on device, 44100 on host. Returns 0 on success. */
-int  nesc_init(int sample_rate);
+/* Region. Matches nofrendo's `nes_type_t` numbering so the value
+ * can be passed straight through. */
+#define NESC_SYS_NTSC  0
+#define NESC_SYS_PAL   1
+
+/* Initialize the NES core. `system` selects NTSC (60 Hz, 1.79 MHz)
+ * or PAL (50 Hz, 1.66 MHz). `sample_rate` is the APU output rate
+ * in Hz, typically 22050 on device, 44100 on host. Returns 0 on
+ * success. */
+int  nesc_init(int system, int sample_rate);
+
+/* Effective refresh rate of the loaded cart (50 or 60). Reads
+ * Nofrendo's runtime state — call after nesc_load_rom. */
+int  nesc_refresh_rate(void);
 
 /* Load an iNES ROM image already resident in memory. The buffer must
  * remain valid for the lifetime of the emulation session (we point

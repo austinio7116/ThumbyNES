@@ -100,19 +100,14 @@ static uint8_t read_nes_buttons(void) {
 }
 
 /* Scaling modes:
- *   FIT   — 256×240 → 128×120 nearest-neighbor downscale, centred
- *           with 4 px letterbox top + bottom. Whole frame visible,
- *           crisp pixels, but small text often illegible and
- *           single-pixel UI elements shimmer when they scroll.
- *   BLEND — same output dimensions, 2×2 box-average per output
- *           pixel (4 palette lookups, channel-wise mean in RGB565).
- *           Slightly softer image that hides aliasing.
- *   CROP  — 1:1 native pixels, 128×128 viewport into the 256×240
- *           frame, pannable with the D-pad. Pauses emulation. */
+ *   FIT  — 256×240 → 128×120 downscale, centred with 4 px letterbox
+ *          top + bottom. Either nearest-neighbor (drop) or 2×2 box
+ *          average depending on the orthogonal `blend` toggle.
+ *   CROP — 1:1 native pixels, 128×128 viewport into the 256×240
+ *          frame, pannable with the D-pad. Pauses emulation. */
 typedef enum {
-    SCALE_FIT   = 0,
-    SCALE_BLEND = 1,
-    SCALE_CROP  = 2,
+    SCALE_FIT  = 0,
+    SCALE_CROP = 1,
     SCALE_COUNT
 } scale_mode_t;
 
@@ -188,10 +183,10 @@ static void blit_crop(uint16_t *fb, const uint8_t *src, int pitch,
 /* --- persisted config ---------------------------------------------- */
 
 /* Per-ROM sidecar (`<rom>.cfg`): a tiny versioned struct. Each game
- * remembers its own scale mode, palette, FPS-overlay state, and
- * volume. The magic was bumped when the volume field was added so
- * an old (smaller) cfg file is silently treated as defaults. */
-#define CFG_MAGIC   0x4E455344u   /* 'NESD' = NES cfg v2 */
+ * remembers its own scale mode, palette, FPS overlay, volume, and
+ * blend toggle. Magic is bumped whenever the layout or the meaning
+ * of any field changes; older files are silently treated as defaults. */
+#define CFG_MAGIC   0x4E455345u   /* 'NESE' = NES cfg v3 */
 
 #define VOL_MIN  0
 #define VOL_MAX  15
@@ -199,14 +194,18 @@ static void blit_crop(uint16_t *fb, const uint8_t *src, int pitch,
 
 typedef struct {
     uint32_t magic;
-    uint8_t  scale_mode;
+    uint8_t  scale_mode;   /* 0 = FIT, 1 = CROP */
     uint8_t  show_fps;
     uint8_t  palette;
     uint8_t  volume;       /* 0..VOL_MAX (linear) */
+    uint8_t  blend;        /* 0 / 1 — orthogonal to scale_mode */
+    uint8_t  pal;          /* 0 = NTSC (60 Hz), 1 = PAL (50 Hz) */
+    uint8_t  reserved[2];
 } nes_cfg_t;
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
-                      bool *show_fps, int *palette, int *volume) {
+                      bool *show_fps, int *palette, int *volume,
+                      bool *blend, bool *pal) {
     char path[80];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -219,12 +218,15 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
         *show_fps = c.show_fps != 0;
         if (c.palette < NESC_PALETTE_COUNT)  *palette = c.palette;
         if (c.volume <= VOL_MAX)             *volume  = c.volume;
+        *blend = c.blend != 0;
+        *pal   = c.pal != 0;
     }
     f_close(&f);
 }
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
-                      bool show_fps, int palette, int volume) {
+                      bool show_fps, int palette, int volume,
+                      bool blend, bool pal) {
     char path[80];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -235,6 +237,9 @@ static void cfg_save(const char *rom_name, scale_mode_t scale,
         .show_fps   = show_fps ? 1 : 0,
         .palette    = (uint8_t)palette,
         .volume     = (uint8_t)volume,
+        .blend      = blend ? 1 : 0,
+        .pal        = pal ? 1 : 0,
+        .reserved   = {0, 0},
     };
     UINT bw = 0;
     f_write(&f, &c, sizeof(c), &bw);
@@ -267,22 +272,34 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         rom_const = rom_alloc;
     }
 
-    if (nesc_init(22050) != 0)                     { free(rom_alloc); return -2; }
+    /* We need cfg before nesc_init to know the region. Peek the
+     * pal flag from the cfg file if it exists. The full cfg load
+     * happens again below — this is just to pick the system. */
+    {
+        scale_mode_t _s = SCALE_FIT;
+        int _p = 0, _v = VOL_DEF;
+        bool _f = false, _b = true, _pal = false;
+        cfg_load(name, &_s, &_f, &_p, &_v, &_b, &_pal);
+        if (nesc_init(_pal ? NESC_SYS_PAL : NESC_SYS_NTSC, 22050) != 0)
+            { free(rom_alloc); return -2; }
+    }
     if (nesc_load_rom(rom_const, sz) != 0)         { free(rom_alloc); return -3; }
 
     /* Restore the battery save (if any) before the cart starts running. */
     battery_load(name);
 
-    /* Defaults: FIT, fast-forward off, FPS hidden, Nofrendo palette,
-     * comfortable mid-volume. Per-ROM /<name>.cfg overrides any of
-     * these on load. */
+    /* Defaults: NTSC, FIT with BLEND on, fast-forward off, FPS
+     * hidden, Nofrendo palette, comfortable mid-volume. Per-ROM
+     * /<name>.cfg overrides any of these on load. */
     int          palette       = 0;
     int          volume        = VOL_DEF;
     bool         show_fps      = false;
     bool         fast_forward  = false;
+    bool         blend         = true;
+    bool         pal_mode      = false;
     scale_mode_t scale_mode    = SCALE_FIT;
 
-    cfg_load(name, &scale_mode, &show_fps, &palette, &volume);
+    cfg_load(name, &scale_mode, &show_fps, &palette, &volume, &blend, &pal_mode);
     nesc_set_palette(palette);
     bool cfg_dirty = false;
 
@@ -323,17 +340,16 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     int pan_x = 64;
     int pan_y = 56;
     /* Edge-detect chord buttons so a held press fires once. */
-    int prev_lb = 0, prev_up = 0, prev_dn = 0;
-    int prev_lt = 0, prev_rt = 0;
+    int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
+    int prev_lt = 0, prev_rt = 0, prev_b = 0;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
 
-    /* Frame pacing + FPS counter. Cap at 60 fps so the cart runs
-     * at NTSC speed; without this the 250 MHz RP2350 runs ahead.
-     * We measure actual presented frames and update the on-screen
-     * counter once a second. */
-    const uint32_t FRAME_US = 16667;       /* 1e6 / 60 */
+    /* Frame pacing + FPS counter. Cap at the cart's native refresh
+     * rate (60 NTSC, 50 PAL) so it runs at original-hardware speed
+     * — without this the 250 MHz RP2350 runs ahead. */
+    const uint32_t FRAME_US = 1000000u / (uint32_t)nesc_refresh_rate();
     absolute_time_t next_frame = get_absolute_time();
     absolute_time_t fps_window = get_absolute_time();
     int fps_frames = 0;
@@ -344,12 +360,15 @@ int nes_run_rom(const char *name, uint16_t *fb) {
          * NTSC frame ≈ 16 ms — we use that as the unit. */
         int menu_down = !gpio_get(BTN_MENU_GP);
         int lb_down = !gpio_get(BTN_LB_GP);
+        int rb_down = !gpio_get(BTN_RB_GP);
         int up_down = !gpio_get(BTN_UP_GP);
         int dn_down = !gpio_get(BTN_DOWN_GP);
         int lt_down = !gpio_get(BTN_LEFT_GP);
         int rt_down = !gpio_get(BTN_RIGHT_GP);
-        int any_input = menu_down || lb_down || up_down || dn_down || lt_down || rt_down
-                        || !gpio_get(BTN_RB_GP) || !gpio_get(BTN_A_GP) || !gpio_get(BTN_B_GP);
+        int b_down  = !gpio_get(BTN_B_GP);
+        int any_input = menu_down || lb_down || rb_down || up_down || dn_down
+                        || lt_down || rt_down || b_down
+                        || !gpio_get(BTN_A_GP);
 
         /* --- idle sleep tracking --- */
         if (any_input) {
@@ -383,6 +402,25 @@ int nes_run_rom(const char *name, uint16_t *fb) {
                 show_fps = !show_fps;
                 cfg_dirty = true;
                 menu_consumed = 1;
+            }
+            if (rb_down && !prev_rb) {
+                blend = !blend;
+                cfg_dirty = true;
+                menu_consumed = 1;
+                snprintf(osd_text, sizeof(osd_text),
+                          blend ? "blend on" : "blend off");
+                osd_text_ms = 1000;
+            }
+            if (b_down && !prev_b) {
+                pal_mode = !pal_mode;
+                cfg_dirty = true;
+                menu_consumed = 1;
+                /* Region only takes effect on next launch — switching
+                 * mid-cart would require tearing down nesc and losing
+                 * audio/video pipelines. Show a hint in the OSD. */
+                snprintf(osd_text, sizeof(osd_text),
+                          pal_mode ? "PAL  next launch" : "NTSC next launch");
+                osd_text_ms = 1500;
             }
             if (up_down && !prev_up) {
                 palette = (palette + 1) % NESC_PALETTE_COUNT;
@@ -432,10 +470,12 @@ int nes_run_rom(const char *name, uint16_t *fb) {
             }
         }
         prev_lb = lb_down;
+        prev_rb = rb_down;
         prev_up = up_down;
         prev_dn = dn_down;
         prev_lt = lt_down;
         prev_rt = rt_down;
+        prev_b  = b_down;
 
         /* Input gating: in CROP mode the cart receives nothing — the
          * D-pad pans the viewport instead so the user can read text
@@ -471,9 +511,9 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         const uint8_t *frame = nesc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
-            if      (scale_mode == SCALE_CROP)  blit_crop (fb, frame, pitch, pal, pan_x, pan_y);
-            else if (scale_mode == SCALE_BLEND) blit_blend(fb, frame, pitch, pal);
-            else                                 blit_fit  (fb, frame, pitch, pal);
+            if      (scale_mode == SCALE_CROP) blit_crop (fb, frame, pitch, pal, pan_x, pan_y);
+            else if (blend)                    blit_blend(fb, frame, pitch, pal);
+            else                                blit_fit  (fb, frame, pitch, pal);
             /* FPS overlay — top-left corner of the visible area.
              * Drawn directly into the RGB565 framebuffer so it
              * costs nothing extra. Toggle via MENU + LB chord. */
@@ -534,7 +574,7 @@ int nes_run_rom(const char *name, uint16_t *fb) {
 
     /* Persist the battery save before tearing the cart down. */
     battery_save(name);
-    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, palette, volume);
+    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, palette, volume, blend, pal_mode);
     /* Make sure the backlight is on for whatever comes next. */
     nes_lcd_backlight(1);
 

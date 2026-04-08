@@ -52,11 +52,13 @@ to the repo if you want to flash without setting up the toolchain.
 
 | Gesture | Action |
 |---|---|
-| **MENU tap** (< 300 ms) | Cycle scaling FIT → BLEND → CROP (CROP pauses) |
+| **MENU tap** (< 300 ms) | Toggle FIT ↔ CROP (CROP pauses + pans) |
 | **MENU + LEFT / RIGHT** | Volume −/+ (0..15, OSD popup) |
 | **MENU + DOWN**         | Toggle 4× fast-forward |
 | **MENU + UP**           | Cycle through six built-in palettes |
 | **MENU + LB**           | Toggle on-screen FPS counter |
+| **MENU + RB**           | Toggle BLEND smoothing (on by default) |
+| **MENU + B**            | Toggle NTSC 60 Hz ↔ PAL 50 Hz (next launch) |
 | **MENU hold** (≥ 600 ms) | Return to picker |
 
 ### In the picker
@@ -79,23 +81,31 @@ to the repo if you want to flash without setting up the toolchain.
 
 ### Display modes
 
-- **FIT** (default): the entire 256×240 NES frame is nearest-neighbor
-  downscaled 2:1 to fit the 128×128 display, centred with 4 px
-  letterbox top and bottom. Crisp pixels but small text is often hard
-  to read and 1-pixel UI elements shimmer as they scroll.
-- **BLEND**: same dimensions as FIT, but each output pixel is a 2×2
-  box-average of four source pixels (channel-wise mean in RGB565).
-  Slightly softer image that hides nearest-neighbor aliasing — try
-  it on games with thin parallax or single-pixel HUD elements.
+- **FIT** (default): the entire 256×240 NES frame is downscaled 2:1
+  to fit the 128×128 display, centred with 4 px letterbox top and
+  bottom. With **BLEND** on (the default) each output pixel is a 2×2
+  box average of four source pixels — softer image, no
+  nearest-neighbor shimmer. With BLEND off you get crisp drop-pixel
+  output instead. Toggle BLEND with **MENU + RB**.
 - **CROP**: a 128×128 native 1:1 viewport into the NES frame. **Tap
-  MENU to cycle to it; the D-pad then pans the viewport** across the
+  MENU to switch to it; the D-pad then pans the viewport** across the
   full 256×240 picture. **All NES inputs are suppressed and emulation
   is paused** while CROP is active, so you can read text or step away
   from the device without the cart eating frames. Tap MENU again to
   return to FIT.
 
-MENU tap cycles `FIT → BLEND → CROP → FIT`. The current choice is
-persisted per-ROM.
+The scale mode and the BLEND toggle are persisted independently per
+ROM.
+
+### Region (NTSC / PAL)
+
+Tap **MENU + B** to flip between NTSC (60 Hz, 1.79 MHz CPU,
+262 scanlines/frame) and PAL (50 Hz, 1.66 MHz CPU, 312 scanlines).
+The frame-pacing cap reads Nofrendo's effective refresh rate, so
+PAL automatically runs at 50 fps and NTSC at 60. Region is persisted
+per-ROM and **takes effect on the next launch** of that cart — the
+OSD shows `NTSC next launch` / `PAL  next launch` as a reminder.
+Default is NTSC.
 
 ### Palettes
 

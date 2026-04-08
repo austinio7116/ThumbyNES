@@ -31,13 +31,13 @@ static uint8_t  s_vidbuf[NES_SCREEN_PITCH * NES_SCREEN_HEIGHT];
 static const uint8_t *s_last_frame;
 static void blit_cb(uint8_t *bmp) { s_last_frame = bmp; }
 
-int nesc_init(int sample_rate)
+int nesc_init(int system, int sample_rate)
 {
     s_sample_rate = sample_rate;
     s_buttons = 0;
     s_last_frame = NULL;
 
-    if (nofrendo_init(0 /* SYS_NES_NTSC */, sample_rate, false, blit_cb, NULL, NULL) < 0)
+    if (nofrendo_init(system, sample_rate, false, blit_cb, NULL, NULL) < 0)
         return -1;
 
     /* Hand the PPU a framebuffer to render into. */
@@ -110,6 +110,12 @@ int nesc_audio_pull(int16_t *out, int n)
     int copy = (n < avail) ? n : avail;
     memcpy(out, nes->apu->buffer, copy * sizeof(int16_t));
     return copy;
+}
+
+int nesc_refresh_rate(void)
+{
+    nes_t *nes = nes_getptr();
+    return (nes && nes->refresh_rate) ? nes->refresh_rate : 60;
 }
 
 uint8_t *nesc_battery_ram(void)

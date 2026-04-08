@@ -16,7 +16,7 @@
 
 int main(int argc, char **argv)
 {
-    if (nesc_init(44100) != 0) {
+    if (nesc_init(NESC_SYS_NTSC, 44100) != 0) {
         fprintf(stderr, "nesc_init failed\n");
         return 1;
     }

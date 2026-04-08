@@ -56,7 +56,7 @@ int main(int argc, char **argv)
     if (fread(rom, 1, sz, f) != (size_t)sz) { fprintf(stderr, "short read\n"); return 1; }
     fclose(f);
 
-    if (nesc_init(SAMPLE_RATE) != 0) { fprintf(stderr, "nesc_init failed\n"); return 1; }
+    if (nesc_init(NESC_SYS_NTSC, SAMPLE_RATE) != 0) { fprintf(stderr, "nesc_init failed\n"); return 1; }
     if (nesc_load_rom(rom, sz) != 0)  { fprintf(stderr, "rom load failed\n"); return 1; }
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
