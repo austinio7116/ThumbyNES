@@ -294,12 +294,15 @@ static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
         if (strlen(nm) > 31) nm[31] = 0;
         nes_font_draw(fb, nm, 2, y, fg);
 
-        char meta[24];
+        char meta[28];
+        const char *region = e[idx].pal_hint ? "PAL" : "NTSC";
         if (e[idx].mapper == 0xFF) {
-            snprintf(meta, sizeof(meta), "??  %luK", (unsigned long)(e[idx].size / 1024));
+            snprintf(meta, sizeof(meta), "??  %luK  %s",
+                      (unsigned long)(e[idx].size / 1024), region);
         } else {
-            snprintf(meta, sizeof(meta), "m%d  %luK",
-                      (int)e[idx].mapper, (unsigned long)(e[idx].size / 1024));
+            snprintf(meta, sizeof(meta), "m%d  %luK  %s",
+                      (int)e[idx].mapper,
+                      (unsigned long)(e[idx].size / 1024), region);
         }
         nes_font_draw(fb, meta, 3, y + 6, COL_DIM);
     }
