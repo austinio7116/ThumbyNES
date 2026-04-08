@@ -293,10 +293,10 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     battery_load(name);
 
     /* Defaults: FIT with BLEND on, fast-forward off, FPS hidden,
-     * Nofrendo palette, comfortable mid-volume. Region defaults
+     * COMPOSITE palette, comfortable mid-volume. Region defaults
      * come from the picker's auto-detect (iNES header + filename
      * heuristic). Per-ROM /<name>.cfg overrides any of these. */
-    int          palette       = 0;
+    int          palette       = 1;   /* COMPOSITE — warmer than NOFRENDO */
     int          volume        = VOL_DEF;
     bool         show_fps      = false;
     bool         fast_forward  = false;
