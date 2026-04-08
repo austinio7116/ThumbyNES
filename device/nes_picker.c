@@ -339,8 +339,11 @@ int nes_picker_run(uint16_t *fb,
         prev = b;
 
         /* nes_buttons_read returns the PICO-8 LRUDOX layout:
-         *   bit0=L bit1=R bit2=U bit3=D bit4=O(A) bit5=X(B)
-         */
+         *   bit0=L bit1=R bit2=U bit3=D bit4=O bit5=X
+         * On the Thumby Color physical face layout the right
+         * button (which the rest of the firmware calls 'A' to
+         * match NES conventions) maps to PICO-8 X = bit 5 (0x20).
+         * The picker uses A to launch and B to nothing for now. */
         if (pressed & 0x04) { /* up */
             if (sel > 0) sel--;
             if (sel < top) top = sel;
@@ -349,7 +352,7 @@ int nes_picker_run(uint16_t *fb,
             if (sel < n_entries - 1) sel++;
             if (sel >= top + max_rows) top = sel - max_rows + 1;
         }
-        if (pressed & 0x10) { /* O = A button */
+        if (pressed & 0x20) { /* X = physical A = launch */
             return sel;
         }
         if (nes_buttons_menu_pressed()) return -1;
