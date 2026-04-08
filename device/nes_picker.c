@@ -20,8 +20,17 @@
 #include <strings.h>
 
 #include "pico/stdlib.h"
+#include "hardware/flash.h"
+#include "hardware/regs/addressmap.h"
 #include "tusb.h"
 #include "ff.h"
+
+#include "nes_flash_disk.h"
+
+/* The global FATFS object lives in nes_device_main.c. We need it
+ * here to walk the cluster chain when computing a ROM file's XIP
+ * address for the zero-copy load path. */
+extern FATFS g_fs;
 
 #define FB_W 128
 #define FB_H 128
@@ -86,6 +95,85 @@ uint8_t *nes_picker_load_rom(const char *name, size_t *out_len) {
     f_close(&f);
     if (out_len) *out_len = (size_t)sz;
     return buf;
+}
+
+/* Convert a FatFs cluster number to its absolute LBA on the
+ * physical disk. Cluster 2 is the first data cluster. */
+static LBA_t cluster_to_lba(DWORD cluster) {
+    return g_fs.database + (LBA_t)(cluster - 2) * g_fs.csize;
+}
+
+/* Walk the FAT chain starting at `start_cluster` and verify it is
+ * physically contiguous. Returns 1 if every cluster in the chain
+ * is the previous cluster + 1; 0 otherwise. We can only mmap
+ * contiguous files because the XIP region is a flat physical map.
+ *
+ * This pokes FatFs internals via the public-but-undocumented
+ * `get_fat()` helper, which we replace with a sector-level read
+ * of the FAT itself to stay portable across FatFs configs. */
+static int chain_is_contiguous(DWORD start_cluster, DWORD n_clusters) {
+    if (n_clusters <= 1) return 1;
+
+    /* The FAT lives at sector `g_fs.fatbase` and each FAT16 entry
+     * is 2 bytes. Read the table sector-by-sector via diskio. */
+    DWORD prev = start_cluster;
+    DWORD sector_buf_lba = (DWORD)-1;
+    static uint8_t fat_sec[512];
+
+    for (DWORD i = 1; i < n_clusters; i++) {
+        DWORD entry_byte = prev * 2;     /* FAT16 */
+        DWORD entry_sec  = entry_byte / 512;
+        DWORD entry_off  = entry_byte % 512;
+        LBA_t lba = (LBA_t)g_fs.fatbase + entry_sec;
+        if (lba != sector_buf_lba) {
+            if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) return 0;
+            sector_buf_lba = lba;
+        }
+        DWORD next = (DWORD)fat_sec[entry_off] | ((DWORD)fat_sec[entry_off + 1] << 8);
+        if (next == 0xFFFF) {
+            /* End-of-chain. Should only happen at i == n_clusters - 1.
+             * If it happens earlier the file is shorter than expected. */
+            return (i == n_clusters - 1);
+        }
+        if (next != prev + 1) return 0;
+        prev = next;
+    }
+    return 1;
+}
+
+int nes_picker_mmap_rom(const char *name,
+                          const uint8_t **out_data, size_t *out_len) {
+    if (!out_data || !out_len) return -1;
+
+    /* Make sure any pending writes for this file have been flushed
+     * to physical flash before we try to read it via XIP. */
+    nes_flash_disk_flush();
+
+    char path[80];
+    snprintf(path, sizeof(path), "/%s", name);
+
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return -2;
+    FSIZE_t sz = f_size(&f);
+    if (sz < 16 || sz > 1024 * 1024) { f_close(&f); return -3; }
+
+    DWORD start_cluster = f.obj.sclust;
+    f_close(&f);
+    if (start_cluster < 2) return -4;
+
+    /* Round file size up to whole clusters when checking contiguity. */
+    DWORD bytes_per_cluster = (DWORD)g_fs.csize * 512u;
+    DWORD n_clusters = ((DWORD)sz + bytes_per_cluster - 1) / bytes_per_cluster;
+    if (!chain_is_contiguous(start_cluster, n_clusters)) return -5;
+
+    /* Compute XIP address. The flash disk lives at FLASH_DISK_OFFSET
+     * inside the QSPI flash; XIP_BASE maps the start of flash. */
+    LBA_t lba = cluster_to_lba(start_cluster);
+    uintptr_t xip = (uintptr_t)XIP_BASE + (uintptr_t)FLASH_DISK_OFFSET
+                  + (uintptr_t)lba * 512u;
+    *out_data = (const uint8_t *)xip;
+    *out_len  = (size_t)sz;
+    return 0;
 }
 
 /* --- drawing helpers ----------------------------------------------- */

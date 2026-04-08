@@ -209,13 +209,23 @@ static void scale_audio(int16_t *buf, int n, int volume) {
 }
 
 int nes_run_rom(const char *name, uint16_t *fb) {
-    /* Slurp the ROM. Caller-side malloc; freed before return. */
-    size_t   sz  = 0;
-    uint8_t *rom = nes_picker_load_rom(name, &sz);
-    if (!rom) return -1;
+    /* Try the zero-copy XIP mmap path first. Works for any ROM
+     * that lives contiguously on the flash disk (which is every
+     * file written to a fresh volume). Falls back to a malloc'd
+     * RAM copy if the file is fragmented — only viable for small
+     * ROMs given the ~340 KB free heap budget. */
+    const uint8_t *rom_const = NULL;
+    uint8_t       *rom_alloc = NULL;
+    size_t         sz        = 0;
 
-    if (nesc_init(22050) != 0)         { free(rom); return -2; }
-    if (nesc_load_rom(rom, sz) != 0)   { free(rom); return -3; }
+    if (nes_picker_mmap_rom(name, &rom_const, &sz) != 0) {
+        rom_alloc = nes_picker_load_rom(name, &sz);
+        if (!rom_alloc) return -1;
+        rom_const = rom_alloc;
+    }
+
+    if (nesc_init(22050) != 0)                     { free(rom_alloc); return -2; }
+    if (nesc_load_rom(rom_const, sz) != 0)         { free(rom_alloc); return -3; }
 
     /* Restore the battery save (if any) before the cart starts running. */
     battery_load(name);
@@ -485,7 +495,7 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     nes_lcd_backlight(1);
 
     nesc_shutdown();
-    free(rom);
+    free(rom_alloc);
 
     /* Block until MENU is released so the lobby doesn't pick the
      * same press up as a navigation event. */

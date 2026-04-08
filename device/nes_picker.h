@@ -33,7 +33,18 @@ int nes_picker_scan(nes_rom_entry *out, int max);
 int nes_picker_run(uint16_t *fb,
                     const nes_rom_entry *entries, int n_entries);
 
-/* Slurp a ROM file into a malloc'd buffer. Caller frees. */
+/* Slurp a ROM file into a malloc'd buffer. Caller frees.
+ * Use only for small (< ~300 KB) files — see nes_picker_mmap_rom
+ * for the zero-copy path used by the ROM runner. */
 uint8_t *nes_picker_load_rom(const char *name, size_t *out_len);
+
+/* Map a ROM file directly from XIP flash without copying it into
+ * RAM. Returns 0 on success and writes a pointer into flash + the
+ * file size. The pointer remains valid until the file is deleted
+ * or the FAT volume is reformatted. Returns nonzero if the file
+ * isn't contiguous on disk (in which case the caller can fall
+ * back to nes_picker_load_rom). */
+int nes_picker_mmap_rom(const char *name,
+                          const uint8_t **out_data, size_t *out_len);
 
 #endif

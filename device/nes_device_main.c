@@ -39,7 +39,7 @@
 
 /* Static framebuffer + filesystem state. */
 static uint16_t       fb[128 * 128];
-static FATFS          fs;
+FATFS                 g_fs;   /* exported to nes_picker for XIP mmap */
 static nes_rom_entry  roms[NES_PICKER_MAX_ROMS];
 
 /* Quick-resume: /.last stores the base name of the most recently
@@ -115,14 +115,14 @@ static int boot_filesystem(void) {
     int force = nes_buttons_menu_pressed();
 
     int needs_format = force;
-    FRESULT r = f_mount(&fs, "", 1);
+    FRESULT r = f_mount(&g_fs, "", 1);
     if (r != FR_OK) needs_format = 1;
 
     if (needs_format) {
         splash_color(0xffe0);   /* yellow = formatting */
 
         f_unmount("");
-        memset(&fs, 0, sizeof(fs));
+        memset(&g_fs, 0, sizeof(g_fs));
 
         BYTE work[FF_MAX_SS * 4];
         /* FAT16, 1 KB clusters → 12288 clusters, well above the
@@ -135,7 +135,7 @@ static int boot_filesystem(void) {
         }
         nes_flash_disk_flush();
 
-        if (f_mount(&fs, "", 1) != FR_OK) {
+        if (f_mount(&g_fs, "", 1) != FR_OK) {
             splash_color(0xfa00);   /* dark red = remount failed */
             return -1;
         }
@@ -276,10 +276,15 @@ int main(void) {
          * another pick. */
         int rc = nes_run_rom(roms[sel].name, fb);
         if (rc != 0) {
+            /* Visible error: red splash held until the user presses
+             * any button, so they can actually read it instead of
+             * blinking past a 1.5 s flash. */
             char line[40];
             snprintf(line, sizeof(line), "load err %d", rc);
             splash_text(line, roms[sel].name, 0xf800);
-            sleep_ms(1500);
+            while (nes_buttons_read() == 0 && !nes_buttons_menu_pressed())
+                sleep_ms(20);
+            while (nes_buttons_menu_pressed()) sleep_ms(10);
         }
         /* Wait for MENU release so the long-hold exit doesn't
          * immediately retrigger as a select in the picker. */
