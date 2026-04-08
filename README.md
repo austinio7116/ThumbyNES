@@ -105,6 +105,10 @@ To flash: power off the Thumby Color, hold the **DOWN** d-pad, power
 on. The device mounts as `RPI-RP2350` — drag the `.uf2` onto it. The
 device reboots into ThumbyNES automatically.
 
+A prebuilt firmware image is committed to the repo at
+[`firmware/nesrun_device.uf2`](firmware/nesrun_device.uf2) so you
+don't need to set up the Pico SDK toolchain just to try it.
+
 ## Using the device
 
 1. **First boot** wipes the disk to a fresh FAT16 volume labelled

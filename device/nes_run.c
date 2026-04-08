@@ -25,8 +25,11 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include "hardware/gpio.h"
 #include "ff.h"
+
+#include "nes_font.h"
 
 /* Pin map mirrors nes_buttons.c. We read raw GPIOs here so we can
  * remap LB/RB to Select/Start without going through the PICO-8
@@ -146,6 +149,16 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
 
+    /* Frame pacing + FPS counter. Cap at 60 fps so the cart runs
+     * at NTSC speed; without this the 250 MHz RP2350 runs ahead.
+     * We measure actual presented frames and update the on-screen
+     * counter once a second. */
+    const uint32_t FRAME_US = 16667;       /* 1e6 / 60 */
+    absolute_time_t next_frame = get_absolute_time();
+    absolute_time_t fps_window = get_absolute_time();
+    int fps_frames = 0;
+    int fps_show   = 0;
+
     while (!exit_after) {
         /* Input. */
         nesc_set_buttons(read_nes_buttons());
@@ -185,6 +198,13 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         if (frame) {
             nes_lcd_wait_idle();
             blit_scaled(fb, frame, pitch, pal);
+            /* FPS overlay — top-left corner of the visible area
+             * (just below the 4 px letterbox). Drawn directly into
+             * the RGB565 framebuffer so it costs nothing extra. */
+            char ftxt[12];
+            snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
+                     fast_forward ? " FF" : "");
+            nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);   /* yellow */
             nes_lcd_present(fb);
         }
 
@@ -192,6 +212,27 @@ int nes_run_rom(const char *name, uint16_t *fb) {
          * so only push the most recent frame's samples. */
         int n = nesc_audio_pull(audio, 1024);
         if (n > 0) nes_audio_pwm_push(audio, n);
+
+        /* Frame pacing: cap at 60 fps unless the user asked for
+         * fast-forward. sleep_until is a no-op if we're already
+         * past the target — i.e. when the emulator is the bottleneck. */
+        fps_frames++;
+        if (!fast_forward) {
+            next_frame = delayed_by_us(next_frame, FRAME_US);
+            sleep_until(next_frame);
+        } else {
+            /* Reset the pacing anchor so when the user toggles back
+             * to normal speed we don't immediately try to "catch up"
+             * the missed frames. */
+            next_frame = get_absolute_time();
+        }
+
+        /* Update the on-screen FPS once per second. */
+        if (absolute_time_diff_us(fps_window, get_absolute_time()) > 1000000) {
+            fps_show   = fps_frames;
+            fps_frames = 0;
+            fps_window = get_absolute_time();
+        }
     }
 
     /* Persist the battery save before tearing the cart down. */
