@@ -30,6 +30,25 @@ extern volatile uint64_t g_msc_last_op_us;
 
 /* --- file scan ------------------------------------------------------ */
 
+/* Pull mapper number from the iNES header. Bytes 0..3 are 'NES\x1A',
+ * byte 6 holds the lower mapper nibble in its high nibble, byte 7
+ * holds the upper mapper nibble in its high nibble. Returns 0xFF
+ * on read failure or invalid header. */
+static uint8_t read_mapper(const char *fname) {
+    char path[80];
+    snprintf(path, sizeof(path), "/%s", fname);
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return 0xFF;
+    uint8_t hdr[16];
+    UINT br = 0;
+    FRESULT r = f_read(&f, hdr, 16, &br);
+    f_close(&f);
+    if (r != FR_OK || br != 16) return 0xFF;
+    if (hdr[0] != 'N' || hdr[1] != 'E' || hdr[2] != 'S' || hdr[3] != 0x1A)
+        return 0xFF;
+    return (uint8_t)(((hdr[6] >> 4) & 0x0F) | (hdr[7] & 0xF0));
+}
+
 int nes_picker_scan(nes_rom_entry *out, int max) {
     DIR dir;
     FILINFO info;
@@ -43,7 +62,8 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         if (strcasecmp(info.fname + L - 4, ".nes") != 0) continue;
         strncpy(out[n].name, info.fname, NES_PICKER_NAME_MAX - 1);
         out[n].name[NES_PICKER_NAME_MAX - 1] = 0;
-        out[n].size = (uint32_t)info.fsize;
+        out[n].size   = (uint32_t)info.fsize;
+        out[n].mapper = read_mapper(info.fname);
         n++;
     }
     f_closedir(&dir);
@@ -106,27 +126,51 @@ static void draw_no_roms_splash(uint16_t *fb) {
 
 /* --- list UI ------------------------------------------------------- */
 
+/* Strip a trailing ".nes" / ".NES" so the row reads cleanly. */
+static void name_no_ext(char *dst, size_t dstsz, const char *src) {
+    strncpy(dst, src, dstsz - 1);
+    dst[dstsz - 1] = 0;
+    size_t L = strlen(dst);
+    if (L >= 4 && (strcasecmp(dst + L - 4, ".nes") == 0)) dst[L - 4] = 0;
+}
+
 static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
-                      int sel, int top) {
+                      int sel, int top, int max_rows) {
     fb_clear(fb, COL_BG);
     nes_font_draw(fb, "ThumbyNES", 32, 2, COL_TITLE);
     fb_rect(fb, 0, 10, 128, 1, COL_DIM);
-    const int row_h = 8;
-    const int max_rows = (FB_H - 14) / row_h;
+
+    /* Two-line rows: name on top, mapper + size on bottom. */
+    const int row_h = 12;
     for (int i = 0; i < max_rows && (top + i) < n; i++) {
         int idx = top + i;
-        int y = 14 + i * row_h;
-        uint16_t fg = (idx == sel) ? COL_HIGHLT : COL_FG;
-        if (idx == sel) fb_rect(fb, 0, y - 1, 128, 7, 0x18C3);
-        char line[20];
-        /* Truncate name to ~18 chars */
-        snprintf(line, sizeof(line), "%.18s", e[idx].name);
-        nes_font_draw(fb, line, 4, y, fg);
+        int y = 13 + i * row_h;
+        int hl = (idx == sel);
+        if (hl) fb_rect(fb, 0, y - 1, 128, row_h, 0x18C3);
+        uint16_t fg = hl ? COL_HIGHLT : COL_FG;
+
+        char nm[24];
+        name_no_ext(nm, sizeof(nm), e[idx].name);
+        /* Truncate to ~18 chars to fit in 128 px at 4 px/glyph. */
+        if (strlen(nm) > 18) nm[18] = 0;
+        nes_font_draw(fb, nm, 3, y, fg);
+
+        char meta[24];
+        if (e[idx].mapper == 0xFF) {
+            snprintf(meta, sizeof(meta), "??  %luK", (unsigned long)(e[idx].size / 1024));
+        } else {
+            snprintf(meta, sizeof(meta), "m%d  %luK",
+                      (int)e[idx].mapper, (unsigned long)(e[idx].size / 1024));
+        }
+        nes_font_draw(fb, meta, 3, y + 6, COL_DIM);
     }
-    /* Footer */
+
+    /* Footer with paging info. */
     char ft[24];
-    snprintf(ft, sizeof(ft), "%d/%d  A=play", sel + 1, n);
-    nes_font_draw(fb, ft, 4, FB_H - 8, COL_DIM);
+    int page = sel / max_rows + 1;
+    int pages = (n + max_rows - 1) / max_rows;
+    snprintf(ft, sizeof(ft), "%d/%d  pg %d/%d", sel + 1, n, page, pages);
+    nes_font_draw(fb, ft, 3, FB_H - 7, COL_DIM);
 }
 
 /* --- public entry --------------------------------------------------- */
@@ -134,8 +178,8 @@ static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
 int nes_picker_run(uint16_t *fb,
                     const nes_rom_entry *entries, int n_entries) {
     int sel = 0, top = 0;
-    const int row_h = 8;
-    const int max_rows = (FB_H - 14) / row_h;
+    const int row_h = 12;
+    const int max_rows = (FB_H - 14 - 8) / row_h;   /* leave footer */
 
     /* No ROMs: stay in splash, pump USB, exit when caller has files. */
     if (n_entries == 0) {
@@ -168,7 +212,7 @@ int nes_picker_run(uint16_t *fb,
         }
         if (nes_buttons_menu_pressed()) return -1;
 
-        draw_list(fb, entries, n_entries, sel, top);
+        draw_list(fb, entries, n_entries, sel, top, max_rows);
         nes_lcd_wait_idle();
         nes_lcd_present(fb);
 

@@ -15,8 +15,9 @@
 #define NES_PICKER_NAME_MAX  48
 
 typedef struct {
-    char name[NES_PICKER_NAME_MAX];   /* base file name in / */
+    char     name[NES_PICKER_NAME_MAX];   /* base file name in / */
     uint32_t size;
+    uint8_t  mapper;                      /* iNES mapper number, 0xFF = unknown */
 } nes_rom_entry;
 
 /* Scan / for *.nes files. Returns count placed in `out`. */

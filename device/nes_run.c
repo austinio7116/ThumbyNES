@@ -44,17 +44,16 @@
 #define BTN_B_GP     25
 #define BTN_MENU_GP  26
 
-/* Build the .sav path that pairs with a ROM file. We strip whatever
- * extension the ROM had and append `.sav` so `Zelda.nes` → `Zelda.sav`,
- * `Mario (USA).NES` → `Mario (USA).sav`. The buffer must be large
- * enough for the original name + `.sav` + leading `/` + NUL. */
-static void make_sav_path(char *out, size_t outsz, const char *rom_name) {
+/* Build a per-ROM sidecar path. Strips whatever extension the ROM
+ * had and appends `ext` so `Zelda.nes` → `/Zelda.sav`, `/Zelda.cfg`. */
+static void make_sidecar_path(char *out, size_t outsz,
+                               const char *rom_name, const char *ext) {
     char base[64];
     strncpy(base, rom_name, sizeof(base) - 1);
     base[sizeof(base) - 1] = 0;
     char *dot = strrchr(base, '.');
     if (dot) *dot = 0;
-    snprintf(out, outsz, "/%s.sav", base);
+    snprintf(out, outsz, "/%s%s", base, ext);
 }
 
 static void battery_load(const char *rom_name) {
@@ -63,7 +62,7 @@ static void battery_load(const char *rom_name) {
     if (!ram || sz == 0) return;
 
     char path[80];
-    make_sav_path(path, sizeof(path), rom_name);
+    make_sidecar_path(path, sizeof(path), rom_name, ".sav");
 
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
@@ -78,7 +77,7 @@ static void battery_save(const char *rom_name) {
     if (!ram || sz == 0) return;
 
     char path[80];
-    make_sav_path(path, sizeof(path), rom_name);
+    make_sidecar_path(path, sizeof(path), rom_name, ".sav");
 
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
@@ -125,15 +124,17 @@ static void blit_fit(uint16_t *fb, const uint8_t *src, int pitch,
     memset(fb + (4 + 120) * 128, 0, 128 * 4 * 2);
 }
 
-/* 1:1 native crop. We copy a 128×128 window starting at NES (64, 56).
- * That centres the visible area both horizontally (256/2 - 128/2 = 64)
- * and vertically (240/2 - 128/2 = 56). */
+/* 1:1 native crop. Copies a 128×128 window starting at NES (pan_x,
+ * pan_y), clamped to the 256×240 frame (so pan_x ∈ [0, 128],
+ * pan_y ∈ [0, 112]). When pan = (64, 56) the viewport is centred. */
 static void blit_crop(uint16_t *fb, const uint8_t *src, int pitch,
-                       const uint16_t *pal) {
-    const int x0 = 64;
-    const int y0 = 56;
+                       const uint16_t *pal, int pan_x, int pan_y) {
+    if (pan_x < 0)   pan_x = 0;
+    if (pan_x > 128) pan_x = 128;
+    if (pan_y < 0)   pan_y = 0;
+    if (pan_y > 112) pan_y = 112;
     for (int dy = 0; dy < 128; dy++) {
-        const uint8_t *srow = src + (y0 + dy) * pitch + 8 /* overdraw */ + x0;
+        const uint8_t *srow = src + (pan_y + dy) * pitch + 8 /* overdraw */ + pan_x;
         uint16_t      *drow = fb + dy * 128;
         for (int dx = 0; dx < 128; dx++) {
             drow[dx] = pal[srow[dx]];
@@ -141,46 +142,49 @@ static void blit_crop(uint16_t *fb, const uint8_t *src, int pitch,
     }
 }
 
-static void blit(uint16_t *fb, const uint8_t *src, int pitch,
-                  const uint16_t *pal, scale_mode_t mode) {
-    if (mode == SCALE_CROP) blit_crop(fb, src, pitch, pal);
-    else                     blit_fit (fb, src, pitch, pal);
-}
-
 /* --- persisted config ---------------------------------------------- */
 
-/* Tiny /.cfg file: 4-byte magic + bytes for each setting. Versioned
- * via the magic so future fields don't trip an old file. */
-#define CFG_PATH    "/.cfg"
+/* Per-ROM sidecar (`<rom>.cfg`): a tiny versioned struct. Each game
+ * remembers its own scale mode, palette, and FPS-overlay state. */
 #define CFG_MAGIC   0x4E455343u   /* 'NESC' */
 
 typedef struct {
     uint32_t magic;
     uint8_t  scale_mode;
     uint8_t  show_fps;
-    uint8_t  reserved[2];
+    uint8_t  palette;
+    uint8_t  reserved;
 } nes_cfg_t;
 
-static void cfg_load(scale_mode_t *scale, bool *show_fps) {
+static void cfg_load(const char *rom_name, scale_mode_t *scale,
+                      bool *show_fps, int *palette) {
+    char path[80];
+    make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
-    if (f_open(&f, CFG_PATH, FA_READ) != FR_OK) return;
+    if (f_open(&f, path, FA_READ) != FR_OK) return;
     nes_cfg_t c;
     UINT br = 0;
     if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br == sizeof(c)
         && c.magic == CFG_MAGIC) {
         if (c.scale_mode < SCALE_COUNT) *scale = (scale_mode_t)c.scale_mode;
         *show_fps = c.show_fps != 0;
+        if (c.palette < NESC_PALETTE_COUNT) *palette = c.palette;
     }
     f_close(&f);
 }
 
-static void cfg_save(scale_mode_t scale, bool show_fps) {
+static void cfg_save(const char *rom_name, scale_mode_t scale,
+                      bool show_fps, int palette) {
+    char path[80];
+    make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
-    if (f_open(&f, CFG_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
     nes_cfg_t c = {
         .magic      = CFG_MAGIC,
         .scale_mode = (uint8_t)scale,
         .show_fps   = show_fps ? 1 : 0,
+        .palette    = (uint8_t)palette,
+        .reserved   = 0,
     };
     UINT bw = 0;
     f_write(&f, &c, sizeof(c), &bw);
@@ -199,28 +203,39 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     /* Restore the battery save (if any) before the cart starts running. */
     battery_load(name);
 
+    /* Defaults: FIT, fast-forward off, FPS hidden, Nofrendo palette.
+     * Per-ROM /<name>.cfg overrides any of these on load. */
+    int          palette       = 0;
+    bool         show_fps      = false;
+    bool         fast_forward  = false;
+    scale_mode_t scale_mode    = SCALE_FIT;
+
+    cfg_load(name, &scale_mode, &show_fps, &palette);
+    nesc_set_palette(palette);
+    bool cfg_dirty = false;
+
     const uint16_t *pal   = nesc_palette_rgb565();
     int             pitch = nesc_framebuffer_pitch();
 
-    /* MENU is overloaded:
-     *   - Tap        (< 300 ms, no chord)  → toggle fast-forward (4×)
-     *   - Hold       (≥ 600 ms, no chord)  → exit to picker
-     *   - MENU + LB  (chord)                → toggle FPS overlay
-     * The tap-vs-hold-vs-chord decision is made on RELEASE so we
-     * never trigger an exit AND a toggle for the same press.
-     * `menu_consumed` is set when a chord fired so the release
-     * doesn't also flip fast-forward. */
-    int          menu_press_ms = 0;
-    int          menu_was_down = 0;
-    int          menu_consumed = 0;
-    bool         fast_forward  = false;
-    bool         show_fps      = true;
-    bool         exit_after    = false;
-    scale_mode_t scale_mode    = SCALE_FIT;
+    /* MENU gestures:
+     *   tap (< 300 ms, no chord)  → toggle FIT ↔ CROP
+     *   hold (≥ 600 ms, no chord) → exit to picker
+     *   MENU + LB                  → toggle FPS overlay
+     *   MENU + UP                  → cycle palette
+     *   MENU + DOWN                → toggle 4× fast-forward
+     * Decisions are made on release so a single press never fires
+     * two actions. `menu_consumed` latches on a chord so the eventual
+     * release doesn't also flip the scale mode. */
+    int  menu_press_ms = 0;
+    int  menu_was_down = 0;
+    int  menu_consumed = 0;
+    bool exit_after    = false;
 
-    /* Load persisted preferences (scale mode, FPS overlay state). */
-    cfg_load(&scale_mode, &show_fps);
-    bool cfg_dirty = false;
+    /* Pan position for CROP mode. Reset to centre on every entry. */
+    int pan_x = 64;
+    int pan_y = 56;
+    /* Edge-detect chord buttons so a held press fires once. */
+    int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
@@ -236,44 +251,77 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     int fps_show   = 0;
 
     while (!exit_after) {
-        /* Input. */
-        nesc_set_buttons(read_nes_buttons());
-
         /* MENU edge / tap / hold / chord detection.
          * NTSC frame ≈ 16 ms — we use that as the unit. */
         int menu_down = !gpio_get(BTN_MENU_GP);
+        int lb_down = !gpio_get(BTN_LB_GP);
+        int rb_down = !gpio_get(BTN_RB_GP);
+        int up_down = !gpio_get(BTN_UP_GP);
+        int dn_down = !gpio_get(BTN_DOWN_GP);
+
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
-            /* Chord detection: while MENU is held, an LB press
-             * toggles the FPS overlay and an RB press cycles the
-             * scaling mode. Either consumes the press so the
-             * eventual release doesn't also flip fast-forward. */
-            if (!menu_consumed && !gpio_get(BTN_LB_GP)) {
+            /* Chord detection — fire on the rising edge of each
+             * companion button so a held chord doesn't repeat. */
+            if (lb_down && !prev_lb) {
                 show_fps = !show_fps;
                 cfg_dirty = true;
                 menu_consumed = 1;
             }
-            if (!menu_consumed && !gpio_get(BTN_RB_GP)) {
-                scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+            if (up_down && !prev_up) {
+                palette = (palette + 1) % NESC_PALETTE_COUNT;
+                nesc_set_palette(palette);
                 cfg_dirty = true;
                 menu_consumed = 1;
             }
+            if (dn_down && !prev_dn) {
+                fast_forward = !fast_forward;
+                menu_consumed = 1;
+            }
             if (menu_press_ms >= 600 && !menu_consumed) {
-                /* Hold confirmed: exit on release (or right now). */
                 exit_after = true;
             }
         } else {
             if (menu_was_down) {
-                /* Release. Tap (no chord) = toggle fast-forward.
+                /* Release. Tap (no chord) = toggle scale mode.
                  * Hold = exit (already latched). Chord = nothing. */
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
-                    fast_forward = !fast_forward;
+                    scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+                    cfg_dirty = true;
+                    if (scale_mode == SCALE_CROP) {
+                        pan_x = 64;   /* recentre on entry */
+                        pan_y = 56;
+                    }
                 }
                 menu_press_ms = 0;
                 menu_was_down = 0;
                 menu_consumed = 0;
             }
+        }
+        prev_lb = lb_down;
+        prev_rb = rb_down;
+        prev_up = up_down;
+        prev_dn = dn_down;
+
+        /* Input gating: in CROP mode the cart receives nothing — the
+         * D-pad pans the viewport instead so the user can read text
+         * without the game stealing inputs. The cart still ticks. */
+        if (scale_mode == SCALE_CROP) {
+            nesc_set_buttons(0);
+            const int STEP = 4;   /* px per frame while held */
+            if (!menu_down) {
+                if (up_down)    pan_y -= STEP;
+                if (dn_down)    pan_y += STEP;
+                if (!gpio_get(BTN_LEFT_GP))  pan_x -= STEP;
+                if (!gpio_get(BTN_RIGHT_GP)) pan_x += STEP;
+                if (pan_x < 0)   pan_x = 0;
+                if (pan_x > 128) pan_x = 128;
+                if (pan_y < 0)   pan_y = 0;
+                if (pan_y > 112) pan_y = 112;
+            }
+        } else {
+            nesc_set_buttons(read_nes_buttons());
         }
 
         /* Fast-forward: run 4 frames before drawing/audio. We still
@@ -286,7 +334,8 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         const uint8_t *frame = nesc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
-            blit(fb, frame, pitch, pal, scale_mode);
+            if (scale_mode == SCALE_CROP) blit_crop(fb, frame, pitch, pal, pan_x, pan_y);
+            else                          blit_fit (fb, frame, pitch, pal);
             /* FPS overlay — top-left corner of the visible area.
              * Drawn directly into the RGB565 framebuffer so it
              * costs nothing extra. Toggle via MENU + LB chord. */
@@ -328,7 +377,7 @@ int nes_run_rom(const char *name, uint16_t *fb) {
 
     /* Persist the battery save before tearing the cart down. */
     battery_save(name);
-    if (cfg_dirty) cfg_save(scale_mode, show_fps);
+    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, palette);
 
     nesc_shutdown();
     free(rom);

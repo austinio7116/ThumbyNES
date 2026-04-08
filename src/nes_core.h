@@ -42,8 +42,18 @@ void nesc_run_frame(void);
 const uint8_t *nesc_framebuffer(void);
 int            nesc_framebuffer_pitch(void);
 
-/* RGB565 palette (256 entries). Built once at init time. */
+/* RGB565 palette (256 entries). Rebuilt by nesc_set_palette(). */
 const uint16_t *nesc_palette_rgb565(void);
+
+/* Number of built-in palettes Nofrendo offers. */
+#define NESC_PALETTE_COUNT  6
+
+/* Switch to one of the built-in palettes (0..NESC_PALETTE_COUNT-1).
+ * Safe to call mid-cart — only repopulates the lookup table. */
+void nesc_set_palette(int index);
+
+/* Human-readable name of palette `index`. NULL if out of range. */
+const char *nesc_palette_name(int index);
 
 /* Set the controller bitmask for player 1. */
 void nesc_set_buttons(uint8_t mask);

@@ -22,6 +22,7 @@ NES core.
 | 4 | Wire Nofrendo to LCD + PWM audio + buttons | ✅ Final Fantasy plays on real device with sound |
 | 5 | Battery saves + fast-forward toggle | ✅ `.sav` round-trips, MENU tap = 4× speed |
 | 6 | FPS counter, 60 fps cap, scale modes, persisted config | ✅ FIT/CROP toggle, `/.cfg` survives reboots |
+| 7 | Palette cycling, per-ROM config, pannable CROP, picker polish | ✅ 6 palettes, sidecar `.cfg`, mapper/size in list |
 
 ## Hardware target
 
@@ -40,9 +41,10 @@ NES core.
 | D-pad | D-pad |
 | LB | Select |
 | RB | Start |
-| MENU (tap, < 300 ms) | Toggle 4× fast-forward |
+| MENU (tap, < 300 ms) | Toggle FIT ↔ CROP scaling |
+| MENU + DOWN (chord) | Toggle 4× fast-forward |
+| MENU + UP (chord) | Cycle palette (6 built-in) |
 | MENU + LB (chord) | Toggle FPS overlay |
-| MENU + RB (chord) | Cycle scaling mode (FIT ↔ CROP) |
 | MENU (hold ≥ 600 ms) | Return to picker |
 
 **Scaling modes:**
@@ -50,12 +52,20 @@ NES core.
 - **FIT** (default): the entire 256×240 NES frame is downscaled 2:1
   to fit the 128×128 display, centred with 4 px letterbox top and
   bottom. You see the whole screen but small text is often illegible.
-- **CROP**: shows the centre 128×128 of the NES frame at native 1:1
-  resolution. Text is fully readable; you lose 64 px on each side
-  and 56 px top + bottom. Best for menu/text-heavy games like RPGs.
+- **CROP**: shows a 128×128 native 1:1 viewport of the NES frame.
+  Tap MENU to enter; the viewport starts centred and the **D-pad
+  pans** it across the full 256×240 picture. **All NES inputs are
+  suppressed in CROP mode** — the cart keeps running but receives no
+  buttons, so you can read text or inspect HUDs without the game
+  reacting. Tap MENU again to return to FIT and resume play.
 
-Your scale-mode and FPS-overlay preferences are persisted to `/.cfg`
-on the FAT volume so they survive across sessions and reboots.
+**Palettes:** Nofrendo ships six built-in NES palettes (`NOFRENDO`,
+`COMPOSITE`, `NESCLASSIC`, `NTSC`, `PVM`, `SMOOTH`). Cycle with
+MENU + UP. The current choice is persisted per-ROM.
+
+**Per-ROM config:** scale mode, palette, and FPS-overlay state are
+persisted to a sidecar `<romname>.cfg` next to the ROM and its
+`.sav`. Each game remembers its own preferences across sessions.
 
 ## Repository layout
 

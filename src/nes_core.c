@@ -44,13 +44,27 @@ int nesc_init(int sample_rate)
     memset(s_vidbuf, 0, sizeof(s_vidbuf));
     nes_setvidbuf(s_vidbuf);
 
-    /* Build the RGB565 palette once. */
-    void *p = nofrendo_buildpalette(0 /* NES_PALETTE_NOFRENDO */, 16);
+    nesc_set_palette(0);
+    return 0;
+}
+
+void nesc_set_palette(int index)
+{
+    if (index < 0 || index >= NESC_PALETTE_COUNT) index = 0;
+    void *p = nofrendo_buildpalette(index, 16);
     if (p) {
         memcpy(s_palette, p, sizeof(s_palette));
         free(p);
     }
-    return 0;
+}
+
+const char *nesc_palette_name(int index)
+{
+    static const char *names[NESC_PALETTE_COUNT] = {
+        "NOFRENDO", "COMPOSITE", "NESCLASSC", "NTSC", "PVM", "SMOOTH",
+    };
+    if (index < 0 || index >= NESC_PALETTE_COUNT) return NULL;
+    return names[index];
 }
 
 int nesc_load_rom(const uint8_t *data, size_t len)
