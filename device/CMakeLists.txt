@@ -63,11 +63,64 @@ target_compile_options(nofrendo PRIVATE
     -fno-strict-aliasing
 )
 
-# Cross-platform glue (src/nes_core.c) lives outside the device
-# directory; build it here as a small static lib.
-add_library(thumbynes_core STATIC ${NES_ROOT}/src/nes_core.c)
+# ----------------------------------------------------------------------
+# Vendored smsplus SMS / Game Gear core (GPLv2 — see vendor/VENDORING.md)
+# ----------------------------------------------------------------------
+set(SMSPLUS_DIR ${NES_ROOT}/vendor/smsplus)
+file(GLOB SMSPLUS_TOP_SRC   CONFIGURE_DEPENDS ${SMSPLUS_DIR}/*.c)
+file(GLOB SMSPLUS_CPU_SRC   CONFIGURE_DEPENDS ${SMSPLUS_DIR}/cpu/*.c)
+file(GLOB SMSPLUS_SOUND_SRC CONFIGURE_DEPENDS ${SMSPLUS_DIR}/sound/*.c)
+
+# Build the SZHVC generator with the host compiler (not the cross
+# toolchain) and run it to produce the flash-resident flag tables.
+set(SMS_SZHVC_C   ${CMAKE_CURRENT_BINARY_DIR}/sms_z80_szhvc_data.c)
+set(SMS_SZHVC_GEN ${CMAKE_CURRENT_BINARY_DIR}/sms_szhvc_gen)
+add_custom_command(
+    OUTPUT  ${SMS_SZHVC_GEN}
+    COMMAND cc -O2 -o ${SMS_SZHVC_GEN} ${NES_ROOT}/tools/gen_sms_z80_szhvc.c
+    DEPENDS ${NES_ROOT}/tools/gen_sms_z80_szhvc.c
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${SMS_SZHVC_C}
+    COMMAND ${SMS_SZHVC_GEN} ${SMS_SZHVC_C}
+    DEPENDS ${SMS_SZHVC_GEN}
+    VERBATIM
+)
+
+add_library(smsplus STATIC
+    ${SMSPLUS_TOP_SRC}
+    ${SMSPLUS_CPU_SRC}
+    ${SMSPLUS_SOUND_SRC}
+    ${SMS_SZHVC_C}
+)
+target_include_directories(smsplus PUBLIC
+    ${SMSPLUS_DIR}
+    ${SMSPLUS_DIR}/cpu
+    ${SMSPLUS_DIR}/sound
+)
+target_compile_options(smsplus PRIVATE
+    -O3
+    -Wno-array-bounds
+    -Wno-format
+    -Wno-unused-parameter
+    -Wno-unused-function
+    -Wno-unused-variable
+    -Wno-unused-but-set-variable
+    -Wno-sign-compare
+    -Wno-pointer-sign
+    -Wno-implicit-function-declaration
+    -fno-strict-aliasing
+)
+
+# Cross-platform glue (src/nes_core.c, src/sms_core.c) lives outside the
+# device directory; build it here as a small static lib.
+add_library(thumbynes_core STATIC
+    ${NES_ROOT}/src/nes_core.c
+    ${NES_ROOT}/src/sms_core.c
+)
 target_include_directories(thumbynes_core PUBLIC ${NES_ROOT}/src)
-target_link_libraries(thumbynes_core PUBLIC nofrendo)
+target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus)
 
 # ----------------------------------------------------------------------
 # nesrun_device — Phase 3 firmware: lobby + picker, no emulator yet.
@@ -82,6 +135,7 @@ add_executable(nesrun_device
     nes_picker.c
     nes_font.c
     nes_run.c
+    sms_run.c
     usb_descriptors.c
     fatfs/ff.c
     fatfs/ffsystem.c

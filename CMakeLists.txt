@@ -43,17 +43,56 @@ target_include_directories(nofrendo PUBLIC
 target_compile_definitions(nofrendo PRIVATE)
 
 # ----------------------------------------------------------------------
+# Vendored smsplus (GPLv2 — see vendor/VENDORING.md)
+# ----------------------------------------------------------------------
+set(SMSPLUS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/smsplus)
+
+file(GLOB SMSPLUS_TOP_SRC   CONFIGURE_DEPENDS ${SMSPLUS_DIR}/*.c)
+file(GLOB SMSPLUS_CPU_SRC   CONFIGURE_DEPENDS ${SMSPLUS_DIR}/cpu/*.c)
+file(GLOB SMSPLUS_SOUND_SRC CONFIGURE_DEPENDS ${SMSPLUS_DIR}/sound/*.c)
+
+# Precompute the Z80 SZHVC flag tables (256 KB) into flash so we don't
+# need 256 KB of free heap to start the SMS core. See
+# tools/gen_sms_z80_szhvc.c for the generator.
+set(SMS_SZHVC_C   ${CMAKE_CURRENT_BINARY_DIR}/sms_z80_szhvc_data.c)
+add_executable(sms_szhvc_gen tools/gen_sms_z80_szhvc.c)
+set_target_properties(sms_szhvc_gen PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+add_custom_command(
+    OUTPUT  ${SMS_SZHVC_C}
+    COMMAND $<TARGET_FILE:sms_szhvc_gen> ${SMS_SZHVC_C}
+    DEPENDS sms_szhvc_gen
+    VERBATIM
+)
+
+add_library(smsplus STATIC
+    ${SMSPLUS_TOP_SRC}
+    ${SMSPLUS_CPU_SRC}
+    ${SMSPLUS_SOUND_SRC}
+    ${SMS_SZHVC_C}
+)
+target_include_directories(smsplus PUBLIC
+    ${SMSPLUS_DIR}
+    ${SMSPLUS_DIR}/cpu
+    ${SMSPLUS_DIR}/sound
+)
+# Standalone build — shared.h falls back to printf/no-IRAM_ATTR.
+target_compile_definitions(smsplus PRIVATE)
+
+# ----------------------------------------------------------------------
 # ThumbyNES runtime glue
 # ----------------------------------------------------------------------
-add_library(thumbynes STATIC src/nes_core.c)
+add_library(thumbynes STATIC src/nes_core.c src/sms_core.c)
 target_include_directories(thumbynes PUBLIC src)
-target_link_libraries(thumbynes PUBLIC nofrendo)
+target_link_libraries(thumbynes PUBLIC nofrendo smsplus)
 
 # ----------------------------------------------------------------------
 # Phase 0 bench harness
 # ----------------------------------------------------------------------
 add_executable(nesbench src/bench_main.c)
 target_link_libraries(nesbench PRIVATE thumbynes)
+
+add_executable(smsbench src/sms_bench_main.c)
+target_link_libraries(smsbench PRIVATE thumbynes)
 
 # ----------------------------------------------------------------------
 # Phase 1 SDL2 host runner (built only if SDL2 is available)
@@ -62,7 +101,9 @@ find_package(SDL2 QUIET)
 if(SDL2_FOUND)
     add_executable(neshost src/host_main.c)
     target_link_libraries(neshost PRIVATE thumbynes SDL2::SDL2)
-    message(STATUS "ThumbyNES: SDL2 found, building neshost")
+    add_executable(smshost src/sms_host_main.c)
+    target_link_libraries(smshost PRIVATE thumbynes SDL2::SDL2)
+    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost")
 else()
     # Older SDL2 cmake configs don't export the SDL2:: target.
     find_path(SDL2_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL2)
@@ -71,8 +112,11 @@ else()
         add_executable(neshost src/host_main.c)
         target_include_directories(neshost PRIVATE ${SDL2_INCLUDE_DIR})
         target_link_libraries(neshost PRIVATE thumbynes ${SDL2_LIBRARY})
-        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost")
+        add_executable(smshost src/sms_host_main.c)
+        target_include_directories(smshost PRIVATE ${SDL2_INCLUDE_DIR})
+        target_link_libraries(smshost PRIVATE thumbynes ${SDL2_LIBRARY})
+        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost")
     else()
-        message(STATUS "ThumbyNES: SDL2 not found, skipping neshost")
+        message(STATUS "ThumbyNES: SDL2 not found, skipping neshost / smshost")
     endif()
 endif()

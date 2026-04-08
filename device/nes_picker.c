@@ -197,14 +197,26 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         if (info.fattrib & AM_DIR) continue;
         size_t L = strlen(info.fname);
         if (L < 4) continue;
-        if (strcasecmp(info.fname + L - 4, ".nes") != 0) continue;
+        uint8_t sys = 0xFF;
+        if      (strcasecmp(info.fname + L - 4, ".nes") == 0) sys = ROM_SYS_NES;
+        else if (strcasecmp(info.fname + L - 4, ".sms") == 0) sys = ROM_SYS_SMS;
+        else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gg") == 0) sys = ROM_SYS_GG;
+        else continue;
         strncpy(out[n].name, info.fname, NES_PICKER_NAME_MAX - 1);
         out[n].name[NES_PICKER_NAME_MAX - 1] = 0;
-        out[n].size = (uint32_t)info.fsize;
-        uint8_t hdr[16];
-        int header_ok = (read_ines_header(info.fname, hdr) == 0);
-        out[n].mapper   = header_ok ? mapper_from_header(hdr) : 0xFF;
-        out[n].pal_hint = detect_region(info.fname, hdr, header_ok);
+        out[n].size   = (uint32_t)info.fsize;
+        out[n].system = sys;
+        if (sys == ROM_SYS_NES) {
+            uint8_t hdr[16];
+            int header_ok = (read_ines_header(info.fname, hdr) == 0);
+            out[n].mapper   = header_ok ? mapper_from_header(hdr) : 0xFF;
+            out[n].pal_hint = detect_region(info.fname, hdr, header_ok);
+        } else {
+            /* SMS / GG: smsplus does its own region work; we just use
+             * the filename heuristic for the picker meta column. */
+            out[n].mapper   = 0xFF;
+            out[n].pal_hint = filename_says_pal(info.fname);
+        }
         n++;
     }
     f_closedir(&dir);
@@ -346,12 +358,17 @@ static void draw_no_roms_splash(uint16_t *fb) {
 
 /* --- list UI ------------------------------------------------------- */
 
-/* Strip a trailing ".nes" / ".NES" so the row reads cleanly. */
+/* Strip a trailing recognised extension so the row reads cleanly. */
 static void name_no_ext(char *dst, size_t dstsz, const char *src) {
     strncpy(dst, src, dstsz - 1);
     dst[dstsz - 1] = 0;
     size_t L = strlen(dst);
-    if (L >= 4 && (strcasecmp(dst + L - 4, ".nes") == 0)) dst[L - 4] = 0;
+    if (L >= 4 && (strcasecmp(dst + L - 4, ".nes") == 0
+                || strcasecmp(dst + L - 4, ".sms") == 0)) {
+        dst[L - 4] = 0;
+    } else if (L >= 3 && strcasecmp(dst + L - 3, ".gg") == 0) {
+        dst[L - 3] = 0;
+    }
 }
 
 static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
@@ -383,7 +400,14 @@ static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
 
         char meta[32];
         const char *region = e[idx].pal_hint ? "PAL" : "NTSC";
-        if (e[idx].mapper == 0xFF) {
+        const char *tag;
+        if      (e[idx].system == ROM_SYS_SMS) tag = "SMS";
+        else if (e[idx].system == ROM_SYS_GG)  tag = "GG ";
+        else                                   tag = NULL;
+        if (tag) {
+            snprintf(meta, sizeof(meta), "%s  %luK  %s",
+                      tag, (unsigned long)(e[idx].size / 1024), region);
+        } else if (e[idx].mapper == 0xFF) {
             snprintf(meta, sizeof(meta), "??  %luK  %s",
                       (unsigned long)(e[idx].size / 1024), region);
         } else {

@@ -14,11 +14,18 @@
 #define NES_PICKER_MAX_ROMS  64
 #define NES_PICKER_NAME_MAX  48
 
+/* Which emulator core handles this ROM. Detected from file extension. */
+#define ROM_SYS_NES  0
+#define ROM_SYS_SMS  1
+#define ROM_SYS_GG   2
+
 typedef struct {
     char     name[NES_PICKER_NAME_MAX];   /* base file name in / */
     uint32_t size;
-    uint8_t  mapper;                      /* iNES mapper number, 0xFF = unknown */
+    uint8_t  mapper;                      /* iNES mapper number, 0xFF = unknown / N/A */
     uint8_t  pal_hint;                    /* 0 = NTSC default, 1 = PAL detected */
+    uint8_t  system;                      /* ROM_SYS_* */
+    uint8_t  _pad;
 } nes_rom_entry;
 
 /* Scan / for *.nes files. Returns count placed in `out`. */

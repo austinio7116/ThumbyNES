@@ -1,5 +1,20 @@
 # Vendored sources
 
+## smsplus/
+
+Sega Master System / Game Gear emulation core. Vendored from
+**retro-go**'s `retro-core/components/smsplus` directory.
+
+- Upstream: https://github.com/ducalex/retro-go
+- Commit pinned: `4ced120669750ca7228fd0414211430c1d923166` (same as nofrendo)
+- License: GPLv2 (see `smsplus/COPYING`)
+- Original author: Charles MacDonald (1998-2007), with additional code
+  from Eke-Eke (SMS Plus GX) and the retro-go maintainers.
+
+The standalone fallback in `shared.h` (`#ifndef RETRO_GO`) makes
+LOG_PRINTF degrade to printf and IRAM_ATTR to nothing — verbatim
+vendor with **no patches** as of the initial drop.
+
 ## nofrendo/
 
 NES emulation core. Vendored from the **retro-go** project's `retro-core/components/nofrendo` directory.
