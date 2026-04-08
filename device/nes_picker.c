@@ -149,11 +149,12 @@ static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
         if (hl) fb_rect(fb, 0, y - 1, 128, row_h, 0x18C3);
         uint16_t fg = hl ? COL_HIGHLT : COL_FG;
 
-        char nm[24];
+        char nm[36];
         name_no_ext(nm, sizeof(nm), e[idx].name);
-        /* Truncate to ~18 chars to fit in 128 px at 4 px/glyph. */
-        if (strlen(nm) > 18) nm[18] = 0;
-        nes_font_draw(fb, nm, 3, y, fg);
+        /* Truncate to 31 chars to fit in 128 px at 4 px/glyph
+         * with a 2 px left margin (31 * 4 = 124). */
+        if (strlen(nm) > 31) nm[31] = 0;
+        nes_font_draw(fb, nm, 2, y, fg);
 
         char meta[24];
         if (e[idx].mapper == 0xFF) {
