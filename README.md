@@ -41,6 +41,7 @@ NES core.
 | LB | Select |
 | RB | Start |
 | MENU (tap, < 300 ms) | Toggle 4× fast-forward |
+| MENU + LB (chord) | Toggle FPS overlay |
 | MENU (hold ≥ 600 ms) | Return to picker |
 
 ## Repository layout

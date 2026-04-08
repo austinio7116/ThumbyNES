@@ -137,13 +137,18 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     int             pitch = nesc_framebuffer_pitch();
 
     /* MENU is overloaded:
-     *   - Short tap (< 300 ms)        → toggle fast-forward (4× speed)
-     *   - Hold ≥ 600 ms                → exit to picker
-     * The hold-vs-tap decision is made on RELEASE so we don't ever
-     * trigger an exit AND a toggle for the same press. */
+     *   - Tap        (< 300 ms, no chord)  → toggle fast-forward (4×)
+     *   - Hold       (≥ 600 ms, no chord)  → exit to picker
+     *   - MENU + LB  (chord)                → toggle FPS overlay
+     * The tap-vs-hold-vs-chord decision is made on RELEASE so we
+     * never trigger an exit AND a toggle for the same press.
+     * `menu_consumed` is set when a chord fired so the release
+     * doesn't also flip fast-forward. */
     int  menu_press_ms = 0;
     int  menu_was_down = 0;
+    int  menu_consumed = 0;
     bool fast_forward  = false;
+    bool show_fps      = true;
     bool exit_after    = false;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
@@ -163,27 +168,33 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         /* Input. */
         nesc_set_buttons(read_nes_buttons());
 
-        /* MENU edge / tap / hold detection.
+        /* MENU edge / tap / hold / chord detection.
          * NTSC frame ≈ 16 ms — we use that as the unit. */
         int menu_down = !gpio_get(BTN_MENU_GP);
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
-            if (menu_press_ms >= 600) {
+            /* Chord detection: while MENU is held, an LB press fires
+             * the FPS toggle exactly once and marks the press as
+             * consumed so the release doesn't also flip fast-forward. */
+            if (!menu_consumed && !gpio_get(BTN_LB_GP)) {
+                show_fps = !show_fps;
+                menu_consumed = 1;
+            }
+            if (menu_press_ms >= 600 && !menu_consumed) {
                 /* Hold confirmed: exit on release (or right now). */
                 exit_after = true;
-                /* Wait for the user to release before bailing so the
-                 * picker doesn't immediately consume the same press. */
             }
         } else {
             if (menu_was_down) {
-                /* Release. Tap = toggle fast-forward, hold = exit
-                 * (already latched above). */
-                if (menu_press_ms > 0 && menu_press_ms < 300) {
+                /* Release. Tap (no chord) = toggle fast-forward.
+                 * Hold = exit (already latched). Chord = nothing. */
+                if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
                     fast_forward = !fast_forward;
                 }
                 menu_press_ms = 0;
                 menu_was_down = 0;
+                menu_consumed = 0;
             }
         }
 
@@ -198,13 +209,15 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         if (frame) {
             nes_lcd_wait_idle();
             blit_scaled(fb, frame, pitch, pal);
-            /* FPS overlay — top-left corner of the visible area
-             * (just below the 4 px letterbox). Drawn directly into
-             * the RGB565 framebuffer so it costs nothing extra. */
-            char ftxt[12];
-            snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
-                     fast_forward ? " FF" : "");
-            nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);   /* yellow */
+            /* FPS overlay — top-left corner of the visible area.
+             * Drawn directly into the RGB565 framebuffer so it
+             * costs nothing extra. Toggle via MENU + LB chord. */
+            if (show_fps) {
+                char ftxt[12];
+                snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
+                         fast_forward ? " FF" : "");
+                nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);   /* yellow */
+            }
             nes_lcd_present(fb);
         }
 
