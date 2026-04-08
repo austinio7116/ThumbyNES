@@ -67,6 +67,8 @@ to the repo if you want to flash without setting up the toolchain.
 |---|---|
 | **Up / Down** | Navigate the ROM list |
 | **A**         | Launch the highlighted ROM |
+| **B**         | Toggle favorite (★ next to ROM name) |
+| **LB**        | Toggle filter — show all ROMs / favorites only |
 | **MENU**      | Cancel back to lobby (also force-reformats on next boot if held there) |
 
 ### At boot
@@ -161,10 +163,19 @@ corner. Shows ` FF` when fast-forward is engaged. Off by default.
 
 ### Picker
 
-Two-line rows: ROM name on top, `m<mapper>  <size>K` below (mapper
-number parsed from the iNES header at scan time). Footer shows
-`<sel>/<n>  pg <p>/<P>`. The `.nes` extension is stripped from
+Two-line rows: ROM name on top, `m<mapper>  <size>K  NTSC|PAL`
+below (mapper number parsed from the iNES header at scan time;
+region from auto-detect — see below). Favorites are prefixed with
+`*`. Footer shows `<sel>/<n>  pg <p>/<P>`, with a `FAV` tag when
+the favorites filter is on. The `.nes` extension is stripped from
 displayed names.
+
+**Favorites:** press **B** in the picker to toggle a star on the
+highlighted ROM. Press **LB** to toggle a filter that shows only
+favorited ROMs (footer shows `FAV`). Favorites are stored in
+`/.favs` on the FAT volume — a plain newline-separated text file
+of base ROM names. Survives reboots and is editable from a host
+over USB if you want to bulk-manage them.
 
 ### Boot splash
 
@@ -329,7 +340,8 @@ ThumbyNES/
 |---|---|
 | `<rom>.nes`     | The ROM image you dropped via USB. |
 | `<rom>.sav`     | Battery-backed PRG-RAM, 8 KB. Auto-saved every 30 s. |
-| `<rom>.cfg`     | Per-ROM scale / palette / volume / FPS-overlay state. |
+| `<rom>.cfg`     | Per-ROM scale / palette / volume / FPS-overlay / region state. |
+| `/.favs`        | Newline-separated list of favorited ROM names. |
 
 ---
 

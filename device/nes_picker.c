@@ -21,11 +21,14 @@
 
 #include "pico/stdlib.h"
 #include "hardware/flash.h"
+#include "hardware/gpio.h"
 #include "hardware/regs/addressmap.h"
 #include "tusb.h"
 #include "ff.h"
 
 #include "nes_flash_disk.h"
+
+#define BTN_LB_GP 6   /* mirror nes_buttons.c — used for filter toggle */
 
 /* The global FATFS object lives in nes_device_main.c. We need it
  * here to walk the cluster chain when computing a ROM file's XIP
@@ -36,6 +39,85 @@ extern FATFS g_fs;
 #define FB_H 128
 
 extern volatile uint64_t g_msc_last_op_us;
+
+/* --- favorites store ------------------------------------------------ */
+
+/* /.favs is a plain newline-separated list of base file names that
+ * the user has marked as favorites. We keep the whole file in a small
+ * RAM buffer, mutated in place, and write it back on picker exit if
+ * anything changed. 4 KB holds ~80 ROM names, more than fits in
+ * the 64-entry NES_PICKER_MAX_ROMS cap anyway. */
+#define FAVS_PATH      "/.favs"
+#define FAVS_BUF_SIZE  4096
+
+static char   favs_buf[FAVS_BUF_SIZE];
+static size_t favs_len   = 0;
+static bool   favs_dirty = false;
+
+static void favs_load(void) {
+    favs_len = 0;
+    favs_dirty = false;
+    FIL f;
+    if (f_open(&f, FAVS_PATH, FA_READ) != FR_OK) return;
+    UINT br = 0;
+    f_read(&f, favs_buf, FAVS_BUF_SIZE - 1, &br);
+    f_close(&f);
+    favs_len = br;
+    favs_buf[favs_len] = 0;
+}
+
+static void favs_save(void) {
+    if (!favs_dirty) return;
+    FIL f;
+    if (f_open(&f, FAVS_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    UINT bw = 0;
+    f_write(&f, favs_buf, (UINT)favs_len, &bw);
+    f_close(&f);
+    favs_dirty = false;
+}
+
+/* Find a name as a complete line in favs_buf. Returns the byte
+ * offset of the line start, or -1 if not present. */
+static int favs_find(const char *name) {
+    size_t name_len = strlen(name);
+    size_t i = 0;
+    while (i < favs_len) {
+        size_t j = i;
+        while (j < favs_len && favs_buf[j] != '\n') j++;
+        size_t line_len = j - i;
+        if (line_len == name_len && memcmp(&favs_buf[i], name, name_len) == 0)
+            return (int)i;
+        i = j + 1;
+    }
+    return -1;
+}
+
+static int nes_picker_is_favorite(const char *name) {
+    return favs_find(name) >= 0;
+}
+
+static void favs_toggle(const char *name) {
+    int off = favs_find(name);
+    if (off >= 0) {
+        /* Remove the existing line. */
+        size_t end = (size_t)off;
+        while (end < favs_len && favs_buf[end] != '\n') end++;
+        if (end < favs_len) end++;
+        size_t remove_len = end - (size_t)off;
+        memmove(&favs_buf[off], &favs_buf[end], favs_len - end);
+        favs_len -= remove_len;
+        favs_buf[favs_len] = 0;
+    } else {
+        /* Append a new line. */
+        size_t name_len = strlen(name);
+        if (favs_len + name_len + 2 >= FAVS_BUF_SIZE) return;
+        memcpy(&favs_buf[favs_len], name, name_len);
+        favs_len += name_len;
+        favs_buf[favs_len++] = '\n';
+        favs_buf[favs_len] = 0;
+    }
+    favs_dirty = true;
+}
 
 /* --- file scan ------------------------------------------------------ */
 
@@ -273,28 +355,33 @@ static void name_no_ext(char *dst, size_t dstsz, const char *src) {
 }
 
 static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
-                      int sel, int top, int max_rows) {
+                      const int *view, int n_view,
+                      int sel, int top, int max_rows,
+                      int filter_favs) {
     fb_clear(fb, COL_BG);
     nes_font_draw(fb, "ThumbyNES", 32, 2, COL_TITLE);
     fb_rect(fb, 0, 10, 128, 1, COL_DIM);
 
     /* Two-line rows: name on top, mapper + size on bottom. */
     const int row_h = 12;
-    for (int i = 0; i < max_rows && (top + i) < n; i++) {
-        int idx = top + i;
+    for (int i = 0; i < max_rows && (top + i) < n_view; i++) {
+        int idx = view[top + i];
         int y = 13 + i * row_h;
-        int hl = (idx == sel);
+        int hl = (top + i == sel);
         if (hl) fb_rect(fb, 0, y - 1, 128, row_h, 0x18C3);
         uint16_t fg = hl ? COL_HIGHLT : COL_FG;
 
         char nm[36];
         name_no_ext(nm, sizeof(nm), e[idx].name);
-        /* Truncate to 31 chars to fit in 128 px at 4 px/glyph
-         * with a 2 px left margin (31 * 4 = 124). */
-        if (strlen(nm) > 31) nm[31] = 0;
-        nes_font_draw(fb, nm, 2, y, fg);
+        if (strlen(nm) > 30) nm[30] = 0;
+        /* Star prefix for favorites — eats one glyph of width. */
+        int is_fav = nes_picker_is_favorite(e[idx].name);
+        char row[36];
+        if (is_fav) snprintf(row, sizeof(row), "*%s", nm);
+        else        snprintf(row, sizeof(row), " %s", nm);
+        nes_font_draw(fb, row, 2, y, fg);
 
-        char meta[28];
+        char meta[32];
         const char *region = e[idx].pal_hint ? "PAL" : "NTSC";
         if (e[idx].mapper == 0xFF) {
             snprintf(meta, sizeof(meta), "??  %luK  %s",
@@ -307,15 +394,34 @@ static void draw_list(uint16_t *fb, const nes_rom_entry *e, int n,
         nes_font_draw(fb, meta, 3, y + 6, COL_DIM);
     }
 
-    /* Footer with paging info. */
-    char ft[24];
-    int page = sel / max_rows + 1;
-    int pages = (n + max_rows - 1) / max_rows;
-    snprintf(ft, sizeof(ft), "%d/%d  pg %d/%d", sel + 1, n, page, pages);
+    /* Footer with paging + filter indicator. */
+    char ft[28];
+    int page  = (n_view > 0) ? sel / max_rows + 1 : 0;
+    int pages = (n_view + max_rows - 1) / max_rows;
+    if (filter_favs) {
+        snprintf(ft, sizeof(ft), "%d/%d %d/%d FAV",
+                  (n_view ? sel + 1 : 0), n_view, page, pages);
+    } else {
+        snprintf(ft, sizeof(ft), "%d/%d  pg %d/%d",
+                  sel + 1, n_view, page, pages);
+    }
     nes_font_draw(fb, ft, 3, FB_H - 7, COL_DIM);
 }
 
 /* --- public entry --------------------------------------------------- */
+
+/* Build the visible-index map for the current filter state. With
+ * the favorites filter off, view[i] = i. With it on, view contains
+ * only the indices of favorited ROMs. Returns the visible count. */
+static int build_view(const nes_rom_entry *entries, int n_entries,
+                       int *view, int filter_favs) {
+    int n = 0;
+    for (int i = 0; i < n_entries; i++) {
+        if (filter_favs && !nes_picker_is_favorite(entries[i].name)) continue;
+        view[n++] = i;
+    }
+    return n;
+}
 
 int nes_picker_run(uint16_t *fb,
                     const nes_rom_entry *entries, int n_entries) {
@@ -331,33 +437,81 @@ int nes_picker_run(uint16_t *fb,
         return -1;
     }
 
+    favs_load();
+
+    int filter_favs = 0;
+    static int view[NES_PICKER_MAX_ROMS];
+    int n_view = build_view(entries, n_entries, view, filter_favs);
+
     /* Edge-detect input. */
     uint8_t prev = 0;
+    int prev_lb = 0;
     while (1) {
         uint8_t b = nes_buttons_read();
         uint8_t pressed = b & ~prev;
         prev = b;
 
-        /* nes_buttons_read returns the PICO-8 LRUDOX layout:
+        /* LB read directly off the GPIO so it isn't tangled up in
+         * nes_buttons_read's diagonal-coalescing logic. */
+        int lb_down = !gpio_get(BTN_LB_GP);
+        int lb_edge = lb_down && !prev_lb;
+        prev_lb = lb_down;
+
+        /* nes_buttons_read returns PICO-8 LRUDOX:
          *   bit0=L bit1=R bit2=U bit3=D bit4=O bit5=X
-         * On the Thumby Color physical face layout the right
-         * button (which the rest of the firmware calls 'A' to
-         * match NES conventions) maps to PICO-8 X = bit 5 (0x20).
-         * The picker uses A to launch and B to nothing for now. */
+         * Right face button (the firmware's NES 'A') maps to X
+         * = bit 5 (0x20). Left face button (NES 'B') maps to O
+         * = bit 4 (0x10) — used here as 'toggle favorite'. */
         if (pressed & 0x04) { /* up */
             if (sel > 0) sel--;
             if (sel < top) top = sel;
         }
         if (pressed & 0x08) { /* down */
-            if (sel < n_entries - 1) sel++;
+            if (sel < n_view - 1) sel++;
             if (sel >= top + max_rows) top = sel - max_rows + 1;
         }
-        if (pressed & 0x20) { /* X = physical A = launch */
-            return sel;
+        if ((pressed & 0x10) && n_view > 0) {
+            /* B = toggle favorite for the highlighted ROM. */
+            int prev_real = view[sel];
+            favs_toggle(entries[prev_real].name);
+            n_view = build_view(entries, n_entries, view, filter_favs);
+            if (filter_favs) {
+                /* The toggled entry might have just disappeared
+                 * from view; reseat selection on the next visible
+                 * entry, or wrap to 0. */
+                int new_sel = 0;
+                for (int i = 0; i < n_view; i++) {
+                    if (view[i] >= prev_real) { new_sel = i; break; }
+                }
+                if (n_view > 0) sel = new_sel; else sel = 0;
+                if (sel < top) top = sel;
+                if (top + max_rows <= sel) top = sel - max_rows + 1;
+                if (top < 0) top = 0;
+            }
         }
-        if (nes_buttons_menu_pressed()) return -1;
+        if ((pressed & 0x20) && n_view > 0) { /* X = physical A = launch */
+            favs_save();
+            return view[sel];
+        }
+        if (lb_edge) {
+            /* LB = toggle favorites filter. Try to keep selection
+             * on the same ROM across the rebuild. */
+            int prev_real = (n_view > 0) ? view[sel] : -1;
+            filter_favs = !filter_favs;
+            n_view = build_view(entries, n_entries, view, filter_favs);
+            int new_sel = 0;
+            for (int i = 0; i < n_view; i++) {
+                if (view[i] == prev_real) { new_sel = i; break; }
+            }
+            sel = new_sel;
+            top = (sel >= max_rows) ? sel - max_rows + 1 : 0;
+        }
+        if (nes_buttons_menu_pressed()) {
+            favs_save();
+            return -1;
+        }
 
-        draw_list(fb, entries, n_entries, sel, top, max_rows);
+        draw_list(fb, entries, n_entries, view, n_view, sel, top, max_rows, filter_favs);
         nes_lcd_wait_idle();
         nes_lcd_present(fb);
 
