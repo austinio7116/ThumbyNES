@@ -100,16 +100,21 @@ static uint8_t read_nes_buttons(void) {
     return m;
 }
 
+/* Scaling modes:
+ *   FIT  — 256×240 → 128×120 nearest-neighbor downscale, centered
+ *          with 4 px letterbox top + bottom. Whole frame visible,
+ *          text often illegible. Default.
+ *   CROP — 1:1 native pixels, showing the centre 128×128 window of
+ *          the 256×240 frame (X 64..191, Y 56..183). Text readable,
+ *          loses 64 px on each side and 56 px top + bottom. */
+typedef enum { SCALE_FIT = 0, SCALE_CROP = 1, SCALE_COUNT } scale_mode_t;
+
 /* 256×240 → 128×120 nearest-neighbor downscale, centered with 4 px
- * black letterbox top + bottom. The source framebuffer is 8-bit
- * palette indices with NES_SCREEN_PITCH (= 272) stride and 8 px
- * of overdraw on the left edge. We sample every other row + col
- * and look up RGB565 from the palette in one pass. */
-static void blit_scaled(uint16_t *fb, const uint8_t *src, int pitch,
-                         const uint16_t *pal) {
-    /* Top letterbox. */
+ * black letterbox. Source is 8-bit palette indices, NES_SCREEN_PITCH
+ * stride, 8 px of overdraw on the left edge. */
+static void blit_fit(uint16_t *fb, const uint8_t *src, int pitch,
+                      const uint16_t *pal) {
     memset(fb, 0, 128 * 4 * 2);
-    /* 120 visible rows starting at fb row 4. */
     for (int dy = 0; dy < 120; dy++) {
         const uint8_t *srow = src + (dy * 2) * pitch + 8 /* overdraw */;
         uint16_t      *drow = fb + (4 + dy) * 128;
@@ -117,8 +122,69 @@ static void blit_scaled(uint16_t *fb, const uint8_t *src, int pitch,
             drow[dx] = pal[srow[dx * 2]];
         }
     }
-    /* Bottom letterbox (4 px). */
     memset(fb + (4 + 120) * 128, 0, 128 * 4 * 2);
+}
+
+/* 1:1 native crop. We copy a 128×128 window starting at NES (64, 56).
+ * That centres the visible area both horizontally (256/2 - 128/2 = 64)
+ * and vertically (240/2 - 128/2 = 56). */
+static void blit_crop(uint16_t *fb, const uint8_t *src, int pitch,
+                       const uint16_t *pal) {
+    const int x0 = 64;
+    const int y0 = 56;
+    for (int dy = 0; dy < 128; dy++) {
+        const uint8_t *srow = src + (y0 + dy) * pitch + 8 /* overdraw */ + x0;
+        uint16_t      *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            drow[dx] = pal[srow[dx]];
+        }
+    }
+}
+
+static void blit(uint16_t *fb, const uint8_t *src, int pitch,
+                  const uint16_t *pal, scale_mode_t mode) {
+    if (mode == SCALE_CROP) blit_crop(fb, src, pitch, pal);
+    else                     blit_fit (fb, src, pitch, pal);
+}
+
+/* --- persisted config ---------------------------------------------- */
+
+/* Tiny /.cfg file: 4-byte magic + bytes for each setting. Versioned
+ * via the magic so future fields don't trip an old file. */
+#define CFG_PATH    "/.cfg"
+#define CFG_MAGIC   0x4E455343u   /* 'NESC' */
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  scale_mode;
+    uint8_t  show_fps;
+    uint8_t  reserved[2];
+} nes_cfg_t;
+
+static void cfg_load(scale_mode_t *scale, bool *show_fps) {
+    FIL f;
+    if (f_open(&f, CFG_PATH, FA_READ) != FR_OK) return;
+    nes_cfg_t c;
+    UINT br = 0;
+    if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br == sizeof(c)
+        && c.magic == CFG_MAGIC) {
+        if (c.scale_mode < SCALE_COUNT) *scale = (scale_mode_t)c.scale_mode;
+        *show_fps = c.show_fps != 0;
+    }
+    f_close(&f);
+}
+
+static void cfg_save(scale_mode_t scale, bool show_fps) {
+    FIL f;
+    if (f_open(&f, CFG_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    nes_cfg_t c = {
+        .magic      = CFG_MAGIC,
+        .scale_mode = (uint8_t)scale,
+        .show_fps   = show_fps ? 1 : 0,
+    };
+    UINT bw = 0;
+    f_write(&f, &c, sizeof(c), &bw);
+    f_close(&f);
 }
 
 int nes_run_rom(const char *name, uint16_t *fb) {
@@ -144,12 +210,17 @@ int nes_run_rom(const char *name, uint16_t *fb) {
      * never trigger an exit AND a toggle for the same press.
      * `menu_consumed` is set when a chord fired so the release
      * doesn't also flip fast-forward. */
-    int  menu_press_ms = 0;
-    int  menu_was_down = 0;
-    int  menu_consumed = 0;
-    bool fast_forward  = false;
-    bool show_fps      = true;
-    bool exit_after    = false;
+    int          menu_press_ms = 0;
+    int          menu_was_down = 0;
+    int          menu_consumed = 0;
+    bool         fast_forward  = false;
+    bool         show_fps      = true;
+    bool         exit_after    = false;
+    scale_mode_t scale_mode    = SCALE_FIT;
+
+    /* Load persisted preferences (scale mode, FPS overlay state). */
+    cfg_load(&scale_mode, &show_fps);
+    bool cfg_dirty = false;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
@@ -174,11 +245,18 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
-            /* Chord detection: while MENU is held, an LB press fires
-             * the FPS toggle exactly once and marks the press as
-             * consumed so the release doesn't also flip fast-forward. */
+            /* Chord detection: while MENU is held, an LB press
+             * toggles the FPS overlay and an RB press cycles the
+             * scaling mode. Either consumes the press so the
+             * eventual release doesn't also flip fast-forward. */
             if (!menu_consumed && !gpio_get(BTN_LB_GP)) {
                 show_fps = !show_fps;
+                cfg_dirty = true;
+                menu_consumed = 1;
+            }
+            if (!menu_consumed && !gpio_get(BTN_RB_GP)) {
+                scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+                cfg_dirty = true;
                 menu_consumed = 1;
             }
             if (menu_press_ms >= 600 && !menu_consumed) {
@@ -208,7 +286,7 @@ int nes_run_rom(const char *name, uint16_t *fb) {
         const uint8_t *frame = nesc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
-            blit_scaled(fb, frame, pitch, pal);
+            blit(fb, frame, pitch, pal, scale_mode);
             /* FPS overlay — top-left corner of the visible area.
              * Drawn directly into the RGB565 framebuffer so it
              * costs nothing extra. Toggle via MENU + LB chord. */
@@ -250,6 +328,7 @@ int nes_run_rom(const char *name, uint16_t *fb) {
 
     /* Persist the battery save before tearing the cart down. */
     battery_save(name);
+    if (cfg_dirty) cfg_save(scale_mode, show_fps);
 
     nesc_shutdown();
     free(rom);
