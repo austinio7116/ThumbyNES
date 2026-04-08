@@ -20,7 +20,8 @@ NES core.
 | 2 | Bench host → confirm device feasibility | ✅ 17,000 fps headless on Linux → ample headroom |
 | 3 | Lift ThumbyP8 device layer, boot to "no ROMs" picker | ✅ LCD/USB/FAT/picker working on hardware |
 | 4 | Wire Nofrendo to LCD + PWM audio + buttons | ✅ Final Fantasy plays on real device with sound |
-| 5 | Fast-forward, battery saves, polish | 🚧 next |
+| 5 | Battery saves + fast-forward toggle | ✅ `.sav` round-trips, MENU tap = 4× speed |
+| 6 | Polish: per-ROM config, palette options, bilinear | 🚧 next |
 
 ## Hardware target
 
@@ -39,7 +40,8 @@ NES core.
 | D-pad | D-pad |
 | LB | Select |
 | RB | Start |
-| MENU (hold ~500 ms) | Return to picker |
+| MENU (tap, < 300 ms) | Toggle 4× fast-forward |
+| MENU (hold ≥ 600 ms) | Return to picker |
 
 ## Repository layout
 
@@ -178,7 +180,9 @@ see `vendor/VENDORING.md` for the pinned commit and any local patches.
 
 Explicit scope cuts to protect the RAM/CPU budget:
 
-- No save states (battery SRAM only — Phase 5 will land per-ROM `.sav`).
+- No save states. Battery-backed PRG-RAM only (per-ROM `.sav` files
+  in the FAT root, e.g. `Zelda.nes` ↔ `Zelda.sav`). Written on exit
+  to picker, restored on next launch.
 - No FDS, no VRC6 / VRC7 / MMC5 expansion audio.
 - No NES 2.0 extended-header support.
 - No netplay / link cable.

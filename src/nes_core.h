@@ -52,5 +52,11 @@ void nesc_set_buttons(uint8_t mask);
  * Returns the number of samples actually written. */
 int  nesc_audio_pull(int16_t *out, int n);
 
+/* Battery-backed PRG-RAM access. Returns NULL / 0 if the loaded
+ * ROM doesn't declare a battery. The pointer is owned by Nofrendo
+ * and remains valid for the lifetime of the loaded cart. */
+uint8_t *nesc_battery_ram   (void);
+size_t   nesc_battery_size  (void);
+
 /* Tear down. */
 void nesc_shutdown(void);

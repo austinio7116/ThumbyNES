@@ -98,6 +98,21 @@ int nesc_audio_pull(int16_t *out, int n)
     return copy;
 }
 
+uint8_t *nesc_battery_ram(void)
+{
+    nes_t *nes = nes_getptr();
+    if (!nes || !nes->cart || !nes->cart->battery) return NULL;
+    if (nes->cart->prg_ram_banks <= 0) return NULL;
+    return nes->cart->prg_ram;
+}
+
+size_t nesc_battery_size(void)
+{
+    nes_t *nes = nes_getptr();
+    if (!nes || !nes->cart || !nes->cart->battery) return 0;
+    return (size_t)nes->cart->prg_ram_banks * ROM_PRG_BANK_SIZE;
+}
+
 void nesc_shutdown(void)
 {
     nofrendo_stop();

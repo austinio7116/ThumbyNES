@@ -20,11 +20,13 @@
 #include "nes_audio_pwm.h"
 #include "nes_buttons.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "ff.h"
 
 /* Pin map mirrors nes_buttons.c. We read raw GPIOs here so we can
  * remap LB/RB to Select/Start without going through the PICO-8
@@ -38,6 +40,49 @@
 #define BTN_RB_GP    22
 #define BTN_B_GP     25
 #define BTN_MENU_GP  26
+
+/* Build the .sav path that pairs with a ROM file. We strip whatever
+ * extension the ROM had and append `.sav` so `Zelda.nes` → `Zelda.sav`,
+ * `Mario (USA).NES` → `Mario (USA).sav`. The buffer must be large
+ * enough for the original name + `.sav` + leading `/` + NUL. */
+static void make_sav_path(char *out, size_t outsz, const char *rom_name) {
+    char base[64];
+    strncpy(base, rom_name, sizeof(base) - 1);
+    base[sizeof(base) - 1] = 0;
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = 0;
+    snprintf(out, outsz, "/%s.sav", base);
+}
+
+static void battery_load(const char *rom_name) {
+    uint8_t *ram = nesc_battery_ram();
+    size_t   sz  = nesc_battery_size();
+    if (!ram || sz == 0) return;
+
+    char path[80];
+    make_sav_path(path, sizeof(path), rom_name);
+
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return;
+    UINT br = 0;
+    f_read(&f, ram, (UINT)sz, &br);
+    f_close(&f);
+}
+
+static void battery_save(const char *rom_name) {
+    uint8_t *ram = nesc_battery_ram();
+    size_t   sz  = nesc_battery_size();
+    if (!ram || sz == 0) return;
+
+    char path[80];
+    make_sav_path(path, sizeof(path), rom_name);
+
+    FIL f;
+    if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    UINT bw = 0;
+    f_write(&f, ram, (UINT)sz, &bw);
+    f_close(&f);
+}
 
 static uint8_t read_nes_buttons(void) {
     uint8_t m = 0;
@@ -82,30 +127,58 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     if (nesc_init(22050) != 0)         { free(rom); return -2; }
     if (nesc_load_rom(rom, sz) != 0)   { free(rom); return -3; }
 
+    /* Restore the battery save (if any) before the cart starts running. */
+    battery_load(name);
+
     const uint16_t *pal   = nesc_palette_rgb565();
     int             pitch = nesc_framebuffer_pitch();
 
-    /* MENU exit detection: require ~500 ms hold so a single
-     * accidental press doesn't bail. */
-    int menu_held_ms = 0;
+    /* MENU is overloaded:
+     *   - Short tap (< 300 ms)        → toggle fast-forward (4× speed)
+     *   - Hold ≥ 600 ms                → exit to picker
+     * The hold-vs-tap decision is made on RELEASE so we don't ever
+     * trigger an exit AND a toggle for the same press. */
+    int  menu_press_ms = 0;
+    int  menu_was_down = 0;
+    bool fast_forward  = false;
+    bool exit_after    = false;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
 
-    while (1) {
+    while (!exit_after) {
         /* Input. */
         nesc_set_buttons(read_nes_buttons());
 
-        /* Exit on long MENU hold. */
-        if (!gpio_get(BTN_MENU_GP)) {
-            menu_held_ms += 16;
-            if (menu_held_ms > 500) break;
+        /* MENU edge / tap / hold detection.
+         * NTSC frame ≈ 16 ms — we use that as the unit. */
+        int menu_down = !gpio_get(BTN_MENU_GP);
+        if (menu_down) {
+            menu_press_ms += 16;
+            menu_was_down = 1;
+            if (menu_press_ms >= 600) {
+                /* Hold confirmed: exit on release (or right now). */
+                exit_after = true;
+                /* Wait for the user to release before bailing so the
+                 * picker doesn't immediately consume the same press. */
+            }
         } else {
-            menu_held_ms = 0;
+            if (menu_was_down) {
+                /* Release. Tap = toggle fast-forward, hold = exit
+                 * (already latched above). */
+                if (menu_press_ms > 0 && menu_press_ms < 300) {
+                    fast_forward = !fast_forward;
+                }
+                menu_press_ms = 0;
+                menu_was_down = 0;
+            }
         }
 
-        /* Run one NTSC frame. */
-        nesc_run_frame();
+        /* Fast-forward: run 4 frames before drawing/audio. We still
+         * want audio out so the player gets feedback they're skipping
+         * — push every 4th frame's worth, drop the rest. */
+        int frame_runs = fast_forward ? 4 : 1;
+        for (int i = 0; i < frame_runs; i++) nesc_run_frame();
 
         /* Video out. */
         const uint8_t *frame = nesc_framebuffer();
@@ -115,12 +188,20 @@ int nes_run_rom(const char *name, uint16_t *fb) {
             nes_lcd_present(fb);
         }
 
-        /* Audio out. */
+        /* Audio out. In fast-forward we'd flood the ring at 4× rate,
+         * so only push the most recent frame's samples. */
         int n = nesc_audio_pull(audio, 1024);
         if (n > 0) nes_audio_pwm_push(audio, n);
     }
 
+    /* Persist the battery save before tearing the cart down. */
+    battery_save(name);
+
     nesc_shutdown();
     free(rom);
+
+    /* Block until MENU is released so the lobby doesn't pick the
+     * same press up as a navigation event. */
+    while (!gpio_get(BTN_MENU_GP)) sleep_ms(10);
     return 0;
 }
