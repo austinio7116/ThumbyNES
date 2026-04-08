@@ -31,8 +31,8 @@ to the repo if you want to flash without setting up the toolchain.
 
 4. **Pick + play.** Up/Down to navigate, **A** to launch.
 
-5. **Hold MENU at boot** to bypass quick-resume / force-reformat
-   (the latter only takes effect if the FAT volume can't be mounted).
+5. **Hold MENU at boot** to force-reformat (only takes effect if
+   the FAT volume can't otherwise be mounted).
 
 ---
 
@@ -71,7 +71,7 @@ to the repo if you want to flash without setting up the toolchain.
 
 | Gesture | Action |
 |---|---|
-| **MENU held** | Skip quick-resume → go directly to the picker. Also forces a FAT reformat if the volume can't be mounted. |
+| **MENU held** | Force a FAT reformat if the volume can't be mounted. (No effect on a healthy volume.) |
 
 ---
 
@@ -109,13 +109,6 @@ The current choice is persisted per-ROM.
 Scale mode, palette, volume, and FPS-overlay state are persisted to
 a sidecar `<romname>.cfg` next to the ROM and its `.sav`. Each game
 remembers its own preferences across sessions.
-
-### Quick-resume
-
-The most recently launched ROM is recorded in `/.last`. On the next
-boot the device skips the picker and jumps straight back into that
-cart — handy for "five minutes of Zelda before bed" use. **Hold MENU
-at boot** to bypass quick-resume and reach the picker instead.
 
 ### Idle sleep
 
@@ -307,7 +300,6 @@ ThumbyNES/
 | `<rom>.nes`     | The ROM image you dropped via USB. |
 | `<rom>.sav`     | Battery-backed PRG-RAM, 8 KB. Auto-saved every 30 s. |
 | `<rom>.cfg`     | Per-ROM scale / palette / volume / FPS-overlay state. |
-| `/.last`        | Base name of the most recently launched ROM (quick-resume). |
 
 ---
 

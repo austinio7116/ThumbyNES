@@ -42,30 +42,6 @@ static uint16_t       fb[128 * 128];
 FATFS                 g_fs;   /* exported to nes_picker for XIP mmap */
 static nes_rom_entry  roms[NES_PICKER_MAX_ROMS];
 
-/* Quick-resume: /.last stores the base name of the most recently
- * launched ROM. On boot, if the file exists AND MENU isn't held,
- * we jump straight back into that cart. Hold MENU at boot to skip
- * the auto-resume and go to the picker instead. */
-#define LAST_PATH "/.last"
-
-static int last_save(const char *name) {
-    FIL f;
-    if (f_open(&f, LAST_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return -1;
-    UINT bw = 0;
-    f_write(&f, name, (UINT)strlen(name), &bw);
-    f_close(&f);
-    return 0;
-}
-
-static int last_load(char *out, size_t outsz) {
-    FIL f;
-    if (f_open(&f, LAST_PATH, FA_READ) != FR_OK) return -1;
-    UINT br = 0;
-    f_read(&f, out, (UINT)(outsz - 1), &br);
-    f_close(&f);
-    out[br] = 0;
-    return (br > 0) ? 0 : -1;
-}
 
 extern volatile int      g_msc_ejected;
 extern volatile uint64_t g_msc_last_op_us;
@@ -245,31 +221,15 @@ int main(void) {
 
     boot_splash();
 
-    /* Quick-resume: if /.last names a ROM that still exists, AND
-     * MENU isn't being held at boot, hand straight off to the
-     * runner. Holding MENU bypasses to the picker. */
-    if (!nes_buttons_menu_pressed()) {
-        char last[NES_PICKER_NAME_MAX];
-        if (last_load(last, sizeof(last)) == 0) {
-            char path[80];
-            snprintf(path, sizeof(path), "/%s", last);
-            FIL f;
-            if (f_open(&f, path, FA_READ) == FR_OK) {
-                f_close(&f);
-                nes_run_rom(last, fb);
-                /* Fall through to the lobby on exit. */
-                while (nes_buttons_menu_pressed()) sleep_ms(10);
-            }
-        }
-    }
+    /* Old firmware versions wrote /.last for a quick-resume feature
+     * that has since been removed. Sweep it away on boot so the
+     * file doesn't sit around as cruft. Harmless if absent. */
+    f_unlink("/.last");
 
     /* Lobby + picker. Loops forever in Phase 3. */
     while (1) {
         int sel = lobby();
         if (sel < 0) continue;
-
-        /* Remember this ROM for quick-resume on next boot. */
-        last_save(roms[sel].name);
 
         /* Hand off to the Nofrendo runner. Returns when the user
          * holds MENU; we then fall back through the lobby for
