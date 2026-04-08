@@ -655,7 +655,7 @@ void ppu_endline(void)
    }
 }
 
-void ppu_renderline(uint8 *bmp, int scanline, bool draw_flag)
+IRAM_ATTR void ppu_renderline(uint8 *bmp, int scanline, bool draw_flag)
 {
    ppu.scanline = scanline;
 

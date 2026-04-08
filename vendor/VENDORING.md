@@ -16,4 +16,17 @@ flash, and (c) tag hot functions with `__not_in_flash_func` for the device
 build. Any such patches are listed below as they happen.
 
 ### Patches applied
-*(none yet)*
+
+1. **`nes/utils.h`** — wrapped `#define IRAM_ATTR` in `#ifndef` so the
+   device build can override it with a platform-specific attribute via
+   `-DIRAM_ATTR=...`. No effect on host builds (still expands to
+   nothing).
+
+2. **`nes/ppu.c`** — added `IRAM_ATTR` to `ppu_renderline()` so it
+   joins `nes6502_execute()` (already tagged upstream) in being
+   placed in `.time_critical.nes` on the device build.
+
+   The Pico SDK linker script copies `.time_critical.*` into SRAM at
+   boot, so the two hottest functions in the emulator run from RAM
+   rather than XIP flash and avoid cache-miss stalls on the inner
+   loops.

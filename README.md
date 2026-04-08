@@ -23,6 +23,7 @@ NES core.
 | 5 | Battery saves + fast-forward toggle | ✅ `.sav` round-trips, MENU tap = 4× speed |
 | 6 | FPS counter, 60 fps cap, scale modes, persisted config | ✅ FIT/CROP toggle, `/.cfg` survives reboots |
 | 7 | Palette cycling, per-ROM config, pannable CROP, picker polish | ✅ 6 palettes, sidecar `.cfg`, mapper/size in list |
+| 8 | Pause-in-CROP, volume, quick-resume, autosave, sleep, IRAM hot loops, boot splash | ✅ "handheld basics" bundle |
 
 ## Hardware target
 
@@ -42,6 +43,7 @@ NES core.
 | LB | Select |
 | RB | Start |
 | MENU (tap, < 300 ms) | Toggle FIT ↔ CROP scaling |
+| MENU + LEFT / RIGHT | Volume −/+ (0..15) |
 | MENU + DOWN (chord) | Toggle 4× fast-forward |
 | MENU + UP (chord) | Cycle palette (6 built-in) |
 | MENU + LB (chord) | Toggle FPS overlay |
@@ -57,15 +59,31 @@ NES core.
   pans** it across the full 256×240 picture. **All NES inputs are
   suppressed in CROP mode** — the cart keeps running but receives no
   buttons, so you can read text or inspect HUDs without the game
-  reacting. Tap MENU again to return to FIT and resume play.
+  reacting. **The cart is fully paused in CROP** — emulation halts
+  and audio goes silent so you can step away from the device without
+  losing your place. Tap MENU again to return to FIT and resume play.
 
 **Palettes:** Nofrendo ships six built-in NES palettes (`NOFRENDO`,
 `COMPOSITE`, `NESCLASSIC`, `NTSC`, `PVM`, `SMOOTH`). Cycle with
 MENU + UP. The current choice is persisted per-ROM.
 
-**Per-ROM config:** scale mode, palette, and FPS-overlay state are
-persisted to a sidecar `<romname>.cfg` next to the ROM and its
+**Per-ROM config:** scale mode, palette, volume, and FPS-overlay state
+are persisted to a sidecar `<romname>.cfg` next to the ROM and its
 `.sav`. Each game remembers its own preferences across sessions.
+
+**Quick-resume:** the most recently launched ROM is recorded in
+`/.last`. On the next boot the device skips the picker and jumps
+straight back into that cart — handy for "five minutes of Zelda
+before bed" use. **Hold MENU at boot** to bypass quick-resume and
+go to the picker instead.
+
+**Auto-save:** battery-backed PRG-RAM is flushed to `.sav` every
+30 s of gameplay (plus on exit), so a flat battery never costs you
+more than half a minute.
+
+**Idle sleep:** after 90 s of no input the device blanks the LCD
+backlight, halts emulation, and writes the battery save. Press any
+button to wake.
 
 ## Repository layout
 
@@ -184,13 +202,17 @@ on the way out.
 
 ### Performance notes
 
-The Nofrendo core compiles to ~55 KB of ARM code. Hot loops
-(`nes6502_execute`, `ppu_renderline`) currently live in XIP flash —
-the Pico SDK XIP cache absorbs most of the cost, but there's a known
-optimisation lever: tag the inner functions with `__not_in_flash_func`
-to copy them into SRAM at boot. So far it hasn't been necessary —
+The Nofrendo core compiles to ~55 KB of ARM code. The two hottest
+inner loops — `nes6502_execute` (the 6502 dispatch) and
+`ppu_renderline` (per-scanline pixel emission) — are placed in SRAM
+via `IRAM_ATTR` (mapped to a `.time_critical.nes` section attribute
+in the device build). The Pico SDK linker script copies that
+section into RAM at boot, so the inner loops dodge XIP flash cache
+miss penalties entirely. Everything else still executes from XIP.
+
 Final Fantasy (MMC1, 256 KB PRG) runs full speed at 60 fps with
-audio glitch-free.
+audio glitch-free. Frame pacing is `sleep_until()`-locked to NTSC
+unless the user holds MENU + DOWN to engage 4× fast-forward.
 
 ## Vendored sources
 

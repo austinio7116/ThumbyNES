@@ -151,3 +151,7 @@ void nes_lcd_present(const uint16_t *fb_rgb565) {
         LCD_PIXELS,
         true);
 }
+
+void nes_lcd_backlight(int on) {
+    gpio_put(PIN_BL, on ? 1 : 0);
+}

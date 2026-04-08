@@ -7,7 +7,12 @@
 #else
 #include <stdio.h>
 #define LOG_PRINTF(level, x...) printf(x)
+/* IRAM_ATTR is left overridable so embedded ports can map it to a
+ * platform-specific "place this in fast RAM" attribute. The Pico
+ * device build supplies it via -DIRAM_ATTR='__attribute__((...))'. */
+#ifndef IRAM_ATTR
 #define IRAM_ATTR
+#endif
 #define CRC32(a, b, c) (0)
 #endif
 

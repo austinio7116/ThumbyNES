@@ -145,19 +145,25 @@ static void blit_crop(uint16_t *fb, const uint8_t *src, int pitch,
 /* --- persisted config ---------------------------------------------- */
 
 /* Per-ROM sidecar (`<rom>.cfg`): a tiny versioned struct. Each game
- * remembers its own scale mode, palette, and FPS-overlay state. */
-#define CFG_MAGIC   0x4E455343u   /* 'NESC' */
+ * remembers its own scale mode, palette, FPS-overlay state, and
+ * volume. The magic was bumped when the volume field was added so
+ * an old (smaller) cfg file is silently treated as defaults. */
+#define CFG_MAGIC   0x4E455344u   /* 'NESD' = NES cfg v2 */
+
+#define VOL_MIN  0
+#define VOL_MAX  15
+#define VOL_DEF  12
 
 typedef struct {
     uint32_t magic;
     uint8_t  scale_mode;
     uint8_t  show_fps;
     uint8_t  palette;
-    uint8_t  reserved;
+    uint8_t  volume;       /* 0..VOL_MAX (linear) */
 } nes_cfg_t;
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
-                      bool *show_fps, int *palette) {
+                      bool *show_fps, int *palette, int *volume) {
     char path[80];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -166,15 +172,16 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
     UINT br = 0;
     if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br == sizeof(c)
         && c.magic == CFG_MAGIC) {
-        if (c.scale_mode < SCALE_COUNT) *scale = (scale_mode_t)c.scale_mode;
+        if (c.scale_mode < SCALE_COUNT)      *scale = (scale_mode_t)c.scale_mode;
         *show_fps = c.show_fps != 0;
-        if (c.palette < NESC_PALETTE_COUNT) *palette = c.palette;
+        if (c.palette < NESC_PALETTE_COUNT)  *palette = c.palette;
+        if (c.volume <= VOL_MAX)             *volume  = c.volume;
     }
     f_close(&f);
 }
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
-                      bool show_fps, int palette) {
+                      bool show_fps, int palette, int volume) {
     char path[80];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -184,11 +191,21 @@ static void cfg_save(const char *rom_name, scale_mode_t scale,
         .scale_mode = (uint8_t)scale,
         .show_fps   = show_fps ? 1 : 0,
         .palette    = (uint8_t)palette,
-        .reserved   = 0,
+        .volume     = (uint8_t)volume,
     };
     UINT bw = 0;
     f_write(&f, &c, sizeof(c), &bw);
     f_close(&f);
+}
+
+/* Linear volume scaling. Hand-coded with int math because dividing
+ * 22050 samples per second on the audio path matters. */
+static void scale_audio(int16_t *buf, int n, int volume) {
+    if (volume >= VOL_MAX) return;
+    if (volume <= 0) { for (int i = 0; i < n; i++) buf[i] = 0; return; }
+    for (int i = 0; i < n; i++) {
+        buf[i] = (int16_t)((int)buf[i] * volume / VOL_MAX);
+    }
 }
 
 int nes_run_rom(const char *name, uint16_t *fb) {
@@ -203,16 +220,34 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     /* Restore the battery save (if any) before the cart starts running. */
     battery_load(name);
 
-    /* Defaults: FIT, fast-forward off, FPS hidden, Nofrendo palette.
-     * Per-ROM /<name>.cfg overrides any of these on load. */
+    /* Defaults: FIT, fast-forward off, FPS hidden, Nofrendo palette,
+     * comfortable mid-volume. Per-ROM /<name>.cfg overrides any of
+     * these on load. */
     int          palette       = 0;
+    int          volume        = VOL_DEF;
     bool         show_fps      = false;
     bool         fast_forward  = false;
     scale_mode_t scale_mode    = SCALE_FIT;
 
-    cfg_load(name, &scale_mode, &show_fps, &palette);
+    cfg_load(name, &scale_mode, &show_fps, &palette, &volume);
     nesc_set_palette(palette);
     bool cfg_dirty = false;
+
+    /* Volume / brightness OSD: shows for ~1 s after a change. */
+    int  osd_text_ms  = 0;
+    char osd_text[24] = {0};
+
+    /* Auto-save battery: triggered every AUTOSAVE_INTERVAL of wall
+     * time when there have been gameplay frames since the last save.
+     * Cheap insurance against power loss. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
+    uint64_t       last_autosave_us     = (uint64_t)time_us_64();
+    int            unsaved_play_frames  = 0;
+
+    /* Idle sleep: dim + halt after IDLE_SLEEP_S of no input. */
+    const int      IDLE_SLEEP_S = 90;
+    uint64_t       last_input_us = (uint64_t)time_us_64();
+    bool           sleeping = false;
 
     const uint16_t *pal   = nesc_palette_rgb565();
     int             pitch = nesc_framebuffer_pitch();
@@ -235,7 +270,8 @@ int nes_run_rom(const char *name, uint16_t *fb) {
     int pan_x = 64;
     int pan_y = 56;
     /* Edge-detect chord buttons so a held press fires once. */
-    int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
+    int prev_lb = 0, prev_up = 0, prev_dn = 0;
+    int prev_lt = 0, prev_rt = 0;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
@@ -255,9 +291,35 @@ int nes_run_rom(const char *name, uint16_t *fb) {
          * NTSC frame ≈ 16 ms — we use that as the unit. */
         int menu_down = !gpio_get(BTN_MENU_GP);
         int lb_down = !gpio_get(BTN_LB_GP);
-        int rb_down = !gpio_get(BTN_RB_GP);
         int up_down = !gpio_get(BTN_UP_GP);
         int dn_down = !gpio_get(BTN_DOWN_GP);
+        int lt_down = !gpio_get(BTN_LEFT_GP);
+        int rt_down = !gpio_get(BTN_RIGHT_GP);
+        int any_input = menu_down || lb_down || up_down || dn_down || lt_down || rt_down
+                        || !gpio_get(BTN_RB_GP) || !gpio_get(BTN_A_GP) || !gpio_get(BTN_B_GP);
+
+        /* --- idle sleep tracking --- */
+        if (any_input) {
+            last_input_us = (uint64_t)time_us_64();
+            if (sleeping) {
+                /* Wake on any press. */
+                sleeping = false;
+                nes_lcd_backlight(1);
+            }
+        }
+        if (!sleeping &&
+            (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
+            /* Persist state before going dark in case the user
+             * never wakes the device back up. */
+            battery_save(name);
+            unsaved_play_frames = 0;
+            sleeping = true;
+            nes_lcd_backlight(0);
+        }
+        if (sleeping) {
+            sleep_ms(50);
+            continue;
+        }
 
         if (menu_down) {
             menu_press_ms += 16;
@@ -274,10 +336,27 @@ int nes_run_rom(const char *name, uint16_t *fb) {
                 nesc_set_palette(palette);
                 cfg_dirty = true;
                 menu_consumed = 1;
+                snprintf(osd_text, sizeof(osd_text), "pal: %s",
+                          nesc_palette_name(palette));
+                osd_text_ms = 1000;
             }
             if (dn_down && !prev_dn) {
                 fast_forward = !fast_forward;
                 menu_consumed = 1;
+            }
+            if (lt_down && !prev_lt) {
+                if (volume > VOL_MIN) volume--;
+                cfg_dirty = true;
+                menu_consumed = 1;
+                snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
+                osd_text_ms = 1000;
+            }
+            if (rt_down && !prev_rt) {
+                if (volume < VOL_MAX) volume++;
+                cfg_dirty = true;
+                menu_consumed = 1;
+                snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
+                osd_text_ms = 1000;
             }
             if (menu_press_ms >= 600 && !menu_consumed) {
                 exit_after = true;
@@ -300,9 +379,10 @@ int nes_run_rom(const char *name, uint16_t *fb) {
             }
         }
         prev_lb = lb_down;
-        prev_rb = rb_down;
         prev_up = up_down;
         prev_dn = dn_down;
+        prev_lt = lt_down;
+        prev_rt = rt_down;
 
         /* Input gating: in CROP mode the cart receives nothing — the
          * D-pad pans the viewport instead so the user can read text
@@ -324,11 +404,15 @@ int nes_run_rom(const char *name, uint16_t *fb) {
             nesc_set_buttons(read_nes_buttons());
         }
 
-        /* Fast-forward: run 4 frames before drawing/audio. We still
-         * want audio out so the player gets feedback they're skipping
-         * — push every 4th frame's worth, drop the rest. */
-        int frame_runs = fast_forward ? 4 : 1;
-        for (int i = 0; i < frame_runs; i++) nesc_run_frame();
+        /* In CROP mode the cart is paused — skip the emulator step
+         * entirely so the user can read text without the game state
+         * advancing. Fast-forward otherwise runs 4 frames per outer
+         * iteration. */
+        if (scale_mode != SCALE_CROP) {
+            int frame_runs = fast_forward ? 4 : 1;
+            for (int i = 0; i < frame_runs; i++) nesc_run_frame();
+            unsaved_play_frames += frame_runs;
+        }
 
         /* Video out. */
         const uint8_t *frame = nesc_framebuffer();
@@ -345,13 +429,32 @@ int nes_run_rom(const char *name, uint16_t *fb) {
                          fast_forward ? " FF" : "");
                 nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);   /* yellow */
             }
+            if (osd_text_ms > 0) {
+                int w = nes_font_width(osd_text);
+                nes_font_draw(fb, osd_text, (128 - w) / 2, 60, 0xFFE0);
+                osd_text_ms -= 16;
+            }
             nes_lcd_present(fb);
         }
 
-        /* Audio out. In fast-forward we'd flood the ring at 4× rate,
-         * so only push the most recent frame's samples. */
-        int n = nesc_audio_pull(audio, 1024);
-        if (n > 0) nes_audio_pwm_push(audio, n);
+        /* Audio out. Skipped in CROP mode (paused) so the speaker
+         * goes silent rather than holding the last frame's samples. */
+        if (scale_mode != SCALE_CROP) {
+            int n = nesc_audio_pull(audio, 1024);
+            if (n > 0) {
+                scale_audio(audio, n, volume);
+                nes_audio_pwm_push(audio, n);
+            }
+        }
+
+        /* Auto-save battery every AUTOSAVE_INTERVAL of wall time
+         * when there have been play frames since the last save. */
+        if (unsaved_play_frames > 0 &&
+            (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
+            battery_save(name);
+            last_autosave_us    = (uint64_t)time_us_64();
+            unsaved_play_frames = 0;
+        }
 
         /* Frame pacing: cap at 60 fps unless the user asked for
          * fast-forward. sleep_until is a no-op if we're already
@@ -377,7 +480,9 @@ int nes_run_rom(const char *name, uint16_t *fb) {
 
     /* Persist the battery save before tearing the cart down. */
     battery_save(name);
-    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, palette);
+    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, palette, volume);
+    /* Make sure the backlight is on for whatever comes next. */
+    nes_lcd_backlight(1);
 
     nesc_shutdown();
     free(rom);

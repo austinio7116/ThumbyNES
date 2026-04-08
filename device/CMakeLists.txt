@@ -43,6 +43,12 @@ target_include_directories(nofrendo PUBLIC
     ${NOFRENDO_DIR}
     ${NOFRENDO_DIR}/nes
 )
+target_compile_definitions(nofrendo PRIVATE
+    # Map IRAM_ATTR to a section attribute the pico-sdk linker
+    # script copies into SRAM at boot. The hot 6502 + PPU loops
+    # then run from RAM instead of XIP flash, dodging cache misses.
+    "IRAM_ATTR=__attribute__((section(\".time_critical.nes\")))"
+)
 target_compile_options(nofrendo PRIVATE
     -O3
     -Wno-array-bounds

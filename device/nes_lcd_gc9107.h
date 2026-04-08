@@ -29,4 +29,8 @@ void nes_lcd_present(const uint16_t *fb_rgb565);
  * the framebuffer for the next frame. */
 void nes_lcd_wait_idle(void);
 
+/* Backlight control. The Thumby Color drives BL via a single GPIO,
+ * so we can only do on/off — no PWM dimming. Used by the sleep timer. */
+void nes_lcd_backlight(int on);
+
 #endif
