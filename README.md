@@ -122,7 +122,8 @@ set it manually the saved cfg wins over auto-detect.
 
 Six built-in NES palettes from Nofrendo: `NOFRENDO`, `COMPOSITE`,
 `NESCLASSIC`, `NTSC`, `PVM`, `SMOOTH`. Cycle in-game with **MENU + UP**.
-The current choice is persisted per-ROM.
+**Default is COMPOSITE** — warmer and closer to a CRT than the
+brighter `NOFRENDO`. The current choice is persisted per-ROM.
 
 ### Save state
 
