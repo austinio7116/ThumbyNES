@@ -62,7 +62,7 @@ static void battery_load(const char *rom_name) {
     uint8_t *ram = gbc_battery_ram();
     size_t   sz  = gbc_battery_size();
     if (!ram || sz == 0) return;
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
@@ -75,7 +75,7 @@ static void battery_save(const char *rom_name) {
     uint8_t *ram = gbc_battery_ram();
     size_t   sz  = gbc_battery_size();
     if (!ram || sz == 0) return;
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
@@ -153,7 +153,7 @@ typedef struct {
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *volume, int *palette) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
@@ -171,7 +171,7 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int volume, int palette) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
@@ -196,13 +196,20 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     const char *name = e->name;
 
     /* Reuse the picker's XIP mmap path so multi-MB cart ROMs don't
-     * touch heap. */
+     * touch heap. We capture the mmap return code so the failure
+     * splash can tell us which leg of the load tripped:
+     *   -32 -> mmap f_open failed
+     *   -33 -> mmap rejected file size
+     *   -34 -> mmap saw start_cluster < 2
+     *   -35 -> mmap chain_is_contiguous returned false (the
+     *          fragmentation case the defragmenter targets) */
     const uint8_t *rom_const = NULL;
     uint8_t       *rom_alloc = NULL;
     size_t         sz        = 0;
-    if (nes_picker_mmap_rom(name, &rom_const, &sz) != 0) {
+    int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
+    if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
-        if (!rom_alloc) return -1;
+        if (!rom_alloc) return -30 + mmap_rc;   /* -32 .. -35 */
         rom_const = rom_alloc;
     }
 

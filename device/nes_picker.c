@@ -128,7 +128,7 @@ static void favs_toggle(const char *name) {
  * region / flags. Returns nonzero if the file can't be read or the
  * iNES magic isn't present. */
 static int read_ines_header(const char *fname, uint8_t hdr[16]) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     snprintf(path, sizeof(path), "/%s", fname);
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return -1;
@@ -227,7 +227,7 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
 }
 
 uint8_t *nes_picker_load_rom(const char *name, size_t *out_len) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     snprintf(path, sizeof(path), "/%s", name);
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return NULL;
@@ -295,7 +295,7 @@ static int chain_is_contiguous(DWORD start_cluster, DWORD n_clusters) {
  * decide which files to rewrite. Same logic the mmap path uses but
  * exposed locally so we can call it without the size checks. */
 static int file_is_contiguous(const char *name) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     snprintf(path, sizeof(path), "/%s", name);
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return 1;  /* assume yes if we can't tell */
@@ -370,7 +370,7 @@ static void defrag_progress(uint16_t *fb, const char *name, int done, int total)
  * original is streamed into it 4 KB at a time, and on success the
  * original is unlinked and the temp is renamed in its place. */
 static int defrag_one(const char *name, uint16_t *fb, int done, int total) {
-    char src_path[80], tmp_path[16];
+    char src_path[NES_PICKER_PATH_MAX], tmp_path[16];
     snprintf(src_path, sizeof(src_path), "/%s", name);
     snprintf(tmp_path, sizeof(tmp_path), DEFRAG_TMP);
 
@@ -480,7 +480,7 @@ int nes_picker_mmap_rom(const char *name,
      * to physical flash before we try to read it via XIP. */
     nes_flash_disk_flush();
 
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     snprintf(path, sizeof(path), "/%s", name);
 
     FIL f;

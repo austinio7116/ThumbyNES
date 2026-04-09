@@ -53,7 +53,7 @@ static void battery_load(const char *rom_name) {
     uint8_t *ram = smsc_battery_ram();
     size_t   sz  = smsc_battery_size();
     if (!ram || sz == 0) return;
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
@@ -66,7 +66,7 @@ static void battery_save(const char *rom_name) {
     uint8_t *ram = smsc_battery_ram();
     size_t   sz  = smsc_battery_size();
     if (!ram || sz == 0) return;
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
@@ -205,7 +205,7 @@ typedef struct {
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *volume, bool *blend) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
@@ -223,7 +223,7 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int volume, bool blend) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
@@ -247,13 +247,17 @@ static void scale_audio(int16_t *buf, int n, int volume) {
 int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     const char *name = e->name;
 
-    /* Reuse the picker's XIP mmap path so big SMS ROMs don't touch heap. */
+    /* Reuse the picker's XIP mmap path so big SMS ROMs don't touch heap.
+     * Capture the mmap return code so the failure splash tells us
+     * exactly why a load failed: -32 = open, -33 = size, -34 = cluster,
+     * -35 = chain not contiguous (the defragmenter target). */
     const uint8_t *rom_const = NULL;
     uint8_t       *rom_alloc = NULL;
     size_t         sz        = 0;
-    if (nes_picker_mmap_rom(name, &rom_const, &sz) != 0) {
+    int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
+    if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
-        if (!rom_alloc) return -1;
+        if (!rom_alloc) return -30 + mmap_rc;
         rom_const = rom_alloc;
     }
 
@@ -298,6 +302,15 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int prev_lt = 0, prev_rt = 0, prev_a = 0;
 
     int16_t audio[1024];
+
+    /* SMS CROP normally pauses the cart, but if cfg.scale_mode was
+     * persisted as CROP from a prior session and we honor it
+     * immediately, the framebuffer is still the post-smsc_init zeros
+     * → black screen with no way out except a MENU tap. Force a
+     * warm-up of ~1 second of cart frames at the start of every
+     * session so the buffer always has the title screen drawn into
+     * it before CROP can take effect. */
+    int sms_warmup_frames = 60;
 
     const uint32_t FRAME_US = 1000000u / (uint32_t)smsc_refresh_rate();
     absolute_time_t next_frame = get_absolute_time();
@@ -424,11 +437,17 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
 
         /* SMS CROP is the only path where the cart pauses; GG CROP
-         * keeps ticking like FIT. */
-        if (gg || scale_mode != SCALE_CROP) {
+         * keeps ticking like FIT. The warm-up window keeps the cart
+         * running for the first ~1 second of every session so the
+         * framebuffer is populated before CROP can freeze it. */
+        if (gg || scale_mode != SCALE_CROP || sms_warmup_frames > 0) {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) smsc_run_frame();
             unsaved_play_frames += frame_runs;
+            if (sms_warmup_frames > 0) {
+                sms_warmup_frames -= frame_runs;
+                if (sms_warmup_frames < 0) sms_warmup_frames = 0;
+            }
         }
 
         const uint8_t *frame = smsc_framebuffer();

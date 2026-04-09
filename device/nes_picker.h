@@ -12,7 +12,13 @@
 #include <stdint.h>
 
 #define NES_PICKER_MAX_ROMS  64
-#define NES_PICKER_NAME_MAX  48
+/* Max file name length stored in nes_rom_entry. Real ROM dumps with
+ * full no-intro / GoodNES tags push 60+ chars (e.g. "Super Mario
+ * Land 2 - 6 Golden Coins (USA, Europe).gb" is 52). 96 covers every
+ * realistic name without burning much SRAM. The dependent path[]
+ * buffers in the runners are sized as NES_PICKER_NAME_MAX + 16. */
+#define NES_PICKER_NAME_MAX  96
+#define NES_PICKER_PATH_MAX  (NES_PICKER_NAME_MAX + 16)
 
 /* Which emulator core handles this ROM. Detected from file extension. */
 #define ROM_SYS_NES  0

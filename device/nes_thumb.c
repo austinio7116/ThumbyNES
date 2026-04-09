@@ -208,7 +208,7 @@ static void scr_path(char *out, size_t outsz, const char *rom_name, int size) {
 
 bool nes_thumb_draw(uint16_t *fb, int x, int y, int size, const char *rom_name) {
     if (size != 32 && size != 64) return false;
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     scr_path(path, sizeof(path), rom_name, size);
 
     FIL f;
@@ -260,7 +260,7 @@ static uint16_t box_avg(const uint16_t *src, int sx, int sy, int n) {
 
 static int write_scr(const uint16_t *src, const char *rom_name, int size, int srcN) {
     /* Source is 128×128; downscale by srcN per output pixel. */
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     scr_path(path, sizeof(path), rom_name, size);
 
     FIL f;

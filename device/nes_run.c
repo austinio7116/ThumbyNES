@@ -62,7 +62,7 @@ static void battery_load(const char *rom_name) {
     size_t   sz  = nesc_battery_size();
     if (!ram || sz == 0) return;
 
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
 
     FIL f;
@@ -77,7 +77,7 @@ static void battery_save(const char *rom_name) {
     size_t   sz  = nesc_battery_size();
     if (!ram || sz == 0) return;
 
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
 
     FIL f;
@@ -207,7 +207,7 @@ typedef struct {
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *palette, int *volume,
                       bool *blend, bool *pal) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
@@ -228,7 +228,7 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int palette, int volume,
                       bool blend, bool pal) {
-    char path[80];
+    char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
@@ -268,9 +268,13 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     uint8_t       *rom_alloc = NULL;
     size_t         sz        = 0;
 
-    if (nes_picker_mmap_rom(name, &rom_const, &sz) != 0) {
+    int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
+    if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
-        if (!rom_alloc) return -1;
+        /* Encode the mmap return code so the splash tells us exactly
+         * why the load failed: -32 = f_open, -33 = size out of range,
+         * -34 = bad start cluster, -35 = chain not contiguous. */
+        if (!rom_alloc) return -30 + mmap_rc;
         rom_const = rom_alloc;
     }
 
@@ -351,6 +355,14 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
+
+    /* CROP normally pauses the cart, but if cfg.scale_mode was
+     * persisted as CROP from a prior session and we honor it from
+     * frame 0, the framebuffer is still the post-nesc_init zeros and
+     * the user gets a black screen. Force ~1 second of cart frames
+     * at the start of every session so the buffer is populated
+     * before CROP can take over. */
+    int nes_warmup_frames = 60;
 
     /* Frame pacing + FPS counter. Cap at the cart's native refresh
      * rate (60 NTSC, 50 PAL) so it runs at original-hardware speed
@@ -516,12 +528,20 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         /* In CROP mode the cart is paused — skip the emulator step
          * entirely so the user can read text without the game state
-         * advancing. Fast-forward otherwise runs 4 frames per outer
+         * advancing. The warm-up window keeps the cart running for
+         * the first ~1 second of every session so the framebuffer is
+         * populated before CROP can freeze it (otherwise launching a
+         * cart whose cfg saved scale_mode = CROP shows a black
+         * screen). Fast-forward otherwise runs 4 frames per outer
          * iteration. */
-        if (scale_mode != SCALE_CROP) {
+        if (scale_mode != SCALE_CROP || nes_warmup_frames > 0) {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) nesc_run_frame();
             unsaved_play_frames += frame_runs;
+            if (nes_warmup_frames > 0) {
+                nes_warmup_frames -= frame_runs;
+                if (nes_warmup_frames < 0) nes_warmup_frames = 0;
+            }
         }
 
         /* Video out. */
