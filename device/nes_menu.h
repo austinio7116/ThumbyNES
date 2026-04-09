@@ -27,6 +27,8 @@ typedef enum {
     NES_MENU_KIND_TOGGLE,    /* bool: LEFT/RIGHT or A flips           */
     NES_MENU_KIND_SLIDER,    /* int with min/max                       */
     NES_MENU_KIND_CHOICE,    /* int index into named choices array     */
+    NES_MENU_KIND_INFO,      /* non-interactive: label + info_text;    *
+                              * optional bar via value_ptr/min/max     */
 } nes_menu_kind_t;
 
 typedef struct {
@@ -39,6 +41,7 @@ typedef struct {
     bool              enabled;         /* greyed-out + unselectable when false */
     int               action_id;       /* ACTION — returned to caller */
     const char       *suffix;          /* optional trailing hint, e.g. "next launch" */
+    const char       *info_text;       /* INFO — value column text (precomputed) */
 } nes_menu_item_t;
 
 typedef enum {

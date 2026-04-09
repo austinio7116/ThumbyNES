@@ -167,6 +167,7 @@ add_executable(nesrun_device
     nes_font.c
     nes_thumb.c
     nes_menu.c
+    nes_battery.c
     thumby_state_bridge.c
     nes_run.c
     sms_run.c
@@ -194,6 +195,7 @@ target_link_libraries(nesrun_device PRIVATE
     hardware_irq
     hardware_flash
     hardware_sync
+    hardware_adc
     tinyusb_device
     tinyusb_board
 )

@@ -93,6 +93,22 @@ static void darken_fb(uint16_t *fb) {
     }
 }
 
+/* Thin progress bar without an outline — used for the INFO row bar
+ * strips where the slider's 1 px outline would consume the entire
+ * height of a 2 px tall bar and leave nothing for the fill. */
+static void draw_thin_bar(uint16_t *fb, int x, int y, int w, int h,
+                           int value, int vmin, int vmax,
+                           uint16_t fg, uint16_t bg) {
+    fill_rect(fb, x, y, w, h, bg);
+    int span = vmax - vmin;
+    if (span <= 0) return;
+    int v = value - vmin;
+    if (v < 0) v = 0;
+    if (v > span) v = span;
+    int fill_w = (w * v) / span;
+    if (fill_w > 0) fill_rect(fb, x, y, fill_w, h, fg);
+}
+
 /* Draw a horizontal slider bar inside (x, y, w, h) representing
  * `value` between `vmin` and `vmax`. */
 static void draw_slider(uint16_t *fb, int x, int y, int w, int h,
@@ -110,16 +126,16 @@ static void draw_slider(uint16_t *fb, int x, int y, int w, int h,
     fill_rect(fb, x + 1, y + 1, fill_w, h - 2, fg);
 }
 
-/* Find the next selectable item (skipping disabled rows) starting
- * from `from` in direction `dir` (+1 or −1). Returns the new index,
- * or `from` if nothing is found. */
+/* Find the next selectable item (skipping disabled / INFO rows)
+ * starting from `from` in direction `dir` (+1 or −1). Returns the
+ * new index, or `from` if nothing is found. */
 static int seek_selectable(const nes_menu_item_t *items, int n, int from, int dir) {
     int i = from;
     for (int tries = 0; tries < n; tries++) {
         i += dir;
         if (i < 0)  i = n - 1;
         if (i >= n) i = 0;
-        if (items[i].enabled) return i;
+        if (items[i].enabled && items[i].kind != NES_MENU_KIND_INFO) return i;
     }
     return from;
 }
@@ -207,6 +223,22 @@ static void draw_menu(uint16_t       *fb_dim,    /* the darkened backdrop */
             if (it->choices && *it->value_ptr >= 0
                 && *it->value_ptr < it->num_choices) {
                 snprintf(val, sizeof(val), "%s", it->choices[*it->value_ptr]);
+            }
+            break;
+        case NES_MENU_KIND_INFO:
+            /* Custom precomputed value text. Optionally a fractional
+             * fill bar drawn as a thin strip along the bottom of the
+             * row (so it doesn't fight with the text on the same
+             * line). */
+            if (it->info_text) snprintf(val, sizeof(val), "%s", it->info_text);
+            if (it->value_ptr && it->max > it->min) {
+                int bar_x = 8;
+                int bar_y = y + ROW_H - 3;
+                int bar_w = FB_W - 16;
+                draw_thin_bar(fb, bar_x, bar_y, bar_w, 2,
+                               *it->value_ptr, it->min, it->max,
+                               COL_HIGHLT /* green fill */,
+                               0x39E7     /* dim grey background */);
             }
             break;
         }

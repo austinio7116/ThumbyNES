@@ -20,4 +20,10 @@
  * exist. */
 int nes_run_rom(const nes_rom_entry *e, uint16_t *fb);
 
+/* Peek the per-cart overclock override stored in the cart's .cfg.
+ * Returns the MHz value (one of the four allowed clocks) or 0 if
+ * the cfg is missing, doesn't have the field, or has it set to 0
+ * (= "use the global default"). */
+int nes_run_clock_override(const char *rom_name);
+
 #endif

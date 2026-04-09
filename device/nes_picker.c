@@ -14,6 +14,8 @@
 #include "nes_lcd_gc9107.h"
 #include "nes_buttons.h"
 #include "nes_thumb.h"
+#include "nes_menu.h"
+#include "nes_battery.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -553,6 +555,89 @@ static void format_meta(char *out, size_t outsz, const nes_rom_entry *e) {
                                                  (unsigned long)(e->size / 1024), region);
 }
 
+/* --- global preferences (volume etc.) ------------------------------ */
+
+#define GLOBAL_PATH       "/.global"
+#define GLOBAL_MAGIC      0x47424C31u   /* 'GBL1' */
+#define VOL_DEFAULT       15
+#define VOL_LIMIT         30
+#define CLOCK_DEFAULT_MHZ 250
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  volume;
+    uint8_t  _pad;
+    uint16_t clock_mhz;
+} picker_global_t;
+
+static int g_volume_cached = -1;
+static int g_clock_cached  = -1;
+
+static int valid_clock_mhz(int m) {
+    return m == 125 || m == 150 || m == 200 || m == 250;
+}
+
+static void global_load(void) {
+    if (g_volume_cached >= 0 && g_clock_cached >= 0) return;
+    g_volume_cached = VOL_DEFAULT;
+    g_clock_cached  = CLOCK_DEFAULT_MHZ;
+    FIL f;
+    if (f_open(&f, GLOBAL_PATH, FA_READ) != FR_OK) return;
+    picker_global_t g = {0};
+    UINT br = 0;
+    f_read(&f, &g, sizeof(g), &br);
+    f_close(&f);
+    if (br < 4 || g.magic != GLOBAL_MAGIC) return;
+    if (g.volume <= VOL_LIMIT) g_volume_cached = g.volume;
+    /* The clock_mhz field was added in a later version of the file —
+     * older 8-byte writes may have left it as 0 or arbitrary, so
+     * fall back to the default unless the value validates. */
+    if (br >= sizeof(g) && valid_clock_mhz(g.clock_mhz)) {
+        g_clock_cached = g.clock_mhz;
+    }
+}
+
+static void global_save(void) {
+    picker_global_t g = {
+        .magic     = GLOBAL_MAGIC,
+        .volume    = (uint8_t)(g_volume_cached < 0 ? VOL_DEFAULT : g_volume_cached),
+        ._pad      = 0,
+        .clock_mhz = (uint16_t)(g_clock_cached  < 0 ? CLOCK_DEFAULT_MHZ : g_clock_cached),
+    };
+    FIL f;
+    if (f_open(&f, GLOBAL_PATH, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    UINT bw = 0;
+    f_write(&f, &g, sizeof(g), &bw);
+    f_close(&f);
+}
+
+int nes_picker_global_volume(void) {
+    global_load();
+    return g_volume_cached;
+}
+
+void nes_picker_global_set_volume(int v) {
+    if (v < 0)         v = 0;
+    if (v > VOL_LIMIT) v = VOL_LIMIT;
+    if (v == g_volume_cached) return;
+    g_volume_cached = v;
+    global_save();
+    nes_flash_disk_flush();
+}
+
+int nes_picker_global_clock_mhz(void) {
+    global_load();
+    return g_clock_cached;
+}
+
+void nes_picker_global_set_clock_mhz(int mhz) {
+    if (!valid_clock_mhz(mhz)) return;
+    if (mhz == g_clock_cached) return;
+    g_clock_cached = mhz;
+    global_save();
+    nes_flash_disk_flush();
+}
+
 /* --- view persistence ---------------------------------------------- */
 
 #define VIEW_PATH "/.picker_view"
@@ -576,9 +661,15 @@ typedef struct {
     uint8_t tab;    /* TAB_*                  */
     uint8_t sort;   /* SORT_*                 */
     uint8_t _pad;
+    /* Per-tab last-selected ROM name. Empty string == no memory.
+     * Loaded from /.picker_view if the file is large enough; older
+     * files (4-byte version) leave the array zero-filled which the
+     * picker treats as "no remembered selection". */
+    char    tab_sel[TAB_COUNT][NES_PICKER_NAME_MAX];
 } picker_pref_t;
 
 static void pref_load(picker_pref_t *p) {
+    memset(p, 0, sizeof(*p));
     p->view = VIEW_HERO;
     p->tab  = TAB_NES;
     p->sort = SORT_ALPHA;
@@ -590,6 +681,11 @@ static void pref_load(picker_pref_t *p) {
     if (p->view >  VIEW_LIST ) p->view = VIEW_HERO;
     if (p->tab  >= TAB_COUNT ) p->tab  = TAB_NES;
     if (p->sort >= SORT_COUNT) p->sort = SORT_ALPHA;
+    /* Defensive: clamp every tab_sel string to the buffer length so
+     * a partially-truncated file can't cause an unterminated read. */
+    for (int t = 0; t < TAB_COUNT; t++) {
+        p->tab_sel[t][NES_PICKER_NAME_MAX - 1] = 0;
+    }
 }
 
 static void pref_save(const picker_pref_t *p) {
@@ -831,6 +927,19 @@ static int reseat_sel(int *view, int n_view, int prev_real) {
     return best;
 }
 
+/* Find the entry in the current view whose name matches `target`,
+ * or 0 if not found / target is empty. Used by the per-tab selection
+ * memory to restore "the rom you were on last time you visited this
+ * tab". */
+static int sel_by_name(const nes_rom_entry *entries, const int *view,
+                        int n_view, const char *target) {
+    if (!target || !target[0]) return 0;
+    for (int i = 0; i < n_view; i++) {
+        if (strcmp(entries[view[i]].name, target) == 0) return i;
+    }
+    return 0;
+}
+
 /* Delete a ROM and its sidecars (.sav .cfg .scr32 .scr64). Also
  * removes it from the favorites list. Returns 0 on success. */
 static int delete_rom_and_sidecars(const char *name) {
@@ -884,15 +993,19 @@ int nes_picker_run(uint16_t *fb,
 
     static int view[NES_PICKER_MAX_ROMS];
     int n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
-    int sel = 0, top = 0;
+    /* Restore per-tab selection from the saved name. Falls back to
+     * 0 if the file isn't there any more or no name was remembered. */
+    int sel = sel_by_name(entries, view, n_view, pref.tab_sel[pref.tab]);
+    int top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
 
     uint8_t prev = 0;
     int marquee = 0;          /* horizontal scroll offset for hero title */
     int last_sel = -1;        /* reset marquee on selection change       */
 
-    /* MENU short-tap vs hold disambiguation. */
+    /* MENU short-tap detection — opens the picker menu. */
     int menu_press_ms = 0;
-    int menu_consumed = 0;    /* set when hold-fire happens; release is then ignored */
+    int menu_consumed = 0;
+    int open_menu     = 0;
 
     /* B short-tap vs long-hold-to-delete disambiguation.
      *   <  300 ms : toggle favorite (on release)
@@ -945,38 +1058,30 @@ int nes_picker_run(uint16_t *fb,
         if (lb_edge) tab_dir = -1;
         if (rb_edge) tab_dir = +1;
         if (tab_dir) {
-            int prev_real = (n_view > 0) ? view[sel] : -1;
+            /* Save the current tab's selection so we can come back
+             * to the same ROM later. */
+            if (n_view > 0) {
+                strncpy(pref.tab_sel[pref.tab],
+                         entries[view[sel]].name,
+                         NES_PICKER_NAME_MAX - 1);
+                pref.tab_sel[pref.tab][NES_PICKER_NAME_MAX - 1] = 0;
+            }
             for (int tries = 0; tries < TAB_COUNT; tries++) {
                 pref.tab = (pref.tab + TAB_COUNT + tab_dir) % TAB_COUNT;
                 if (counts[pref.tab] > 0) break;
             }
             n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
-            sel = reseat_sel(view, n_view, prev_real);
+            /* Restore the new tab's last-known selection. */
+            sel = sel_by_name(entries, view, n_view, pref.tab_sel[pref.tab]);
             top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
         }
 
-        /* ----- MENU: short tap = toggle view, hold = cycle sort ----- */
+        /* ----- MENU: tap to open picker menu ----- */
         if (nes_buttons_menu_pressed()) {
             menu_press_ms += 16;
-            if (menu_press_ms >= 500 && !menu_consumed) {
-                /* Long-press fires once when the threshold is crossed. */
-                pref.sort = (pref.sort + 1) % SORT_COUNT;
-                int prev_real = (n_view > 0) ? view[sel] : -1;
-                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
-                sel = reseat_sel(view, n_view, prev_real);
-                top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
-                snprintf(osd, sizeof(osd), "sort: %s", sort_label(pref.sort));
-                osd_ms = 900;
-                menu_consumed = 1;
-            }
         } else {
             if (menu_press_ms > 0 && !menu_consumed) {
-                /* Short tap on release: toggle hero <-> list. */
-                pref.view = (pref.view == VIEW_HERO) ? VIEW_LIST : VIEW_HERO;
-                top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
-                snprintf(osd, sizeof(osd),
-                          pref.view == VIEW_HERO ? "view: hero" : "view: list");
-                osd_ms = 900;
+                open_menu = 1;
             }
             menu_press_ms = 0;
             menu_consumed = 0;
@@ -1033,6 +1138,12 @@ int nes_picker_run(uint16_t *fb,
 
         /* A (PICO-8 X = bit 5) = launch. */
         if ((pressed & 0x20) && n_view > 0) {
+            /* Remember which ROM the user just launched so the
+             * picker comes back here when they exit the game. */
+            strncpy(pref.tab_sel[pref.tab],
+                     entries[view[sel]].name,
+                     NES_PICKER_NAME_MAX - 1);
+            pref.tab_sel[pref.tab][NES_PICKER_NAME_MAX - 1] = 0;
             favs_save();
             pref_save(&pref);
             return view[sel];
@@ -1070,6 +1181,134 @@ int nes_picker_run(uint16_t *fb,
                 pref_save(&pref);
                 return -1;
             }
+        }
+
+        /* ----- picker menu (MENU tap) ----- */
+        if (open_menu) {
+            open_menu = 0;
+
+            int v_view = (pref.view == VIEW_HERO) ? 0 : 1;
+            int v_sort = pref.sort;
+            int v_vol  = nes_picker_global_volume();
+            int v_clock_mhz = nes_picker_global_clock_mhz();
+            int v_clock = (v_clock_mhz == 125) ? 0
+                        : (v_clock_mhz == 150) ? 1
+                        : (v_clock_mhz == 200) ? 2 : 3;
+
+            /* Storage info — read once when the menu opens. */
+            DWORD free_clusters = 0;
+            FATFS *fs_ptr = NULL;
+            uint32_t total_kb = 0, free_kb = 0;
+            if (f_getfree("", &free_clusters, &fs_ptr) == FR_OK && fs_ptr) {
+                uint32_t bytes_per_cluster = (uint32_t)fs_ptr->csize * 512u;
+                uint32_t total_clusters    = (uint32_t)(fs_ptr->n_fatent - 2);
+                total_kb = (total_clusters * bytes_per_cluster) / 1024u;
+                free_kb  = ((uint32_t)free_clusters * bytes_per_cluster) / 1024u;
+            }
+            uint32_t used_kb = (total_kb > free_kb) ? (total_kb - free_kb) : 0;
+            int v_storage_used_kb = (int)used_kb;
+            int v_storage_total_kb = (int)total_kb;
+            char storage_text[24];
+            snprintf(storage_text, sizeof(storage_text), "%lu.%02lu/%lu.%02luMB",
+                      (unsigned long)(used_kb / 1024),
+                      (unsigned long)((used_kb % 1024) * 100 / 1024),
+                      (unsigned long)(total_kb / 1024),
+                      (unsigned long)((total_kb % 1024) * 100 / 1024));
+
+            /* Battery info. */
+            int   v_batt_pct  = nes_battery_percent();
+            float batt_v      = nes_battery_voltage();
+            bool  charging    = nes_battery_charging();
+            char  battery_text[24];
+            int   batt_v_int  = (int)batt_v;
+            int   batt_v_dec  = (int)((batt_v - batt_v_int) * 100.0f + 0.5f);
+            if (charging) {
+                snprintf(battery_text, sizeof(battery_text), "CHRG %d.%02dV",
+                          batt_v_int, batt_v_dec);
+            } else {
+                snprintf(battery_text, sizeof(battery_text), "%d%% %d.%02dV",
+                          v_batt_pct, batt_v_int, batt_v_dec);
+            }
+
+            char about_text[24];
+            extern uint32_t __flash_binary_end;   /* not used; keeps line short */
+            (void)__flash_binary_end;
+            snprintf(about_text, sizeof(about_text), "ThumbyNES dev");
+
+            static const char * const view_choices[]  = { "HERO", "LIST" };
+            static const char * const sort_choices[]  = { "ALPHA", "FAVS", "SIZE" };
+            static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz" };
+            static const int          clock_mhz[]     = {  125,      150,      200,      250 };
+
+            enum { ACT_NONE, ACT_DEFRAG };
+
+            nes_menu_item_t items[] = {
+                { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
+                  .enabled = true, .action_id = ACT_NONE },
+                { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
+                  .value_ptr = &v_vol, .min = 0, .max = VOL_LIMIT, .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 4,
+                  .enabled = true, .suffix = "next launch" },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
+                  .value_ptr = &v_view, .choices = view_choices, .num_choices = 2,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Sort",
+                  .value_ptr = &v_sort, .choices = sort_choices, .num_choices = 3,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_INFO, .label = "Battery",
+                  .info_text = battery_text,
+                  .value_ptr = &v_batt_pct, .min = 0, .max = 100,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_INFO, .label = "Storage",
+                  .info_text = storage_text,
+                  .value_ptr = &v_storage_used_kb, .min = 0,
+                  .max = v_storage_total_kb > 0 ? v_storage_total_kb : 1,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Defragment now",
+                  .enabled = true, .action_id = ACT_DEFRAG },
+                { .kind = NES_MENU_KIND_INFO, .label = "About",
+                  .info_text = about_text, .enabled = true },
+            };
+
+            nes_menu_result_t r = nes_menu_run(fb, "PICKER", "settings",
+                                                items, sizeof(items) / sizeof(items[0]));
+
+            /* Apply value changes. */
+            if (v_vol != nes_picker_global_volume()) {
+                nes_picker_global_set_volume(v_vol);
+            }
+            int new_mhz = clock_mhz[v_clock];
+            if (new_mhz != nes_picker_global_clock_mhz()) {
+                nes_picker_global_set_clock_mhz(new_mhz);
+                snprintf(osd, sizeof(osd), "clock: %d (next)", new_mhz);
+                osd_ms = 1500;
+            }
+            int new_view = (v_view == 0) ? VIEW_HERO : VIEW_LIST;
+            if (new_view != pref.view) { pref.view = new_view; }
+            if (v_sort != pref.sort) {
+                pref.sort = v_sort;
+                int prev_real = (n_view > 0) ? view[sel] : -1;
+                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+                sel = reseat_sel(view, n_view, prev_real);
+                top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+            }
+
+            if (r.kind == NES_MENU_ACTION && r.action_id == ACT_DEFRAG) {
+                int n = nes_picker_defrag(fb);
+                snprintf(osd, sizeof(osd), "defrag: %d files", n);
+                osd_ms = 1500;
+                /* Re-scan after the rewrite — file metadata may have
+                 * shifted even though contents are the same. */
+                int prev_real = (n_view > 0) ? view[sel] : -1;
+                n_entries  = nes_picker_scan(entries, NES_PICKER_MAX_ROMS);
+                *n_entries_io = n_entries;
+                tab_counts(entries, n_entries, counts);
+                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+                sel = reseat_sel(view, n_view, prev_real);
+            }
+
+            pref_save(&pref);
         }
 
         /* Reset marquee whenever the highlighted ROM changes. */

@@ -81,4 +81,20 @@ int nes_picker_mmap_rom(const char *name,
  * files so USB stays alive while it runs. */
 int nes_picker_defrag(uint16_t *fb);
 
+/* Global preferences — applies across every cart. Lives in /.global
+ * on the FAT volume. The picker menu and the in-game menus both
+ * adjust the same values; per-cart .cfg sidecars no longer carry
+ * volume.
+ *
+ * Overclock choices are MHz values: 125 / 150 / 200 / 250. The
+ * default is 250 (the same fixed clock the firmware booted with
+ * before this option existed). Setting takes effect on the next
+ * ROM launch — nes_device_main re-applies the saved value before
+ * each runner starts.  */
+int  nes_picker_global_volume(void);
+void nes_picker_global_set_volume(int v);
+
+int  nes_picker_global_clock_mhz(void);
+void nes_picker_global_set_clock_mhz(int mhz);
+
 #endif

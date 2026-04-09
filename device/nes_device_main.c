@@ -230,6 +230,20 @@ int main(void) {
      * file doesn't sit around as cruft. Harmless if absent. */
     f_unlink("/.last");
 
+    /* Apply the saved overclock from /.global. We bootstrap at the
+     * 250 MHz default above so the LCD splashes can render before
+     * the FAT volume is mounted; once we know the user's preference
+     * we re-clock and re-init the timing-sensitive peripherals (LCD
+     * SPI dividers and audio PWM IRQ rate). */
+    {
+        int target_mhz = nes_picker_global_clock_mhz();
+        if (target_mhz != 250 && target_mhz >= 50 && target_mhz <= 400) {
+            set_sys_clock_khz((uint32_t)target_mhz * 1000u, true);
+            nes_lcd_init();
+            nes_audio_pwm_init();
+        }
+    }
+
     /* Defragment any large fragmented files left over from previous
      * USB sessions. ROMs > 256 KB rely on the XIP mmap path; if their
      * flash file is fragmented the runner falls back to malloc and
@@ -302,9 +316,33 @@ int main(void) {
     }
 
     /* Lobby + picker. Loops forever in Phase 3. */
+    int current_clock_mhz = nes_picker_global_clock_mhz();
     while (1) {
         int sel = lobby();
         if (sel < 0) continue;
+
+        /* Re-apply the saved overclock before launching. Preference
+         * order:
+         *   1. Per-cart override stored in the ROM's .cfg
+         *   2. Global value in /.global
+         * Clock changes have to happen between sessions because the
+         * cart cores set up audio/LCD against the current sys_clock. */
+        {
+            int per_cart = 0;
+            switch (roms[sel].system) {
+            case ROM_SYS_NES: per_cart = nes_run_clock_override(roms[sel].name); break;
+            case ROM_SYS_GB:  per_cart = gb_run_clock_override (roms[sel].name); break;
+            default:          per_cart = sms_run_clock_override(roms[sel].name); break;
+            }
+            int target = per_cart ? per_cart : nes_picker_global_clock_mhz();
+            if (target != current_clock_mhz
+                && target >= 50 && target <= 400) {
+                set_sys_clock_khz((uint32_t)target * 1000u, true);
+                nes_lcd_init();
+                nes_audio_pwm_init();
+                current_clock_mhz = target;
+            }
+        }
 
         /* Hand off to the Nofrendo runner. Returns when the user
          * holds MENU; we then fall back through the lobby for

@@ -30,6 +30,7 @@
 #include "nes_menu.h"
 #include "nes_flash_disk.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,9 +139,10 @@ static void blit_crop_gb(uint16_t *fb, const uint8_t *src,
 
 #define CFG_MAGIC   0x47424345u   /* 'GBCE' */
 
-#define VOL_MIN  0
-#define VOL_MAX  15
-#define VOL_DEF  12
+#define VOL_MIN    0
+#define VOL_UNITY 15
+#define VOL_MAX  30
+#define VOL_DEF  15
 
 typedef enum { SCALE_FIT = 0, SCALE_CROP = 1, SCALE_COUNT } scale_mode_t;
 
@@ -151,30 +153,36 @@ typedef struct {
     uint8_t  volume;
     uint8_t  palette;
     uint8_t  reserved[4];
+    uint16_t clock_mhz;       /* 0 = use global; otherwise per-cart override */
+    uint16_t _pad2;
 } gb_cfg_t;
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
-                      bool *show_fps, int *volume, int *palette) {
-    (void)scale;   /* scale_mode never persisted — always boot in FIT
-                    * for consistency with the NES / SMS runners.   */
+                      bool *show_fps, int *volume, int *palette, int *clock_mhz) {
+    (void)scale;
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return;
-    gb_cfg_t c;
+    gb_cfg_t c = {0};
     UINT br = 0;
-    if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br == sizeof(c)
+    if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br >= 4
         && c.magic == CFG_MAGIC) {
-        *show_fps = c.show_fps != 0;
-        if (c.volume <= VOL_MAX)           *volume = c.volume;
-        if (c.palette < GBC_PALETTE_COUNT) *palette = c.palette;
+        if (br >= offsetof(gb_cfg_t, clock_mhz)) {
+            *show_fps = c.show_fps != 0;
+            if (c.volume <= VOL_MAX)           *volume = c.volume;
+            if (c.palette < GBC_PALETTE_COUNT) *palette = c.palette;
+        }
+        if (clock_mhz && br >= sizeof(c)) {
+            *clock_mhz = c.clock_mhz;
+        }
     }
     f_close(&f);
 }
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
-                      bool show_fps, int volume, int palette) {
-    (void)scale;   /* always written as FIT — see cfg_load comment. */
+                      bool show_fps, int volume, int palette, int clock_mhz) {
+    (void)scale;
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -183,17 +191,37 @@ static void cfg_save(const char *rom_name, scale_mode_t scale,
         .magic = CFG_MAGIC, .scale_mode = (uint8_t)SCALE_FIT,
         .show_fps = show_fps ? 1 : 0, .volume = (uint8_t)volume,
         .palette = (uint8_t)palette, .reserved = {0,0,0,0},
+        .clock_mhz = (uint16_t)clock_mhz, ._pad2 = 0,
     };
     UINT bw = 0;
     f_write(&f, &c, sizeof(c), &bw);
     f_close(&f);
 }
 
+int gb_run_clock_override(const char *rom_name) {
+    char path[NES_PICKER_PATH_MAX];
+    make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return 0;
+    gb_cfg_t c = {0};
+    UINT br = 0;
+    f_read(&f, &c, sizeof(c), &br);
+    f_close(&f);
+    if (br < sizeof(c) || c.magic != CFG_MAGIC) return 0;
+    return (int)c.clock_mhz;
+}
+
+/* See nes_run.c for the rationale — VOL_UNITY=15 is 1.0x and
+ * VOL_MAX=30 is 2.0x with hard clipping at the int16 boundary. */
 static void scale_audio(int16_t *buf, int n, int volume) {
-    if (volume >= VOL_MAX) return;
+    if (volume == VOL_UNITY) return;
     if (volume <= 0) { for (int i = 0; i < n; i++) buf[i] = 0; return; }
-    for (int i = 0; i < n; i++)
-        buf[i] = (int16_t)((int)buf[i] * volume / VOL_MAX);
+    for (int i = 0; i < n; i++) {
+        int32_t s = (int32_t)buf[i] * volume / VOL_UNITY;
+        if (s >  32767) s =  32767;
+        if (s < -32768) s = -32768;
+        buf[i] = (int16_t)s;
+    }
 }
 
 int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
@@ -238,7 +266,10 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     bool         show_fps     = false;
     bool         fast_forward = false;
     scale_mode_t scale_mode   = SCALE_FIT;
-    cfg_load(name, &scale_mode, &show_fps, &volume, &palette);
+    int  cart_clock_mhz = 0;
+    cfg_load(name, &scale_mode, &show_fps, &volume, &palette, &cart_clock_mhz);
+    /* Volume is global across all carts now — pull it from /.global. */
+    volume = nes_picker_global_volume();
     gbc_set_palette(palette);
     bool cfg_dirty = false;
 
@@ -359,8 +390,15 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             int v_ff    = fast_forward ? 1 : 0;
             int v_fps   = show_fps ? 1 : 0;
             int v_pal   = palette;
+            int v_clock = 0;
+            if (cart_clock_mhz == 125) v_clock = 1;
+            if (cart_clock_mhz == 150) v_clock = 2;
+            if (cart_clock_mhz == 200) v_clock = 3;
+            if (cart_clock_mhz == 250) v_clock = 4;
 
             static const char * const display_choices[] = { "FIT", "CROP" };
+            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
+            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
             static const char * const palette_names_arr[] = {
                 "GREEN", "GREY", "POCKET", "CREAM", "BLUE", "RED",
             };
@@ -393,6 +431,9 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Palette",
                   .value_ptr = &v_pal, .choices = palette_names_arr,
                   .num_choices = GBC_PALETTE_COUNT, .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
+                  .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
                   .enabled = true, .action_id = ACT_QUIT },
             };
@@ -411,13 +452,27 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 if (scale_mode == SCALE_CROP) { pan_x = 16; pan_y = 8; }
                 cfg_dirty = true;
             }
-            if (v_vol   != volume       ) { volume       = v_vol;       cfg_dirty = true; }
+            if (v_vol   != volume       ) {
+                volume = v_vol;
+                nes_picker_global_set_volume(v_vol);
+            }
             if ((bool)v_ff    != fast_forward) { fast_forward = (bool)v_ff;       }
             if ((bool)v_fps   != show_fps    ) { show_fps     = (bool)v_fps; cfg_dirty = true; }
             if (v_pal != palette) {
                 palette = v_pal;
                 gbc_set_palette(palette);
                 cfg_dirty = true;
+            }
+            int new_mhz = clock_mhz_arr[v_clock];
+            if (new_mhz != cart_clock_mhz) {
+                cart_clock_mhz = new_mhz;
+                cfg_dirty = true;
+                if (new_mhz == 0) {
+                    snprintf(osd_text, sizeof(osd_text), "clock: global");
+                } else {
+                    snprintf(osd_text, sizeof(osd_text), "clock %d (next)", new_mhz);
+                }
+                osd_text_ms = 1500;
             }
 
             if (r.kind == NES_MENU_ACTION) {
@@ -506,7 +561,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
 
     battery_save(name);
-    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, palette);
+    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, palette, cart_clock_mhz);
     nes_lcd_backlight(1);
     gbc_shutdown();
     free(rom_alloc);

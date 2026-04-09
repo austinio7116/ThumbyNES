@@ -14,4 +14,7 @@
 
 int gb_run_rom(const nes_rom_entry *e, uint16_t *fb);
 
+/* Per-cart overclock override peek — see nes_run_clock_override. */
+int gb_run_clock_override(const char *rom_name);
+
 #endif
