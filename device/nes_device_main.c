@@ -228,6 +228,47 @@ int main(void) {
      * file doesn't sit around as cruft. Harmless if absent. */
     f_unlink("/.last");
 
+    /* Auto-defragment any large fragmented files left over from
+     * previous USB sessions. Without this, ROMs > ~256 KB that
+     * landed in fragmented free space fail the contiguous-cluster
+     * check in the XIP mmap path and the fall-back malloc can't
+     * fit them either, leaving the user with red "load err" splashes
+     * for the biggest carts.
+     *
+     * The pass walks /, identifies any non-system file > 64 KB whose
+     * cluster chain is non-contiguous, and rewrites it via the
+     * f_expand temp-file dance. Tiny files (.scr, .cfg, .sav, the
+     * picker bookkeeping) are skipped — only the big ROMs matter
+     * for XIP and only they're worth the rewrite cost.
+     *
+     * Pre-flight check: skip the pass entirely if nothing's
+     * fragmented, so quiet boots don't pay any extra startup time. */
+    {
+        DIR  d;
+        FILINFO fi;
+        int  needs_defrag = 0;
+        if (f_opendir(&d, "/") == FR_OK) {
+            while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
+                if (fi.fattrib & AM_DIR) continue;
+                if (fi.fname[0] == '.')  continue;
+                if (fi.fsize  < 64 * 1024) continue;
+                /* Reuse the picker's contiguity probe via mmap_rom —
+                 * it returns 0 on success. */
+                const uint8_t *p; size_t l;
+                if (nes_picker_mmap_rom(fi.fname, &p, &l) != 0) {
+                    needs_defrag = 1;
+                    break;
+                }
+            }
+            f_closedir(&d);
+        }
+        if (needs_defrag) {
+            int n = nes_picker_defrag(fb);
+            (void)n;
+            sleep_ms(400);   /* leave the "done" splash up briefly */
+        }
+    }
+
     /* Lobby + picker. Loops forever in Phase 3. */
     while (1) {
         int sel = lobby();

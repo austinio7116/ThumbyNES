@@ -291,6 +291,187 @@ static int chain_is_contiguous(DWORD start_cluster, DWORD n_clusters) {
     return 1;
 }
 
+/* Cheap "is this file contiguous" probe used by the defragmenter to
+ * decide which files to rewrite. Same logic the mmap path uses but
+ * exposed locally so we can call it without the size checks. */
+static int file_is_contiguous(const char *name) {
+    char path[80];
+    snprintf(path, sizeof(path), "/%s", name);
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return 1;  /* assume yes if we can't tell */
+    FSIZE_t sz = f_size(&f);
+    DWORD   sc = f.obj.sclust;
+    f_close(&f);
+    if (sz == 0 || sc < 2) return 1;
+    DWORD bpc = (DWORD)g_fs.csize * 512u;
+    DWORD nc  = ((DWORD)sz + bpc - 1) / bpc;
+    return chain_is_contiguous(sc, nc) ? 1 : 0;
+}
+
+/* --- defragmenter --------------------------------------------------- */
+
+/* fb helpers + colour palette — defined here so the defragmenter
+ * progress overlay below can use them. The picker / hero / list
+ * draw paths further down also reference these names. */
+static void fb_clear(uint16_t *fb, uint16_t c) {
+    for (int i = 0; i < FB_W * FB_H; i++) fb[i] = c;
+}
+static void fb_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
+    for (int j = 0; j < h; j++) {
+        int yy = y + j;
+        if ((unsigned)yy >= FB_H) continue;
+        for (int i = 0; i < w; i++) {
+            int xx = x + i;
+            if ((unsigned)xx >= FB_W) continue;
+            fb[yy * FB_W + xx] = c;
+        }
+    }
+}
+
+#define COL_BG     0x0000   /* black */
+#define COL_FG     0xFFFF   /* white */
+#define COL_DIM    0x8410   /* mid grey */
+#define COL_HIGHLT 0x07E0   /* green */
+#define COL_TITLE  0xFD20   /* orange */
+#define COL_ERR    0xF800   /* red */
+
+#define DEFRAG_TMP   "/.defrag.tmp"
+#define DEFRAG_BUFSZ 4096
+
+static void defrag_progress(uint16_t *fb, const char *name, int done, int total) {
+    fb_clear(fb, COL_BG);
+    nes_font_draw(fb, "DEFRAGMENTING",     16, 24, COL_TITLE);
+    nes_font_draw(fb, "do not unplug",     22, 36, COL_DIM);
+    char line[40];
+    snprintf(line, sizeof(line), "%d / %d", done, total);
+    int w = nes_font_width(line);
+    nes_font_draw(fb, line, (FB_W - w) / 2, 56, COL_FG);
+    if (name) {
+        char nm[24];
+        strncpy(nm, name, sizeof(nm) - 1);
+        nm[sizeof(nm) - 1] = 0;
+        if (strlen(nm) > 22) nm[22] = 0;
+        int nw = nes_font_width(nm);
+        nes_font_draw(fb, nm, (FB_W - nw) / 2, 72, COL_FG);
+    }
+    /* Progress bar. */
+    int bar_x = 12, bar_y = 92, bar_w = FB_W - 24, bar_h = 6;
+    fb_rect(fb, bar_x, bar_y, bar_w, bar_h, 0x18C3);
+    int fill = total > 0 ? (bar_w * done) / total : 0;
+    if (fill > bar_w) fill = bar_w;
+    fb_rect(fb, bar_x, bar_y, fill, bar_h, COL_HIGHLT);
+    nes_lcd_wait_idle();
+    nes_lcd_present(fb);
+    tud_task();
+}
+
+/* Rewrite a single file via the f_expand temp-file dance. The
+ * temp file is allocated as a contiguous chain via f_expand, the
+ * original is streamed into it 4 KB at a time, and on success the
+ * original is unlinked and the temp is renamed in its place. */
+static int defrag_one(const char *name, uint16_t *fb, int done, int total) {
+    char src_path[80], tmp_path[16];
+    snprintf(src_path, sizeof(src_path), "/%s", name);
+    snprintf(tmp_path, sizeof(tmp_path), DEFRAG_TMP);
+
+    FIL src;
+    if (f_open(&src, src_path, FA_READ) != FR_OK) return -1;
+    FSIZE_t sz = f_size(&src);
+
+    /* Make sure no leftover temp from a previous interrupted run is
+     * holding clusters we want. */
+    f_unlink(tmp_path);
+
+    FIL dst;
+    if (f_open(&dst, tmp_path, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        f_close(&src);
+        return -2;
+    }
+    /* Pre-allocate a contiguous cluster chain of exactly the right
+     * size. opt=1 → "prepare to allocate". The file is then writable
+     * normally and stays contiguous. */
+    if (f_expand(&dst, sz, 1) != FR_OK) {
+        f_close(&dst); f_close(&src); f_unlink(tmp_path);
+        return -3;   /* not enough contiguous free space */
+    }
+
+    static uint8_t buf[DEFRAG_BUFSZ];
+    UINT br, bw;
+    FSIZE_t copied = 0;
+    while (copied < sz) {
+        UINT want = (sz - copied > DEFRAG_BUFSZ) ? DEFRAG_BUFSZ : (UINT)(sz - copied);
+        if (f_read(&src, buf, want, &br) != FR_OK || br != want) {
+            f_close(&dst); f_close(&src); f_unlink(tmp_path);
+            return -4;
+        }
+        if (f_write(&dst, buf, br, &bw) != FR_OK || bw != br) {
+            f_close(&dst); f_close(&src); f_unlink(tmp_path);
+            return -5;
+        }
+        copied += br;
+        /* Repaint the progress bar with the per-file fraction so
+         * the user sees movement on the bigger ROMs. */
+        if ((copied & 0xFFFF) == 0) {
+            defrag_progress(fb, name, done, total);
+        }
+    }
+    f_close(&dst);
+    f_close(&src);
+
+    /* Atomically replace the original. */
+    if (f_unlink(src_path) != FR_OK) {
+        f_unlink(tmp_path);
+        return -6;
+    }
+    if (f_rename(tmp_path, src_path) != FR_OK) {
+        return -7;   /* original is gone — temp still has the data */
+    }
+
+    /* Make sure the new file's clusters land in flash before the
+     * next file's f_expand walks the FAT. */
+    nes_flash_disk_flush();
+    return 0;
+}
+
+int nes_picker_defrag(uint16_t *fb) {
+    /* Pass 1: collect names of fragmented files. We can't iterate
+     * the directory while we mutate it, so snapshot first. */
+    static char frag_names[NES_PICKER_MAX_ROMS][NES_PICKER_NAME_MAX];
+    int n_frag = 0;
+
+    DIR dir;
+    FILINFO info;
+    if (f_opendir(&dir, "/") != FR_OK) return -1;
+    while (n_frag < NES_PICKER_MAX_ROMS && f_readdir(&dir, &info) == FR_OK) {
+        if (info.fname[0] == 0) break;
+        if (info.fattrib & AM_DIR) continue;
+        /* Skip the picker's own bookkeeping files — they're tiny and
+         * change often. */
+        if (info.fname[0] == '.') continue;
+        if (info.fsize < 64 * 1024) continue;   /* small files don't matter */
+        if (file_is_contiguous(info.fname)) continue;
+        strncpy(frag_names[n_frag], info.fname, NES_PICKER_NAME_MAX - 1);
+        frag_names[n_frag][NES_PICKER_NAME_MAX - 1] = 0;
+        n_frag++;
+    }
+    f_closedir(&dir);
+
+    if (n_frag == 0) return 0;
+
+    /* Pass 2: rewrite each fragmented file. */
+    int rewritten = 0;
+    for (int i = 0; i < n_frag; i++) {
+        defrag_progress(fb, frag_names[i], i, n_frag);
+        if (defrag_one(frag_names[i], fb, i, n_frag) == 0) {
+            rewritten++;
+        }
+        tud_task();
+    }
+    defrag_progress(fb, "done", n_frag, n_frag);
+    nes_flash_disk_flush();
+    return rewritten;
+}
+
 int nes_picker_mmap_rom(const char *name,
                           const uint8_t **out_data, size_t *out_len) {
     if (!out_data || !out_len) return -1;
@@ -328,29 +509,6 @@ int nes_picker_mmap_rom(const char *name,
 }
 
 /* --- drawing helpers ----------------------------------------------- */
-
-static void fb_clear(uint16_t *fb, uint16_t c) {
-    for (int i = 0; i < FB_W * FB_H; i++) fb[i] = c;
-}
-
-static void fb_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
-    for (int j = 0; j < h; j++) {
-        int yy = y + j;
-        if ((unsigned)yy >= FB_H) continue;
-        for (int i = 0; i < w; i++) {
-            int xx = x + i;
-            if ((unsigned)xx >= FB_W) continue;
-            fb[yy * FB_W + xx] = c;
-        }
-    }
-}
-
-#define COL_BG     0x0000   /* black */
-#define COL_FG     0xFFFF   /* white */
-#define COL_DIM    0x8410   /* mid grey */
-#define COL_HIGHLT 0x07E0   /* green */
-#define COL_TITLE  0xFD20   /* orange */
-#define COL_ERR    0xF800   /* red */
 
 /* --- splash screens ------------------------------------------------ */
 

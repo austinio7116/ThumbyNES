@@ -56,4 +56,17 @@ uint8_t *nes_picker_load_rom(const char *name, size_t *out_len);
 int nes_picker_mmap_rom(const char *name,
                           const uint8_t **out_data, size_t *out_len);
 
+/* Defragmenter — rewrites every fragmented file in / so its cluster
+ * chain becomes contiguous, which lets the XIP mmap path serve large
+ * carts that would otherwise fall back to malloc and OOM. Walks the
+ * root, checks each file with the same chain_is_contiguous logic the
+ * mmap path uses, and rewrites the offenders via the f_expand
+ * temp-file dance. Progress is drawn into `fb` so the user sees what
+ * the picker is doing.
+ *
+ * Returns the number of files rewritten (>= 0) or a negative error
+ * code if the pass aborted. The function pumps tud_task() between
+ * files so USB stays alive while it runs. */
+int nes_picker_defrag(uint16_t *fb);
+
 #endif
