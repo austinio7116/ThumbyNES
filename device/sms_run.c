@@ -205,6 +205,11 @@ typedef struct {
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *volume, bool *blend) {
+    (void)scale;   /* scale_mode is intentionally NOT restored — every
+                    * session boots in FIT and the user toggles to CROP
+                    * by hand if they want it. Avoids the black-screen
+                    * trap when a stale CROP cfg races the cart's first
+                    * rendered frame. */
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -213,7 +218,6 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
     UINT br = 0;
     if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br == sizeof(c)
         && c.magic == CFG_MAGIC) {
-        if (c.scale_mode < SCALE_COUNT) *scale = (scale_mode_t)c.scale_mode;
         *show_fps = c.show_fps != 0;
         if (c.volume <= VOL_MAX) *volume = c.volume;
         *blend = c.blend != 0;
@@ -223,12 +227,13 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int volume, bool blend) {
+    (void)scale;   /* always written as FIT — see cfg_load comment. */
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
     sms_cfg_t c = {
-        .magic = CFG_MAGIC, .scale_mode = (uint8_t)scale,
+        .magic = CFG_MAGIC, .scale_mode = (uint8_t)SCALE_FIT,
         .show_fps = show_fps ? 1 : 0, .volume = (uint8_t)volume,
         .blend = blend ? 1 : 0, .reserved = {0,0,0,0},
     };
@@ -302,15 +307,6 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int prev_lt = 0, prev_rt = 0, prev_a = 0;
 
     int16_t audio[1024];
-
-    /* SMS CROP normally pauses the cart, but if cfg.scale_mode was
-     * persisted as CROP from a prior session and we honor it
-     * immediately, the framebuffer is still the post-smsc_init zeros
-     * → black screen with no way out except a MENU tap. Force a
-     * warm-up of ~1 second of cart frames at the start of every
-     * session so the buffer always has the title screen drawn into
-     * it before CROP can take effect. */
-    int sms_warmup_frames = 60;
 
     const uint32_t FRAME_US = 1000000u / (uint32_t)smsc_refresh_rate();
     absolute_time_t next_frame = get_absolute_time();
@@ -437,17 +433,13 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
 
         /* SMS CROP is the only path where the cart pauses; GG CROP
-         * keeps ticking like FIT. The warm-up window keeps the cart
-         * running for the first ~1 second of every session so the
-         * framebuffer is populated before CROP can freeze it. */
-        if (gg || scale_mode != SCALE_CROP || sms_warmup_frames > 0) {
+         * keeps ticking like FIT. SMS always boots in FIT (cfg never
+         * restores scale_mode) so the buffer is always populated by
+         * the time the user can toggle to CROP. */
+        if (gg || scale_mode != SCALE_CROP) {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) smsc_run_frame();
             unsaved_play_frames += frame_runs;
-            if (sms_warmup_frames > 0) {
-                sms_warmup_frames -= frame_runs;
-                if (sms_warmup_frames < 0) sms_warmup_frames = 0;
-            }
         }
 
         const uint8_t *frame = smsc_framebuffer();

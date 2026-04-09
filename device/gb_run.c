@@ -153,6 +153,8 @@ typedef struct {
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *volume, int *palette) {
+    (void)scale;   /* scale_mode never persisted — always boot in FIT
+                    * for consistency with the NES / SMS runners.   */
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
@@ -161,7 +163,6 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
     UINT br = 0;
     if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br == sizeof(c)
         && c.magic == CFG_MAGIC) {
-        if (c.scale_mode < SCALE_COUNT)    *scale  = (scale_mode_t)c.scale_mode;
         *show_fps = c.show_fps != 0;
         if (c.volume <= VOL_MAX)           *volume = c.volume;
         if (c.palette < GBC_PALETTE_COUNT) *palette = c.palette;
@@ -171,12 +172,13 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int volume, int palette) {
+    (void)scale;   /* always written as FIT — see cfg_load comment. */
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
     gb_cfg_t c = {
-        .magic = CFG_MAGIC, .scale_mode = (uint8_t)scale,
+        .magic = CFG_MAGIC, .scale_mode = (uint8_t)SCALE_FIT,
         .show_fps = show_fps ? 1 : 0, .volume = (uint8_t)volume,
         .palette = (uint8_t)palette, .reserved = {0,0,0,0},
     };
