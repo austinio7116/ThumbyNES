@@ -31,6 +31,7 @@
 
 #include "nes_font.h"
 #include "nes_thumb.h"
+#include "nes_menu.h"
 
 /* Pin map mirrors nes_buttons.c. We read raw GPIOs here so we can
  * remap LB/RB to Select/Start without going through the PICO-8
@@ -339,16 +340,14 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     /* MENU gestures:
      *   tap (< 300 ms, no chord)  → toggle FIT ↔ CROP
-     *   hold (≥ 600 ms, no chord) → exit to picker
-     *   MENU + LB                  → toggle FPS overlay
-     *   MENU + UP                  → cycle palette
-     *   MENU + DOWN                → toggle 4× fast-forward
-     * Decisions are made on release so a single press never fires
-     * two actions. `menu_consumed` latches on a chord so the eventual
-     * release doesn't also flip the scale mode. */
+     *   hold (≥ 500 ms, no chord) → open in-game menu
+     *   MENU + A                   → save screenshot
+     * Everything else lives in the menu (palette, FPS, BLEND, region,
+     * volume, fast-forward, save / load state, quit). */
     int  menu_press_ms = 0;
     int  menu_was_down = 0;
     int  menu_consumed = 0;
+    int  open_menu     = 0;
     bool exit_after    = false;
 
     /* Pan position for CROP mode. Reset to centre on every entry. */
@@ -417,59 +416,6 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
-            /* Chord detection — fire on the rising edge of each
-             * companion button so a held chord doesn't repeat. */
-            if (lb_down && !prev_lb) {
-                show_fps = !show_fps;
-                cfg_dirty = true;
-                menu_consumed = 1;
-            }
-            if (rb_down && !prev_rb) {
-                blend = !blend;
-                cfg_dirty = true;
-                menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text),
-                          blend ? "blend on" : "blend off");
-                osd_text_ms = 1000;
-            }
-            if (b_down && !prev_b) {
-                pal_mode = !pal_mode;
-                cfg_dirty = true;
-                menu_consumed = 1;
-                /* Region only takes effect on next launch — switching
-                 * mid-cart would require tearing down nesc and losing
-                 * audio/video pipelines. Show a hint in the OSD. */
-                snprintf(osd_text, sizeof(osd_text),
-                          pal_mode ? "PAL  next launch" : "NTSC next launch");
-                osd_text_ms = 1500;
-            }
-            if (up_down && !prev_up) {
-                palette = (palette + 1) % NESC_PALETTE_COUNT;
-                nesc_set_palette(palette);
-                cfg_dirty = true;
-                menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text), "pal: %s",
-                          nesc_palette_name(palette));
-                osd_text_ms = 1000;
-            }
-            if (dn_down && !prev_dn) {
-                fast_forward = !fast_forward;
-                menu_consumed = 1;
-            }
-            if (lt_down && !prev_lt) {
-                if (volume > VOL_MIN) volume--;
-                cfg_dirty = true;
-                menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
-                osd_text_ms = 1000;
-            }
-            if (rt_down && !prev_rt) {
-                if (volume < VOL_MAX) volume++;
-                cfg_dirty = true;
-                menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
-                osd_text_ms = 1000;
-            }
             /* MENU+A: snapshot the current 128×128 framebuffer to a
              * .scr32 + .scr64 sidecar that the picker reads back as
              * inline / hero thumbnails. */
@@ -480,13 +426,19 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 osd_text_ms = 800;
                 menu_consumed = 1;
             }
-            if (menu_press_ms >= 600 && !menu_consumed) {
-                exit_after = true;
+            /* MENU long hold (≥ 500 ms with no chord) opens the
+             * in-game pause menu. Fire once at the threshold and
+             * latch menu_consumed so the release doesn't also fire
+             * the short-tap CROP toggle. */
+            if (menu_press_ms >= 500 && !menu_consumed) {
+                open_menu = 1;
+                menu_consumed = 1;
             }
         } else {
             if (menu_was_down) {
-                /* Release. Tap (no chord) = toggle scale mode.
-                 * Hold = exit (already latched). Chord = nothing. */
+                /* Release. Tap (< 300 ms, no chord) = toggle scale
+                 * mode. Long-hold paths already fired at the
+                 * threshold and set menu_consumed. */
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
                     scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
                     cfg_dirty = true;
@@ -508,6 +460,110 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         prev_rt = rt_down;
         prev_b  = b_down;
         prev_a  = a_down;
+
+        /* ----- in-game menu ----- */
+        if (open_menu) {
+            open_menu = 0;
+            /* Pack current state into ints the menu can mutate. */
+            int v_scale = (int)scale_mode;
+            int v_vol   = volume;
+            int v_ff    = fast_forward ? 1 : 0;
+            int v_fps   = show_fps ? 1 : 0;
+            int v_blend = blend ? 1 : 0;
+            int v_pal   = palette;
+            int v_pal_mode = pal_mode ? 1 : 0;
+
+            static const char * const display_choices[] = { "FIT", "CROP" };
+            static const char * const palette_names_arr[] = {
+                "NOFRENDO", "COMPOSITE", "NESCLASS", "NTSC", "PVM", "SMOOTH",
+            };
+            static const char * const region_choices[] = { "NTSC", "PAL" };
+
+            enum { ACT_NONE, ACT_SAVE_STATE, ACT_LOAD_STATE, ACT_QUIT };
+
+            nes_menu_item_t items[] = {
+                { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
+                  .enabled = true, .action_id = ACT_NONE },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Save state",
+                  .enabled = true,  .action_id = ACT_SAVE_STATE },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Load state",
+                  .enabled = false, .action_id = ACT_LOAD_STATE },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
+                  .value_ptr = &v_scale, .choices = display_choices, .num_choices = 2,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
+                  .value_ptr = &v_vol, .min = VOL_MIN, .max = VOL_MAX,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_TOGGLE, .label = "Fast-fwd",
+                  .value_ptr = &v_ff, .enabled = true },
+                { .kind = NES_MENU_KIND_TOGGLE, .label = "Show FPS",
+                  .value_ptr = &v_fps, .enabled = true },
+                { .kind = NES_MENU_KIND_TOGGLE, .label = "BLEND",
+                  .value_ptr = &v_blend, .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Palette",
+                  .value_ptr = &v_pal, .choices = palette_names_arr,
+                  .num_choices = NESC_PALETTE_COUNT, .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Region",
+                  .value_ptr = &v_pal_mode, .choices = region_choices, .num_choices = 2,
+                  .enabled = true, .suffix = "next launch" },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
+                  .enabled = true, .action_id = ACT_QUIT },
+            };
+
+            /* Build a short cart subtitle from the ROM name. */
+            char sub[28];
+            strncpy(sub, name, sizeof(sub) - 1);
+            sub[sizeof(sub) - 1] = 0;
+            char *dot = strrchr(sub, '.');
+            if (dot) *dot = 0;
+
+            nes_menu_result_t r = nes_menu_run(fb, "PAUSED", sub,
+                                                items, sizeof(items) / sizeof(items[0]));
+
+            /* Apply value changes. */
+            if (v_scale != (int)scale_mode) {
+                scale_mode = (scale_mode_t)v_scale;
+                if (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 56; }
+                cfg_dirty = true;
+            }
+            if (v_vol   != volume       ) { volume       = v_vol;       cfg_dirty = true; }
+            if ((bool)v_ff    != fast_forward) {  fast_forward = (bool)v_ff;          /* not persisted */ }
+            if ((bool)v_fps   != show_fps    ) {  show_fps     = (bool)v_fps; cfg_dirty = true; }
+            if ((bool)v_blend != blend       ) {  blend        = (bool)v_blend; cfg_dirty = true; }
+            if (v_pal != palette) {
+                palette = v_pal;
+                nesc_set_palette(palette);
+                cfg_dirty = true;
+            }
+            if ((bool)v_pal_mode != pal_mode) {
+                pal_mode = (bool)v_pal_mode;
+                cfg_dirty = true;
+                snprintf(osd_text, sizeof(osd_text),
+                          pal_mode ? "PAL  next launch" : "NTSC next launch");
+                osd_text_ms = 1500;
+            }
+
+            if (r.kind == NES_MENU_ACTION) {
+                switch (r.action_id) {
+                case ACT_SAVE_STATE:
+                    snprintf(osd_text, sizeof(osd_text), "save TBD");
+                    osd_text_ms = 800;
+                    break;
+                case ACT_LOAD_STATE:
+                    snprintf(osd_text, sizeof(osd_text), "load TBD");
+                    osd_text_ms = 800;
+                    break;
+                case ACT_QUIT:
+                    exit_after = true;
+                    break;
+                }
+            }
+
+            /* Re-anchor frame pacing so the cart doesn't sprint to
+             * catch up with the time we spent in the menu. */
+            next_frame = get_absolute_time();
+            last_input_us = (uint64_t)time_us_64();
+        }
 
         /* Input gating: in CROP mode the cart receives nothing — the
          * D-pad pans the viewport instead so the user can read text

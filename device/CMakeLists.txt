@@ -153,6 +153,7 @@ add_executable(nesrun_device
     nes_picker.c
     nes_font.c
     nes_thumb.c
+    nes_menu.c
     nes_run.c
     sms_run.c
     gb_run.c
