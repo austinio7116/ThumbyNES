@@ -202,7 +202,8 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         uint8_t sys = 0xFF;
         if      (strcasecmp(info.fname + L - 4, ".nes") == 0) sys = ROM_SYS_NES;
         else if (strcasecmp(info.fname + L - 4, ".sms") == 0) sys = ROM_SYS_SMS;
-        else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gg") == 0) sys = ROM_SYS_GG;
+        else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gb")  == 0) sys = ROM_SYS_GB;
+        else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gg")  == 0) sys = ROM_SYS_GG;
         else continue;
         strncpy(out[n].name, info.fname, NES_PICKER_NAME_MAX - 1);
         out[n].name[NES_PICKER_NAME_MAX - 1] = 0;
@@ -368,7 +369,8 @@ static void name_no_ext(char *dst, size_t dstsz, const char *src) {
     if (L >= 4 && (strcasecmp(dst + L - 4, ".nes") == 0
                 || strcasecmp(dst + L - 4, ".sms") == 0)) {
         dst[L - 4] = 0;
-    } else if (L >= 3 && strcasecmp(dst + L - 3, ".gg") == 0) {
+    } else if (L >= 3 && (strcasecmp(dst + L - 3, ".gg") == 0
+                       || strcasecmp(dst + L - 3, ".gb") == 0)) {
         dst[L - 3] = 0;
     }
 }
@@ -380,6 +382,8 @@ static void format_meta(char *out, size_t outsz, const nes_rom_entry *e) {
                                                  (unsigned long)(e->size / 1024), region);
     else if (e->system == ROM_SYS_GG ) snprintf(out, outsz, "GG   %luK  %s",
                                                  (unsigned long)(e->size / 1024), region);
+    else if (e->system == ROM_SYS_GB ) snprintf(out, outsz, "GB   %luK",
+                                                 (unsigned long)(e->size / 1024));
     else if (e->mapper == 0xFF)        snprintf(out, outsz, "??   %luK  %s",
                                                  (unsigned long)(e->size / 1024), region);
     else                               snprintf(out, outsz, "m%d   %luK  %s",
@@ -396,8 +400,9 @@ static void format_meta(char *out, size_t outsz, const nes_rom_entry *e) {
 #define TAB_FAV 0
 #define TAB_NES 1
 #define TAB_SMS 2
-#define TAB_GG  3
-#define TAB_COUNT 4
+#define TAB_GB  3
+#define TAB_GG  4
+#define TAB_COUNT 5
 
 #define SORT_ALPHA 0   /* case-insensitive name */
 #define SORT_FAV   1   /* favorites first, then alpha */
@@ -468,6 +473,7 @@ static int build_view(const nes_rom_entry *entries, int n_entries,
             break;
         case TAB_NES: if (entries[i].system != ROM_SYS_NES) continue; break;
         case TAB_SMS: if (entries[i].system != ROM_SYS_SMS) continue; break;
+        case TAB_GB : if (entries[i].system != ROM_SYS_GB ) continue; break;
         case TAB_GG : if (entries[i].system != ROM_SYS_GG ) continue; break;
         }
         view[n++] = i;
@@ -496,6 +502,7 @@ static void tab_counts(const nes_rom_entry *e, int n, int counts[TAB_COUNT]) {
         if (nes_picker_is_favorite(e[i].name)) counts[TAB_FAV]++;
         if      (e[i].system == ROM_SYS_NES) counts[TAB_NES]++;
         else if (e[i].system == ROM_SYS_SMS) counts[TAB_SMS]++;
+        else if (e[i].system == ROM_SYS_GB ) counts[TAB_GB ]++;
         else if (e[i].system == ROM_SYS_GG ) counts[TAB_GG ]++;
     }
 }
@@ -506,9 +513,11 @@ static void tab_counts(const nes_rom_entry *e, int n, int counts[TAB_COUNT]) {
 
 static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUNT]) {
     static const uint8_t icon_for[TAB_COUNT] = {
-        ICON_SYS_STAR, ICON_SYS_NES, ICON_SYS_SMS, ICON_SYS_GG,
+        ICON_SYS_STAR, ICON_SYS_NES, ICON_SYS_SMS, ICON_SYS_GB, ICON_SYS_GG,
     };
-    int cell_w = FB_W / TAB_COUNT;     /* 32 */
+    /* 5 tabs in 128 px = 25 px each (loses 3 px on the right edge,
+     * which is fine — we treat it as overscan). */
+    int cell_w = FB_W / TAB_COUNT;
     for (int t = 0; t < TAB_COUNT; t++) {
         int x = t * cell_w;
         int hl = (t == active_tab);
@@ -520,7 +529,7 @@ static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUN
         char lab[8];
         snprintf(lab, sizeof(lab), "%d", counts[t]);
         int lw = nes_font_width(lab);
-        nes_font_draw(fb, lab, x + cell_w - lw - 2, 3, hl ? COL_FG : COL_DIM);
+        nes_font_draw(fb, lab, x + cell_w - lw - 1, 3, hl ? COL_FG : COL_DIM);
     }
     fb_rect(fb, 0, TAB_BAR_H, FB_W, 1, COL_DIM);
 }

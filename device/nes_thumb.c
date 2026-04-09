@@ -99,6 +99,27 @@ static void icon_sms(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
     fill_rect(fb, x + body_w - 2*s,y + body_h - s, s, s, 0x0000);
 }
 
+static void icon_gb(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
+    /* Original Game Boy: portrait body with a small green LCD window
+     * inset and a tiny round speaker grille at the bottom. Distinct
+     * from the SMS cartridge silhouette and the GG handheld pill. */
+    int w = 6 * s, h = 9 * s;
+    int x = cx - w / 2, y = cy - h / 2;
+    /* body */
+    fill_rect(fb, x, y, w, h, fg);
+    /* LCD bezel: dark inset square upper half */
+    int sw = 4 * s, sh = 3 * s;
+    int lx = x + (w - sw) / 2;
+    int ly = y + s;
+    fill_rect(fb, lx, ly, sw, sh, 0x0000);
+    /* LCD pixels: green-ish blob inside the bezel */
+    fill_rect(fb, lx + 1, ly + 1, sw - 2, sh - 2, 0x9DE1);
+    /* d-pad + buttons hint: a dark band across the bottom half */
+    fill_rect(fb, x + s, y + h - 3 * s, w - 2 * s, s, 0x0000);
+    /* round speaker dots near bottom-right */
+    fill_rect(fb, x + w - 2 * s, y + h - s, s, s, 0x0000);
+}
+
 static void icon_gg(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
     /* Game Gear: portrait pill (handheld shape) with an inset green
      * screen rectangle. */
@@ -142,6 +163,7 @@ void nes_thumb_icon(uint16_t *fb, int x, int y, uint8_t which, uint16_t tint) {
     switch (which) {
     case ICON_SYS_NES:  icon_nes (fb, cx, cy, 1, tint); break;
     case ICON_SYS_SMS:  icon_sms (fb, cx, cy, 1, tint); break;
+    case ICON_SYS_GB:   icon_gb  (fb, cx, cy, 1, tint); break;
     case ICON_SYS_GG:   icon_gg  (fb, cx, cy, 1, tint); break;
     case ICON_SYS_STAR: icon_star(fb, cx, cy, 1, tint); break;
     }
@@ -154,8 +176,9 @@ void nes_thumb_placeholder(uint16_t *fb, int x, int y, int size, uint8_t system)
         [ROM_SYS_NES] = 0x18C3, /* dim grey */
         [ROM_SYS_SMS] = 0x2104, /* dim red */
         [ROM_SYS_GG]  = 0x0204, /* dim teal */
+        [ROM_SYS_GB]  = 0x1A40, /* dim olive — nods to the LCD green */
     };
-    uint16_t panel = (system <= ROM_SYS_GG) ? panel_for[system] : 0x18C3;
+    uint16_t panel = (system <= ROM_SYS_GB) ? panel_for[system] : 0x18C3;
     fill_rect(fb, x, y, size, size, panel);
     rect_outline(fb, x, y, size, size, 0x4208);
 
@@ -166,6 +189,7 @@ void nes_thumb_placeholder(uint16_t *fb, int x, int y, int size, uint8_t system)
     switch (system) {
     case ROM_SYS_NES: icon_nes(fb, cx, cy, s, 0xFFFF); break;
     case ROM_SYS_SMS: icon_sms(fb, cx, cy, s, 0xFFFF); break;
+    case ROM_SYS_GB:  icon_gb (fb, cx, cy, s, 0xFFFF); break;
     case ROM_SYS_GG:  icon_gg (fb, cx, cy, s, 0xFFFF); break;
     default:          icon_nes(fb, cx, cy, s, 0xFFFF); break;
     }

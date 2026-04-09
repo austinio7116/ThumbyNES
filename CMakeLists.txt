@@ -79,11 +79,19 @@ target_include_directories(smsplus PUBLIC
 target_compile_definitions(smsplus PRIVATE)
 
 # ----------------------------------------------------------------------
+# Vendored peanut_gb (single-header DMG core) + minigb_apu
+# ----------------------------------------------------------------------
+set(PEANUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/peanut_gb)
+add_library(peanut_gb STATIC ${PEANUT_DIR}/minigb_apu.c)
+target_include_directories(peanut_gb PUBLIC ${PEANUT_DIR})
+target_compile_options(peanut_gb PRIVATE -Wno-implicit-fallthrough -Wno-unused-function -Wno-unused-variable)
+
+# ----------------------------------------------------------------------
 # ThumbyNES runtime glue
 # ----------------------------------------------------------------------
-add_library(thumbynes STATIC src/nes_core.c src/sms_core.c)
+add_library(thumbynes STATIC src/nes_core.c src/sms_core.c src/gb_core.c)
 target_include_directories(thumbynes PUBLIC src)
-target_link_libraries(thumbynes PUBLIC nofrendo smsplus)
+target_link_libraries(thumbynes PUBLIC nofrendo smsplus peanut_gb)
 
 # ----------------------------------------------------------------------
 # Phase 0 bench harness
@@ -94,6 +102,9 @@ target_link_libraries(nesbench PRIVATE thumbynes)
 add_executable(smsbench src/sms_bench_main.c)
 target_link_libraries(smsbench PRIVATE thumbynes)
 
+add_executable(gbbench src/gb_bench_main.c)
+target_link_libraries(gbbench PRIVATE thumbynes)
+
 # ----------------------------------------------------------------------
 # Phase 1 SDL2 host runner (built only if SDL2 is available)
 # ----------------------------------------------------------------------
@@ -103,7 +114,9 @@ if(SDL2_FOUND)
     target_link_libraries(neshost PRIVATE thumbynes SDL2::SDL2)
     add_executable(smshost src/sms_host_main.c)
     target_link_libraries(smshost PRIVATE thumbynes SDL2::SDL2)
-    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost")
+    add_executable(gbhost src/gb_host_main.c)
+    target_link_libraries(gbhost PRIVATE thumbynes SDL2::SDL2)
+    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost + gbhost")
 else()
     # Older SDL2 cmake configs don't export the SDL2:: target.
     find_path(SDL2_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL2)
@@ -115,8 +128,11 @@ else()
         add_executable(smshost src/sms_host_main.c)
         target_include_directories(smshost PRIVATE ${SDL2_INCLUDE_DIR})
         target_link_libraries(smshost PRIVATE thumbynes ${SDL2_LIBRARY})
-        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost")
+        add_executable(gbhost src/gb_host_main.c)
+        target_include_directories(gbhost PRIVATE ${SDL2_INCLUDE_DIR})
+        target_link_libraries(gbhost PRIVATE thumbynes ${SDL2_LIBRARY})
+        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost + gbhost")
     else()
-        message(STATUS "ThumbyNES: SDL2 not found, skipping neshost / smshost")
+        message(STATUS "ThumbyNES: SDL2 not found, skipping neshost / smshost / gbhost")
     endif()
 endif()

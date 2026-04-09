@@ -18,6 +18,7 @@
 #define ROM_SYS_NES  0
 #define ROM_SYS_SMS  1
 #define ROM_SYS_GG   2
+#define ROM_SYS_GB   3
 
 typedef struct {
     char     name[NES_PICKER_NAME_MAX];   /* base file name in / */

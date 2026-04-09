@@ -94,6 +94,23 @@ add_library(smsplus STATIC
     ${SMSPLUS_SOUND_SRC}
     ${SMS_SZHVC_C}
 )
+
+# ----------------------------------------------------------------------
+# Vendored peanut_gb (single-header DMG core) + minigb_apu
+# ----------------------------------------------------------------------
+set(PEANUT_DIR ${NES_ROOT}/vendor/peanut_gb)
+add_library(peanut_gb STATIC ${PEANUT_DIR}/minigb_apu.c)
+target_include_directories(peanut_gb PUBLIC ${PEANUT_DIR})
+target_compile_options(peanut_gb PRIVATE
+    -O3
+    -Wno-implicit-fallthrough
+    -Wno-unused-function
+    -Wno-unused-variable
+    -Wno-unused-parameter
+    -Wno-unused-but-set-variable
+    -Wno-sign-compare
+    -fno-strict-aliasing
+)
 target_include_directories(smsplus PUBLIC
     ${SMSPLUS_DIR}
     ${SMSPLUS_DIR}/cpu
@@ -113,14 +130,15 @@ target_compile_options(smsplus PRIVATE
     -fno-strict-aliasing
 )
 
-# Cross-platform glue (src/nes_core.c, src/sms_core.c) lives outside the
-# device directory; build it here as a small static lib.
+# Cross-platform glue lives outside the device directory; build it
+# here as a small static lib.
 add_library(thumbynes_core STATIC
     ${NES_ROOT}/src/nes_core.c
     ${NES_ROOT}/src/sms_core.c
+    ${NES_ROOT}/src/gb_core.c
 )
 target_include_directories(thumbynes_core PUBLIC ${NES_ROOT}/src)
-target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus)
+target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 
 # ----------------------------------------------------------------------
 # nesrun_device — Phase 3 firmware: lobby + picker, no emulator yet.
@@ -137,6 +155,7 @@ add_executable(nesrun_device
     nes_thumb.c
     nes_run.c
     sms_run.c
+    gb_run.c
     usb_descriptors.c
     fatfs/ff.c
     fatfs/ffsystem.c

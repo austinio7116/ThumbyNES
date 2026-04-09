@@ -17,6 +17,7 @@
 #define ICON_SYS_NES   ROM_SYS_NES
 #define ICON_SYS_SMS   ROM_SYS_SMS
 #define ICON_SYS_GG    ROM_SYS_GG
+#define ICON_SYS_GB    ROM_SYS_GB
 #define ICON_SYS_STAR  255
 
 /* Draw a 12×8 procedural tab icon at (x, y) into the 128×128

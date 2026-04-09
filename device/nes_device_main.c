@@ -35,6 +35,7 @@
 #include "nes_font.h"
 #include "nes_run.h"
 #include "sms_run.h"
+#include "gb_run.h"
 
 #define THUMBYNES_VERSION "0.8"
 
@@ -235,9 +236,12 @@ int main(void) {
         /* Hand off to the Nofrendo runner. Returns when the user
          * holds MENU; we then fall back through the lobby for
          * another pick. */
-        int rc = (roms[sel].system == ROM_SYS_NES)
-                    ? nes_run_rom(&roms[sel], fb)
-                    : sms_run_rom(&roms[sel], fb);
+        int rc;
+        switch (roms[sel].system) {
+        case ROM_SYS_NES: rc = nes_run_rom(&roms[sel], fb); break;
+        case ROM_SYS_GB:  rc = gb_run_rom (&roms[sel], fb); break;
+        default:          rc = sms_run_rom(&roms[sel], fb); break;
+        }
         if (rc != 0) {
             /* Visible error: red splash held until the user presses
              * any button, so they can actually read it instead of

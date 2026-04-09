@@ -1,5 +1,25 @@
 # Vendored sources
 
+## peanut_gb/
+
+Game Boy (DMG) emulation core. Single-header library + minigb_apu
+audio synthesis, vendored from the **TinyCircuits Tiny Game Engine**'s
+GBEmu C user-module (which itself wraps upstream Peanut-GB and
+MiniGBS / minigb_apu).
+
+- Upstream: https://github.com/deltabeard/Peanut-GB (peanut_gb.h)
+            https://github.com/baines/MiniGBS    (minigb_apu)
+- Source-of-truth used: TinyCircuits-Tiny-Game-Engine `gbemu/`
+- License: MIT (both libraries; see file headers)
+- Files vendored: `peanut_gb.h`, `minigb_apu.h`, `minigb_apu.c`,
+  `minigb_apu_impl.c` (the .c is a small shim that sets the audio
+  format defines and includes the impl). **Zero patches** — both
+  libraries port cleanly to standalone.
+
+The MicroPython binding glue (`gb_emu_module.c` and the engine-coupled
+`gb_emu_core.c`) was **not** vendored. We write our own thin wrapper
+in `src/gb_core.[ch]` that mirrors the `nes_core` / `sms_core` shape.
+
 ## smsplus/
 
 Sega Master System / Game Gear emulation core. Vendored from
