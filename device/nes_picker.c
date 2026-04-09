@@ -422,10 +422,7 @@ static void pref_load(picker_pref_t *p) {
     f_close(&f);
     if (p->view >  VIEW_LIST ) p->view = VIEW_HERO;
     if (p->tab  >= TAB_COUNT ) p->tab  = TAB_NES;
-    /* Sort is intentionally NOT restored — every session starts in
-     * alphabetical so the listing is predictable. The user can still
-     * cycle to favs/size with a MENU hold; it just won't persist. */
-    p->sort = SORT_ALPHA;
+    if (p->sort >= SORT_COUNT) p->sort = SORT_ALPHA;
 }
 
 static void pref_save(const picker_pref_t *p) {
@@ -549,13 +546,16 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
     }
 
     /* Title in 2× font. If it overflows the screen width we marquee
-     * it horizontally; otherwise centre it. */
+     * it horizontally; otherwise centre it. Favorites are tinted
+     * yellow (COL_TITLE) instead of plain white. */
     char nm[64];
     name_no_ext(nm, sizeof(nm), e->name);
+    int  is_fav = nes_picker_is_favorite(e->name);
+    uint16_t title_col = is_fav ? COL_TITLE : COL_FG;
     int title_y = thumb_y + 64 + 4;
     int tw = nes_font_width_2x(nm);
     if (tw <= FB_W - 4) {
-        nes_font_draw_2x(fb, nm, (FB_W - tw) / 2, title_y, COL_FG);
+        nes_font_draw_2x(fb, nm, (FB_W - tw) / 2, title_y, title_col);
     } else {
         /* Marquee: render the title at a negative x offset, then a
          * second copy after a gap so the loop is seamless. put()
@@ -564,8 +564,8 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
         const int gap = 24;
         int loop = tw + gap;
         int x0 = 2 - (marquee_offset % loop);
-        nes_font_draw_2x(fb, nm, x0,        title_y, COL_FG);
-        nes_font_draw_2x(fb, nm, x0 + loop, title_y, COL_FG);
+        nes_font_draw_2x(fb, nm, x0,        title_y, title_col);
+        nes_font_draw_2x(fb, nm, x0 + loop, title_y, title_col);
     }
 
     /* Meta line in small font under the title. */
@@ -574,13 +574,12 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
     int mw = nes_font_width(meta);
     nes_font_draw(fb, meta, (FB_W - mw) / 2, title_y + 13, COL_DIM);
 
-    /* Favorite star + position counter on the bottom row. */
+    /* Position counter on the bottom row. Favorite signal is the
+     * yellow title above. */
     char foot[24];
-    int is_fav = nes_picker_is_favorite(e->name);
-    snprintf(foot, sizeof(foot), "%c %d/%d", is_fav ? '*' : ' ',
-              sel + 1, n_view);
+    snprintf(foot, sizeof(foot), "%d/%d", sel + 1, n_view);
     int fw = nes_font_width(foot);
-    nes_font_draw(fb, foot, (FB_W - fw) / 2, FB_H - 8, is_fav ? COL_TITLE : COL_DIM);
+    nes_font_draw(fb, foot, (FB_W - fw) / 2, FB_H - 8, COL_DIM);
 
     /* Prev / next ROM arrow hints — both D-pad axes step ROMs. */
     if (sel > 0)          nes_font_draw(fb, "<", 2,        FB_H - 8, COL_DIM);
@@ -619,15 +618,17 @@ static void draw_list_view(uint16_t *fb, const nes_rom_entry *e,
             nes_thumb_placeholder(fb, 1, y, 32, e[idx].system);
         }
 
-        /* Name + meta to the right of the thumbnail. */
+        /* Name + meta to the right of the thumbnail. Favorites use
+         * the yellow title colour; the highlighted row still uses
+         * green for the active marker. */
         char nm[24];
         name_no_ext(nm, sizeof(nm), e[idx].name);
         if (strlen(nm) > 22) nm[22] = 0;
-        uint16_t fg = hl ? COL_HIGHLT : COL_FG;
         int is_fav = nes_picker_is_favorite(e[idx].name);
-        char row[26];
-        snprintf(row, sizeof(row), "%c%s", is_fav ? '*' : ' ', nm);
-        nes_font_draw(fb, row, 36, y + 4, fg);
+        uint16_t fg = hl     ? COL_HIGHLT
+                    : is_fav ? COL_TITLE
+                             : COL_FG;
+        nes_font_draw(fb, nm, 36, y + 4, fg);
 
         char meta[32];
         format_meta(meta, sizeof(meta), &e[idx]);
