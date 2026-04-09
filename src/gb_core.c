@@ -24,6 +24,7 @@
  */
 #include "gb_core.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -247,6 +248,90 @@ uint8_t *gbc_battery_ram(void) {
 
 size_t gbc_battery_size(void) {
     return s_cart_ram_size;
+}
+
+/* Save state magic + version. Bumped if the gb_s struct ever changes
+ * shape across a peanut_gb update. */
+#define GBC_STATE_MAGIC   0x47424353u   /* 'GBCS' */
+#define GBC_STATE_VERSION 1u
+
+#ifdef THUMBY_STATE_BRIDGE
+#  include "thumby_state_bridge.h"
+#endif
+
+int gbc_save_state(const char *path) {
+    if (!s_loaded || !path) return -1;
+    uint32_t hdr[3] = {
+        GBC_STATE_MAGIC,
+        GBC_STATE_VERSION,
+        (uint32_t)(sizeof(s_gb) + sizeof(s_apu)),
+    };
+#ifdef THUMBY_STATE_BRIDGE
+    thumby_state_io_t *io = thumby_state_open(path, "wb");
+    if (!io) return -2;
+    if (thumby_state_write(hdr, sizeof(hdr), 1, io) != 1
+     || thumby_state_write(&s_gb,  sizeof(s_gb),  1, io) != 1
+     || thumby_state_write(&s_apu, sizeof(s_apu), 1, io) != 1) {
+        thumby_state_close(io);
+        return -3;
+    }
+    thumby_state_close(io);
+    return 0;
+#else
+    FILE *f = fopen(path, "wb");
+    if (!f) return -2;
+    int ok = fwrite(hdr, sizeof(hdr), 1, f) == 1
+          && fwrite(&s_gb,  sizeof(s_gb),  1, f) == 1
+          && fwrite(&s_apu, sizeof(s_apu), 1, f) == 1;
+    fclose(f);
+    return ok ? 0 : -3;
+#endif
+}
+
+int gbc_load_state(const char *path) {
+    if (!s_loaded || !path) return -1;
+    uint32_t hdr[3];
+#ifdef THUMBY_STATE_BRIDGE
+    thumby_state_io_t *io = thumby_state_open(path, "rb");
+    if (!io) return -2;
+    if (thumby_state_read(hdr, sizeof(hdr), 1, io) != 1) { thumby_state_close(io); return -3; }
+    if (hdr[0] != GBC_STATE_MAGIC || hdr[1] != GBC_STATE_VERSION
+     || hdr[2] != (uint32_t)(sizeof(s_gb) + sizeof(s_apu))) {
+        thumby_state_close(io); return -4;
+    }
+    if (thumby_state_read(&s_gb,  sizeof(s_gb),  1, io) != 1
+     || thumby_state_read(&s_apu, sizeof(s_apu), 1, io) != 1) {
+        thumby_state_close(io); return -5;
+    }
+    thumby_state_close(io);
+#else
+    FILE *f = fopen(path, "rb");
+    if (!f) return -2;
+    if (fread(hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return -3; }
+    if (hdr[0] != GBC_STATE_MAGIC || hdr[1] != GBC_STATE_VERSION
+     || hdr[2] != (uint32_t)(sizeof(s_gb) + sizeof(s_apu))) {
+        fclose(f); return -4;
+    }
+    if (fread(&s_gb,  sizeof(s_gb),  1, f) != 1
+     || fread(&s_apu, sizeof(s_apu), 1, f) != 1) {
+        fclose(f); return -5;
+    }
+    fclose(f);
+#endif
+    /* Re-attach function pointers — they were serialized but the
+     * deserialized values point into the old wrapper's text section
+     * (or in our case, the same wrapper, but the principle is the
+     * same — clobber them with known-good pointers anyway). */
+    s_gb.gb_rom_read       = gb_rom_read_cb;
+    s_gb.gb_cart_ram_read  = gb_cart_ram_read_cb;
+    s_gb.gb_cart_ram_write = gb_cart_ram_write_cb;
+    s_gb.gb_error          = gb_error_cb;
+    s_gb.display.lcd_draw_line = lcd_draw_line_cb;
+    s_gb.gb_serial_tx = NULL;
+    s_gb.gb_serial_rx = NULL;
+    s_gb.gb_bootrom_read = NULL;
+    s_gb.direct.priv = NULL;
+    return 0;
 }
 
 void gbc_shutdown(void) {

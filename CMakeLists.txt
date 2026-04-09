@@ -14,6 +14,7 @@ add_compile_options(
     -Wno-unused-function
     -Wno-unused-variable
     -Wno-unused-but-set-variable
+    -Wno-unused-result
     -Wno-sign-compare
     -Wno-array-bounds
     -Wno-format

@@ -48,7 +48,13 @@ target_compile_definitions(nofrendo PRIVATE
     # script copies into SRAM at boot. The hot 6502 + PPU loops
     # then run from RAM instead of XIP flash, dodging cache misses.
     "IRAM_ATTR=__attribute__((section(\".time_critical.nes\")))"
+    # Redirect nofrendo's state.c stdio calls (fopen/fwrite/fread/
+    # fseek/fclose) through device/thumby_state_bridge.[ch] which
+    # wraps FatFs's f_open / f_write / etc. The host build uses
+    # libc stdio directly.
+    THUMBY_STATE_BRIDGE
 )
+target_include_directories(nofrendo PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(nofrendo PRIVATE
     -O3
     -Wno-array-bounds
@@ -129,6 +135,9 @@ target_compile_options(smsplus PRIVATE
     -Wno-implicit-function-declaration
     -fno-strict-aliasing
 )
+# Same state-save bridge nofrendo uses — see the comment above.
+target_compile_definitions(smsplus PRIVATE THUMBY_STATE_BRIDGE)
+target_include_directories(smsplus PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
 # Cross-platform glue lives outside the device directory; build it
 # here as a small static lib.
@@ -137,7 +146,11 @@ add_library(thumbynes_core STATIC
     ${NES_ROOT}/src/sms_core.c
     ${NES_ROOT}/src/gb_core.c
 )
-target_include_directories(thumbynes_core PUBLIC ${NES_ROOT}/src)
+target_include_directories(thumbynes_core PUBLIC
+    ${NES_ROOT}/src
+    ${CMAKE_CURRENT_LIST_DIR}     # for thumby_state_bridge.h
+)
+target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 
 # ----------------------------------------------------------------------
@@ -154,6 +167,7 @@ add_executable(nesrun_device
     nes_font.c
     nes_thumb.c
     nes_menu.c
+    thumby_state_bridge.c
     nes_run.c
     sms_run.c
     gb_run.c

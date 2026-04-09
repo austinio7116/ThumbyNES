@@ -23,6 +23,28 @@
 
 #include "nes.h"
 
+/* THUMBYNES PATCH: when compiled with -DTHUMBY_STATE_BRIDGE the
+ * fopen / fwrite / fread / fseek / fclose calls below redirect
+ * through a small FatFs-backed shim instead of libc stdio. The
+ * host build (with real stdio) leaves these as the standard
+ * library calls. See device/thumby_state_bridge.[ch]. */
+#ifdef THUMBY_STATE_BRIDGE
+#  include "thumby_state_bridge.h"
+#  define STATE_FILE   thumby_state_io_t
+#  define STATE_OPEN   thumby_state_open
+#  define STATE_CLOSE  thumby_state_close
+#  define STATE_WRITE  thumby_state_write
+#  define STATE_READ   thumby_state_read
+#  define STATE_SEEK   thumby_state_seek
+#else
+#  define STATE_FILE   FILE
+#  define STATE_OPEN   fopen
+#  define STATE_CLOSE  fclose
+#  define STATE_WRITE  fwrite
+#  define STATE_READ   fread
+#  define STATE_SEEK   fseek
+#endif
+
 /**
  * Save file format:
  *
@@ -63,7 +85,7 @@ typedef struct
 } block_t;
 
 #define _fread(buffer, size) {                       \
-   if (fread(buffer, size, 1, file) != 1)            \
+   if (STATE_READ(buffer, size, 1, file) != 1)       \
    {                                                 \
       MESSAGE_ERROR("state_load: fread failed.\n");  \
       goto _error;                                   \
@@ -71,7 +93,7 @@ typedef struct
 }
 
 #define _fwrite(buffer, size) {                      \
-   if (fwrite(buffer, size, 1, file) != 1)           \
+   if (STATE_WRITE(buffer, size, 1, file) != 1)      \
    {                                                 \
       MESSAGE_ERROR("state_save: fwrite failed.\n"); \
       goto _error;                                   \
@@ -121,9 +143,9 @@ int state_save(const char* fn)
    uint32 numberOfBlocks = 0;
    uint8 buffer[600];
    nes_t *machine = nes_getptr();
-   FILE *file;
+   STATE_FILE *file;
 
-   if (!(file = fopen(fn, "wb")))
+   if (!(file = STATE_OPEN(fn, "wb")))
    {
        MESSAGE_ERROR("state_save: file '%s' could not be opened.\n", fn);
        return -1; //goto _error;
@@ -273,11 +295,11 @@ int state_save(const char* fn)
    /****************************************************/
 
    // Update number of blocks
-   fseek(file, 4, SEEK_SET);
+   STATE_SEEK(file, 4, SEEK_SET);
    numberOfBlocks = swap32(numberOfBlocks);
    _fwrite(&numberOfBlocks, 4);
 
-   fclose(file);
+   STATE_CLOSE(file);
 
    MESSAGE_INFO("state_save: Game saved!\n");
 
@@ -285,7 +307,7 @@ int state_save(const char* fn)
 
 _error:
    MESSAGE_ERROR("state_save: Save failed!\n");
-   fclose(file);
+   STATE_CLOSE(file);
    return -1;
 }
 
@@ -295,9 +317,9 @@ int state_load(const char* fn)
    uint8 buffer[600];
 
    nes_t *machine = nes_getptr();
-   FILE *file;
+   STATE_FILE *file;
 
-   if (!(file = fopen(fn, "rb")))
+   if (!(file = STATE_OPEN(fn, "rb")))
    {
        MESSAGE_ERROR("state_load: file '%s' could not be opened.\n", fn);
        return -1; //goto _error;
@@ -318,7 +340,7 @@ int state_load(const char* fn)
 
    for (uint32 blk = 0; blk < numberOfBlocks; blk++)
    {
-      fseek(file, nextBlock, SEEK_SET);
+      STATE_SEEK(file, nextBlock, SEEK_SET);
       _fread(buffer, 12);
 
       uint32 blockVersion = swap32(*((uint32*)&buffer[4]));
@@ -472,7 +494,7 @@ int state_load(const char* fn)
    }
 
    /* close file, we're done */
-   fclose(file);
+   STATE_CLOSE(file);
 
    MESSAGE_INFO("state_load: Game restored\n");
 
@@ -480,6 +502,6 @@ int state_load(const char* fn)
 
 _error:
    MESSAGE_ERROR("state_load: Load failed!\n");
-   fclose(file);
+   STATE_CLOSE(file);
    return -1;
 }

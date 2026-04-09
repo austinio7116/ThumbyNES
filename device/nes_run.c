@@ -32,6 +32,7 @@
 #include "nes_font.h"
 #include "nes_thumb.h"
 #include "nes_menu.h"
+#include "nes_flash_disk.h"
 
 /* Pin map mirrors nes_buttons.c. We read raw GPIOs here so we can
  * remap LB/RB to Select/Start without going through the PICO-8
@@ -487,7 +488,15 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 { .kind = NES_MENU_KIND_ACTION, .label = "Save state",
                   .enabled = true,  .action_id = ACT_SAVE_STATE },
                 { .kind = NES_MENU_KIND_ACTION, .label = "Load state",
-                  .enabled = false, .action_id = ACT_LOAD_STATE },
+                  .enabled = ({
+                      char _p[NES_PICKER_PATH_MAX];
+                      make_sidecar_path(_p, sizeof(_p), name, ".sta");
+                      FIL _f;
+                      bool _exists = (f_open(&_f, _p, FA_READ) == FR_OK);
+                      if (_exists) f_close(&_f);
+                      _exists;
+                  }),
+                  .action_id = ACT_LOAD_STATE },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
                   .value_ptr = &v_scale, .choices = display_choices, .num_choices = 2,
                   .enabled = true },
@@ -545,14 +554,25 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
             if (r.kind == NES_MENU_ACTION) {
                 switch (r.action_id) {
-                case ACT_SAVE_STATE:
-                    snprintf(osd_text, sizeof(osd_text), "save TBD");
-                    osd_text_ms = 800;
+                case ACT_SAVE_STATE: {
+                    char path[NES_PICKER_PATH_MAX];
+                    make_sidecar_path(path, sizeof(path), name, ".sta");
+                    int rc = nesc_save_state(path);
+                    nes_flash_disk_flush();
+                    snprintf(osd_text, sizeof(osd_text),
+                              rc == 0 ? "state saved" : "save fail");
+                    osd_text_ms = 1000;
                     break;
-                case ACT_LOAD_STATE:
-                    snprintf(osd_text, sizeof(osd_text), "load TBD");
-                    osd_text_ms = 800;
+                }
+                case ACT_LOAD_STATE: {
+                    char path[NES_PICKER_PATH_MAX];
+                    make_sidecar_path(path, sizeof(path), name, ".sta");
+                    int rc = nesc_load_state(path);
+                    snprintf(osd_text, sizeof(osd_text),
+                              rc == 0 ? "state loaded" : "load fail");
+                    osd_text_ms = 1000;
                     break;
+                }
                 case ACT_QUIT:
                     exit_after = true;
                     break;

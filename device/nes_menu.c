@@ -79,19 +79,17 @@ static void fill_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
     }
 }
 
-/* In-place halve RGB565 brightness. Drops the LSB of each channel
- * after the right-shift, which is equivalent to dividing each
- * channel by 2 and masking out the borrow. ~32 K pixels × 4 ops. */
+/* In-place darken the framebuffer to ~1/4 brightness. Channel-correct
+ * — extract each channel, shift right by 2, repack. Eight ops per
+ * pixel × 16 K pixels at 250 MHz is irrelevant. */
 static void darken_fb(uint16_t *fb) {
     for (int i = 0; i < FB_W * FB_H; i++) {
         uint16_t p = fb[i];
-        /* RRRRRGGGGGGBBBBB → halve each channel.
-         * R: bits 11..15  -> >> 1 keeps top 4 bits
-         * G: bits  5..10  -> >> 1 keeps top 5 bits
-         * B: bits  0.. 4  -> >> 1 keeps top 4 bits
-         * Mask = ~(LSB of each channel) = 1111 0111 1110 1111 1011
-         * In hex: F7DE  (R lsb gone, G lsb gone, B lsb gone) */
-        fb[i] = (p >> 1) & 0x7BEF;
+        uint32_t r = (p >> 11) & 0x1F;
+        uint32_t g = (p >>  5) & 0x3F;
+        uint32_t b = (p      ) & 0x1F;
+        r >>= 2; g >>= 2; b >>= 2;
+        fb[i] = (uint16_t)((r << 11) | (g << 5) | b);
     }
 }
 
@@ -293,8 +291,12 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
         prev_lt = lt; prev_rt = rt; prev_up = up; prev_dn = dn;
         prev_a  = a;  prev_b  = b;  prev_menu = mn;
 
-        /* B or MENU = close menu without action. */
+        /* B or MENU = close menu without action. Drain the same
+         * way to avoid the runner re-reading the press. */
         if (e_b || e_mn) {
+            while (!gpio_get(BTN_B_GP) || !gpio_get(BTN_MENU_GP)) {
+                tud_task(); sleep_ms(10);
+            }
             return result;
         }
 
@@ -340,6 +342,11 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
             if (e_a) {
                 result.kind = NES_MENU_ACTION;
                 result.action_id = it->action_id;
+                /* Drain the A press before returning so the
+                 * caller (and any code the caller hands off to,
+                 * e.g. the picker after Quit) doesn't immediately
+                 * react to the same press. */
+                while (!gpio_get(BTN_A_GP)) { tud_task(); sleep_ms(10); }
                 return result;
             }
             break;

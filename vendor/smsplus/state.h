@@ -29,8 +29,17 @@
 #define STATE_VERSION   0x0104      /* Version 1.4 (BCD) */
 #define STATE_HEADER    "SST\0"     /* State file header */
 
-/* Function prototypes */
-extern int system_save_state(void *mem);
-extern void system_load_state(void *mem);
+/* THUMBYNES PATCH: parameter type switches between FILE* (host
+ * stdio build) and thumby_state_io_t* (device FatFs bridge) — see
+ * the same #ifdef in state.c. */
+#ifdef THUMBY_STATE_BRIDGE
+#  include "thumby_state_bridge.h"
+extern int  system_save_state(thumby_state_io_t *mem);
+extern void system_load_state(thumby_state_io_t *mem);
+#else
+#  include <stdio.h>
+extern int  system_save_state(FILE *mem);
+extern void system_load_state(FILE *mem);
+#endif
 
 #endif /* _STATE_H_ */

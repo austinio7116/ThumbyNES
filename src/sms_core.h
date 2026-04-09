@@ -83,5 +83,12 @@ int  smsc_audio_pull(int16_t *out, int n);
 uint8_t *smsc_battery_ram (void);
 size_t   smsc_battery_size(void);
 
+/* Save / load runtime state to a sidecar file (absolute FAT path,
+ * e.g. "/Sonic.sta"). Returns 0 on success. Routes through
+ * smsplus's system_save_state / system_load_state which use the
+ * thumby_state_bridge FatFs shim on the device build. */
+int smsc_save_state(const char *path);
+int smsc_load_state(const char *path);
+
 /* Tear down. */
 void smsc_shutdown(void);

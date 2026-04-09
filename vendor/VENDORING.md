@@ -1,5 +1,21 @@
 # Vendored sources
 
+## State save patches
+
+Both `nofrendo/nes/state.c` and `smsplus/state.c` have been minimally
+patched to route their `fopen` / `fwrite` / `fread` / `fseek` / `fclose`
+calls through `device/thumby_state_bridge.[ch]` (a tiny FatFs-backed
+shim) instead of libc stdio when compiled with `-DTHUMBY_STATE_BRIDGE`.
+The host build is unaffected — without the macro both files build
+against real stdio. The patch is a top-of-file `#ifdef` block that
+defines `STATE_FILE` / `STATE_OPEN` / `STATE_WRITE` / etc., plus a
+sed-style replacement of every `fopen` / `fwrite` / `fread` / `fseek`
+/ `fclose` token to its `STATE_*` equivalent. The associated header
+files were updated to declare the function signatures with the right
+parameter type per build mode. Required so the in-game pause menu's
+"Save state" / "Load state" actions can write the same `.sta`
+sidecars across all three vendored cores.
+
 ## peanut_gb/
 
 Game Boy (DMG) emulation core. Single-header library + minigb_apu

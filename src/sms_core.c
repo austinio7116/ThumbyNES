@@ -11,6 +11,10 @@
 #include <string.h>
 
 #include "shared.h"   /* pulls in system.h, sms.h, sound/sound.h, render.h */
+#include "state.h"    /* system_save_state / system_load_state */
+#ifdef THUMBY_STATE_BRIDGE
+#  include "thumby_state_bridge.h"
+#endif
 
 /* The bitmap smsplus renders into. Allocated per-session on the heap
  * so we don't pay the 49 KB BSS cost when the SMS core is idle. */
@@ -171,6 +175,42 @@ uint8_t *smsc_battery_ram(void)
 size_t smsc_battery_size(void)
 {
     return cart.sram ? 0x8000 : 0;
+}
+
+int smsc_save_state(const char *path)
+{
+    if (!path || !s_loaded) return -1;
+#ifdef THUMBY_STATE_BRIDGE
+    thumby_state_io_t *io = thumby_state_open(path, "wb");
+    if (!io) return -2;
+    int rc = system_save_state(io);
+    thumby_state_close(io);
+    return rc;
+#else
+    FILE *f = fopen(path, "wb");
+    if (!f) return -2;
+    int rc = system_save_state(f);
+    fclose(f);
+    return rc;
+#endif
+}
+
+int smsc_load_state(const char *path)
+{
+    if (!path || !s_loaded) return -1;
+#ifdef THUMBY_STATE_BRIDGE
+    thumby_state_io_t *io = thumby_state_open(path, "rb");
+    if (!io) return -2;
+    system_load_state(io);
+    thumby_state_close(io);
+    return 0;
+#else
+    FILE *f = fopen(path, "rb");
+    if (!f) return -2;
+    system_load_state(f);
+    fclose(f);
+    return 0;
+#endif
 }
 
 void smsc_shutdown(void)

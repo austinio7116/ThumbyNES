@@ -80,6 +80,13 @@ int  gbc_audio_pull(int16_t *out, int n);
 uint8_t *gbc_battery_ram (void);
 size_t   gbc_battery_size(void);
 
+/* Save / load runtime state to a sidecar file (absolute FAT path,
+ * e.g. "/Tetris.sta"). peanut_gb's struct gb_s plus minigb_apu_ctx
+ * is small enough (~17 KB total) to memcpy whole — we just write
+ * both blobs to disk and reverse on load. Returns 0 on success. */
+int gbc_save_state(const char *path);
+int gbc_load_state(const char *path);
+
 /* Tear down. Frees the cart-ram allocation; the rom buffer is
  * caller-owned and not touched. */
 void gbc_shutdown(void);

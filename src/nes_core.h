@@ -79,5 +79,13 @@ int  nesc_audio_pull(int16_t *out, int n);
 uint8_t *nesc_battery_ram   (void);
 size_t   nesc_battery_size  (void);
 
+/* Save / load runtime state to a sidecar file. Filename is the
+ * absolute FAT path (e.g. "/Sonic.sta"). Returns 0 on success.
+ * Wraps nofrendo's state_save / state_load which now route through
+ * the device/thumby_state_bridge.[ch] FatFs shim when compiled for
+ * the device build (THUMBY_STATE_BRIDGE). */
+int nesc_save_state(const char *path);
+int nesc_load_state(const char *path);
+
 /* Tear down. */
 void nesc_shutdown(void);

@@ -16,6 +16,7 @@
 #include "nes/apu.h"
 #include "nes/input.h"
 #include "nes/rom.h"
+#include "nes/state.h"
 
 static uint16_t s_palette[256];
 static uint8_t  s_buttons;
@@ -138,6 +139,18 @@ size_t nesc_battery_size(void)
     nes_t *nes = nes_getptr();
     if (!nes || !nes->cart || !nes->cart->battery) return 0;
     return (size_t)nes->cart->prg_ram_banks * ROM_PRG_BANK_SIZE;
+}
+
+int nesc_save_state(const char *path)
+{
+    if (!path) return -1;
+    return state_save(path);
+}
+
+int nesc_load_state(const char *path)
+{
+    if (!path) return -1;
+    return state_load(path);
 }
 
 void nesc_shutdown(void)

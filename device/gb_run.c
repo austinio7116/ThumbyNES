@@ -27,6 +27,8 @@
 #include "nes_buttons.h"
 #include "nes_font.h"
 #include "nes_thumb.h"
+#include "nes_menu.h"
+#include "nes_flash_disk.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -256,6 +258,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  menu_press_ms = 0;
     int  menu_was_down = 0;
     int  menu_consumed = 0;
+    int  open_menu     = 0;
     bool exit_after    = false;
 
     int pan_x = 16, pan_y = 8;
@@ -304,13 +307,17 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
-            if (lb_down && !prev_lb) {
-                show_fps = !show_fps; cfg_dirty = true; menu_consumed = 1;
+            /* MENU+A: snapshot framebuffer to .scr32 + .scr64. */
+            if (a_down && !prev_a) {
+                int rc = nes_thumb_save(fb, name);
+                snprintf(osd_text, sizeof(osd_text),
+                          rc == 0 ? "shot saved" : "shot fail");
+                osd_text_ms = 800;
+                menu_consumed = 1;
             }
+            /* CROP mode: cart keeps running, MENU+dpad pans the
+             * viewport continuously. */
             if (scale_mode == SCALE_CROP) {
-                /* In CROP mode the cart keeps running and the D-pad
-                 * goes to the game. MENU+dpad pans the viewport
-                 * continuously while held — no rising-edge gating. */
                 const int PAN_STEP = 1;
                 if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
                 if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
@@ -320,41 +327,13 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 if (pan_x > 32) pan_x = 32;
                 if (pan_y < 0)  pan_y = 0;
                 if (pan_y > 16) pan_y = 16;
-            } else {
-                /* FIT mode keeps the original chord set. */
-                if (up_down && !prev_up) {
-                    palette = (palette + 1) % GBC_PALETTE_COUNT;
-                    gbc_set_palette(palette);
-                    cfg_dirty = true; menu_consumed = 1;
-                    snprintf(osd_text, sizeof(osd_text), "pal: %s",
-                              gbc_palette_name(palette));
-                    osd_text_ms = 1000;
-                }
-                if (dn_down && !prev_dn) {
-                    fast_forward = !fast_forward; menu_consumed = 1;
-                }
-                if (lt_down && !prev_lt) {
-                    if (volume > VOL_MIN) volume--;
-                    cfg_dirty = true; menu_consumed = 1;
-                    snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
-                    osd_text_ms = 1000;
-                }
-                if (rt_down && !prev_rt) {
-                    if (volume < VOL_MAX) volume++;
-                    cfg_dirty = true; menu_consumed = 1;
-                    snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
-                    osd_text_ms = 1000;
-                }
             }
-            /* MENU+A: snapshot framebuffer to .scr32 + .scr64 sidecar. */
-            if (a_down && !prev_a) {
-                int rc = nes_thumb_save(fb, name);
-                snprintf(osd_text, sizeof(osd_text),
-                          rc == 0 ? "shot saved" : "shot fail");
-                osd_text_ms = 800;
+            /* MENU long hold (>= 500 ms with no chord) opens the
+             * in-game menu. */
+            if (menu_press_ms >= 500 && !menu_consumed) {
+                open_menu = 1;
                 menu_consumed = 1;
             }
-            if (menu_press_ms >= 600 && !menu_consumed) exit_after = true;
         } else {
             if (menu_was_down) {
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
@@ -371,6 +350,102 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         prev_up = up_down; prev_dn = dn_down;
         prev_lt = lt_down; prev_rt = rt_down;
         prev_a  = a_down;
+
+        /* ----- in-game menu ----- */
+        if (open_menu) {
+            open_menu = 0;
+            int v_scale = (int)scale_mode;
+            int v_vol   = volume;
+            int v_ff    = fast_forward ? 1 : 0;
+            int v_fps   = show_fps ? 1 : 0;
+            int v_pal   = palette;
+
+            static const char * const display_choices[] = { "FIT", "CROP" };
+            static const char * const palette_names_arr[] = {
+                "GREEN", "GREY", "POCKET", "CREAM", "BLUE", "RED",
+            };
+
+            enum { ACT_NONE, ACT_SAVE_STATE, ACT_LOAD_STATE, ACT_QUIT };
+
+            char sta_path[NES_PICKER_PATH_MAX];
+            make_sidecar_path(sta_path, sizeof(sta_path), name, ".sta");
+            FIL _f;
+            bool sta_exists = (f_open(&_f, sta_path, FA_READ) == FR_OK);
+            if (sta_exists) f_close(&_f);
+
+            nes_menu_item_t items[] = {
+                { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
+                  .enabled = true, .action_id = ACT_NONE },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Save state",
+                  .enabled = true,       .action_id = ACT_SAVE_STATE },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Load state",
+                  .enabled = sta_exists, .action_id = ACT_LOAD_STATE },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
+                  .value_ptr = &v_scale, .choices = display_choices, .num_choices = 2,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
+                  .value_ptr = &v_vol, .min = VOL_MIN, .max = VOL_MAX,
+                  .enabled = true },
+                { .kind = NES_MENU_KIND_TOGGLE, .label = "Fast-fwd",
+                  .value_ptr = &v_ff, .enabled = true },
+                { .kind = NES_MENU_KIND_TOGGLE, .label = "Show FPS",
+                  .value_ptr = &v_fps, .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Palette",
+                  .value_ptr = &v_pal, .choices = palette_names_arr,
+                  .num_choices = GBC_PALETTE_COUNT, .enabled = true },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
+                  .enabled = true, .action_id = ACT_QUIT },
+            };
+
+            char sub[28];
+            strncpy(sub, name, sizeof(sub) - 1);
+            sub[sizeof(sub) - 1] = 0;
+            char *dot = strrchr(sub, '.');
+            if (dot) *dot = 0;
+
+            nes_menu_result_t r = nes_menu_run(fb, "PAUSED", sub,
+                                                items, sizeof(items) / sizeof(items[0]));
+
+            if (v_scale != (int)scale_mode) {
+                scale_mode = (scale_mode_t)v_scale;
+                if (scale_mode == SCALE_CROP) { pan_x = 16; pan_y = 8; }
+                cfg_dirty = true;
+            }
+            if (v_vol   != volume       ) { volume       = v_vol;       cfg_dirty = true; }
+            if ((bool)v_ff    != fast_forward) { fast_forward = (bool)v_ff;       }
+            if ((bool)v_fps   != show_fps    ) { show_fps     = (bool)v_fps; cfg_dirty = true; }
+            if (v_pal != palette) {
+                palette = v_pal;
+                gbc_set_palette(palette);
+                cfg_dirty = true;
+            }
+
+            if (r.kind == NES_MENU_ACTION) {
+                switch (r.action_id) {
+                case ACT_SAVE_STATE: {
+                    int rc = gbc_save_state(sta_path);
+                    nes_flash_disk_flush();
+                    snprintf(osd_text, sizeof(osd_text),
+                              rc == 0 ? "state saved" : "save fail");
+                    osd_text_ms = 1000;
+                    break;
+                }
+                case ACT_LOAD_STATE: {
+                    int rc = gbc_load_state(sta_path);
+                    snprintf(osd_text, sizeof(osd_text),
+                              rc == 0 ? "state loaded" : "load fail");
+                    osd_text_ms = 1000;
+                    break;
+                }
+                case ACT_QUIT:
+                    exit_after = true;
+                    break;
+                }
+            }
+
+            next_frame = get_absolute_time();
+            last_input_us = (uint64_t)time_us_64();
+        }
 
         /* The cart always receives input — even in CROP mode. The
          * pan controls live on MENU+dpad above. */
