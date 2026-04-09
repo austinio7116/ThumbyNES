@@ -280,17 +280,16 @@ int nes_run_clock_override(const char *rom_name) {
     return (int)c.clock_mhz;
 }
 
-/* Linear volume scaling around VOL_UNITY = 15.
+/* Per-core volume scaling. NES output is quieter than the GB core
+ * so we apply a 3× system-specific factor on top of the slider:
  *   volume == 0          → silence
- *   volume == VOL_UNITY  → unity passthrough (1.0 ×)
- *   volume == VOL_MAX    → 2.0 × with hard clipping
- * The cores' raw output sits well below ±32767 so the 2x ceiling
- * has plenty of headroom on most carts before clipping kicks in. */
+ *   volume == VOL_UNITY  → 3.0 ×
+ *   volume == VOL_MAX    → 6.0 × with hard clipping at int16 bounds
+ * Slider keeps the same 0..30 range across all four runners. */
 static void scale_audio(int16_t *buf, int n, int volume) {
-    if (volume == VOL_UNITY) return;
     if (volume <= 0) { for (int i = 0; i < n; i++) buf[i] = 0; return; }
     for (int i = 0; i < n; i++) {
-        int32_t s = (int32_t)buf[i] * volume / VOL_UNITY;
+        int32_t s = (int32_t)buf[i] * volume * 3 / VOL_UNITY;
         if (s >  32767) s =  32767;
         if (s < -32768) s = -32768;
         buf[i] = (int16_t)s;

@@ -32,6 +32,13 @@ static float read_half_voltage(void)
 {
     nes_battery_init();
     adc_select_input(BATT_ADC_CH);
+    /* The first conversion after a channel switch on the RP2040/2350
+     * ADC returns the previously-selected channel's sample (it was
+     * already in flight when we changed inputs). Discard it and take
+     * the second read, which is from the channel we actually asked
+     * for. Without this the picker menu's Battery row only updates
+     * on the *second* time you open the menu. */
+    (void)adc_read();
     uint16_t raw = adc_read();
     return (float)raw * ADC_REF_VOLTS / (float)ADC_MAX_COUNT;
 }

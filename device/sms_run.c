@@ -263,13 +263,16 @@ int sms_run_clock_override(const char *rom_name) {
     return (int)c.clock_mhz;
 }
 
-/* See nes_run.c for the rationale — VOL_UNITY=15 is 1.0x and
- * VOL_MAX=30 is 2.0x with hard clipping at the int16 boundary. */
+/* SMS / GG output is noticeably quieter than the GB core, so apply
+ * a 4× system-specific gain on top of the user volume.
+ *   volume == 0          → silence
+ *   volume == VOL_UNITY  → 4.0 ×
+ *   volume == VOL_MAX    → 8.0 × with hard clipping at int16 bounds
+ */
 static void scale_audio(int16_t *buf, int n, int volume) {
-    if (volume == VOL_UNITY) return;
     if (volume <= 0) { for (int i = 0; i < n; i++) buf[i] = 0; return; }
     for (int i = 0; i < n; i++) {
-        int32_t s = (int32_t)buf[i] * volume / VOL_UNITY;
+        int32_t s = (int32_t)buf[i] * volume * 4 / VOL_UNITY;
         if (s >  32767) s =  32767;
         if (s < -32768) s = -32768;
         buf[i] = (int16_t)s;

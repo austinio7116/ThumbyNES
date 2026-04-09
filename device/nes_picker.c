@@ -1250,9 +1250,7 @@ int nes_picker_run(uint16_t *fb,
             }
 
             char about_text[24];
-            extern uint32_t __flash_binary_end;   /* not used; keeps line short */
-            (void)__flash_binary_end;
-            snprintf(about_text, sizeof(about_text), "ThumbyNES dev");
+            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.0");
 
             static const char * const view_choices[]  = { "HERO", "LIST" };
             static const char * const sort_choices[]  = { "ALPHA", "FAVS", "SIZE" };
