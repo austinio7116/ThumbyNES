@@ -228,44 +228,74 @@ int main(void) {
      * file doesn't sit around as cruft. Harmless if absent. */
     f_unlink("/.last");
 
-    /* Auto-defragment any large fragmented files left over from
-     * previous USB sessions. Without this, ROMs > ~256 KB that
-     * landed in fragmented free space fail the contiguous-cluster
-     * check in the XIP mmap path and the fall-back malloc can't
-     * fit them either, leaving the user with red "load err" splashes
-     * for the biggest carts.
+    /* Defragment any large fragmented files left over from previous
+     * USB sessions. ROMs > 256 KB rely on the XIP mmap path; if their
+     * flash file is fragmented the runner falls back to malloc and
+     * can't fit them, producing a red "load err -1" splash.
      *
-     * The pass walks /, identifies any non-system file > 64 KB whose
-     * cluster chain is non-contiguous, and rewrites it via the
-     * f_expand temp-file dance. Tiny files (.scr, .cfg, .sav, the
-     * picker bookkeeping) are skipped — only the big ROMs matter
-     * for XIP and only they're worth the rewrite cost.
-     *
-     * Pre-flight check: skip the pass entirely if nothing's
-     * fragmented, so quiet boots don't pay any extra startup time. */
+     * The pre-flight walks /, looking for any non-system file > 64 KB
+     * whose cluster chain is non-contiguous. When at least one is
+     * found, nes_picker_defrag() rewrites them via the f_expand
+     * temp-file dance. Holding B at boot forces the pass even if the
+     * pre-flight thinks nothing is fragmented. */
+#define BTN_B_GP_BOOT 25
+    int force_defrag = !gpio_get(BTN_B_GP_BOOT);
     {
+        /* Always show a brief diagnostic so the user can see the
+         * pre-flight ran. */
+        fb_fill(0x0000);
+        nes_font_draw(fb, "checking files",   18, 56, 0xFD20);
+        nes_lcd_present(fb);
+        nes_lcd_wait_idle();
+
         DIR  d;
         FILINFO fi;
-        int  needs_defrag = 0;
+        int  needs_defrag = force_defrag;
+        int  scanned      = 0;
+        int  large_count  = 0;
+        int  frag_count   = 0;
         if (f_opendir(&d, "/") == FR_OK) {
             while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
                 if (fi.fattrib & AM_DIR) continue;
                 if (fi.fname[0] == '.')  continue;
-                if (fi.fsize  < 64 * 1024) continue;
-                /* Reuse the picker's contiguity probe via mmap_rom —
-                 * it returns 0 on success. */
+                scanned++;
+                if (fi.fsize < 64 * 1024) continue;
+                large_count++;
                 const uint8_t *p; size_t l;
                 if (nes_picker_mmap_rom(fi.fname, &p, &l) != 0) {
+                    frag_count++;
                     needs_defrag = 1;
-                    break;
+                    /* Don't break — count them all so we can show
+                     * the total in the diagnostic. */
                 }
             }
             f_closedir(&d);
         }
+
+        /* Diagnostic line so we can tell at a glance whether the
+         * pre-flight saw any large files at all. */
+        char line[40];
+        snprintf(line, sizeof(line), "%d files / %d big",
+                  scanned, large_count);
+        int lw = nes_font_width(line);
+        nes_font_draw(fb, line, (128 - lw) / 2, 70, 0xFFFF);
+        snprintf(line, sizeof(line), "%d need defrag", frag_count);
+        lw = nes_font_width(line);
+        nes_font_draw(fb, line, (128 - lw) / 2, 80,
+                       (frag_count || force_defrag) ? 0xFFE0 : 0x07E0);
+        if (force_defrag) {
+            const char *forced = "B HELD - forcing";
+            int fw = nes_font_width(forced);
+            nes_font_draw(fb, forced, (128 - fw) / 2, 92, 0xF81F);
+        }
+        nes_lcd_present(fb);
+        nes_lcd_wait_idle();
+        sleep_ms(800);
+
         if (needs_defrag) {
             int n = nes_picker_defrag(fb);
             (void)n;
-            sleep_ms(400);   /* leave the "done" splash up briefly */
+            sleep_ms(400);
         }
     }
 
