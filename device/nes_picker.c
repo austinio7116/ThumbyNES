@@ -422,7 +422,10 @@ static void pref_load(picker_pref_t *p) {
     f_close(&f);
     if (p->view >  VIEW_LIST ) p->view = VIEW_HERO;
     if (p->tab  >= TAB_COUNT ) p->tab  = TAB_NES;
-    if (p->sort >= SORT_COUNT) p->sort = SORT_ALPHA;
+    /* Sort is intentionally NOT restored — every session starts in
+     * alphabetical so the listing is predictable. The user can still
+     * cycle to favs/size with a MENU hold; it just won't persist. */
+    p->sort = SORT_ALPHA;
 }
 
 static void pref_save(const picker_pref_t *p) {
