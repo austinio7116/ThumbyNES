@@ -579,9 +579,9 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
     int fw = nes_font_width(foot);
     nes_font_draw(fb, foot, (FB_W - fw) / 2, FB_H - 8, is_fav ? COL_TITLE : COL_DIM);
 
-    /* Up / down arrow hints (matches new control scheme). */
-    if (sel > 0)          nes_font_draw(fb, "^", 2,        FB_H - 8, COL_DIM);
-    if (sel < n_view - 1) nes_font_draw(fb, "v", FB_W - 6, FB_H - 8, COL_DIM);
+    /* Prev / next ROM arrow hints — both D-pad axes step ROMs. */
+    if (sel > 0)          nes_font_draw(fb, "<", 2,        FB_H - 8, COL_DIM);
+    if (sel < n_view - 1) nes_font_draw(fb, ">", FB_W - 6, FB_H - 8, COL_DIM);
 
     /* Sort mode badge in the top right corner of the title row. */
     nes_font_draw(fb, sort_label(sort), FB_W - 24, title_y - 7, COL_DIM);
@@ -688,6 +688,10 @@ int nes_picker_run(uint16_t *fb,
     int marquee = 0;          /* horizontal scroll offset for hero title */
     int last_sel = -1;        /* reset marquee on selection change       */
 
+    /* MENU short-tap vs hold disambiguation. */
+    int menu_press_ms = 0;
+    int menu_consumed = 0;    /* set when hold-fire happens; release is then ignored */
+
     /* Brief OSD overlay shown after sort / view changes. */
     char osd[24] = {0};
     int  osd_ms  = 0;
@@ -707,11 +711,21 @@ int nes_picker_run(uint16_t *fb,
         prev_lb = lb_down;
         prev_rb = rb_down;
 
-        /* ----- D-pad: spatial navigation ----- */
-        /* LEFT / RIGHT = prev / next tab (skip empty tabs).          */
+        /* ----- D-pad: navigate ROMs ----- */
+        /* LEFT / RIGHT and UP / DOWN all step prev / next ROM. */
+        if ((pressed & (0x01 | 0x04)) && sel > 0) {
+            sel--;
+            if (sel < top) top = sel;
+        }
+        if ((pressed & (0x02 | 0x08)) && sel < n_view - 1) {
+            sel++;
+            if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
+        }
+
+        /* ----- shoulder buttons: tab nav ----- */
         int tab_dir = 0;
-        if (pressed & 0x01) tab_dir = -1;
-        if (pressed & 0x02) tab_dir = +1;
+        if (lb_edge) tab_dir = -1;
+        if (rb_edge) tab_dir = +1;
         if (tab_dir) {
             int prev_real = (n_view > 0) ? view[sel] : -1;
             for (int tries = 0; tries < TAB_COUNT; tries++) {
@@ -722,32 +736,32 @@ int nes_picker_run(uint16_t *fb,
             sel = reseat_sel(view, n_view, prev_real);
             top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
         }
-        /* UP / DOWN = prev / next ROM (in either view). */
-        if ((pressed & 0x04) && sel > 0) {
-            sel--;
-            if (sel < top) top = sel;
-        }
-        if ((pressed & 0x08) && sel < n_view - 1) {
-            sel++;
-            if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
-        }
 
-        /* ----- shoulder buttons: sort + view ----- */
-        if (lb_edge) {
-            pref.sort = (pref.sort + 1) % SORT_COUNT;
-            int prev_real = (n_view > 0) ? view[sel] : -1;
-            n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
-            sel = reseat_sel(view, n_view, prev_real);
-            top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
-            snprintf(osd, sizeof(osd), "sort: %s", sort_label(pref.sort));
-            osd_ms = 900;
-        }
-        if (rb_edge) {
-            pref.view = (pref.view == VIEW_HERO) ? VIEW_LIST : VIEW_HERO;
-            top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
-            snprintf(osd, sizeof(osd),
-                      pref.view == VIEW_HERO ? "view: hero" : "view: list");
-            osd_ms = 900;
+        /* ----- MENU: short tap = toggle view, hold = cycle sort ----- */
+        if (nes_buttons_menu_pressed()) {
+            menu_press_ms += 16;
+            if (menu_press_ms >= 500 && !menu_consumed) {
+                /* Long-press fires once when the threshold is crossed. */
+                pref.sort = (pref.sort + 1) % SORT_COUNT;
+                int prev_real = (n_view > 0) ? view[sel] : -1;
+                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+                sel = reseat_sel(view, n_view, prev_real);
+                top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+                snprintf(osd, sizeof(osd), "sort: %s", sort_label(pref.sort));
+                osd_ms = 900;
+                menu_consumed = 1;
+            }
+        } else {
+            if (menu_press_ms > 0 && !menu_consumed) {
+                /* Short tap on release: toggle hero <-> list. */
+                pref.view = (pref.view == VIEW_HERO) ? VIEW_LIST : VIEW_HERO;
+                top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+                snprintf(osd, sizeof(osd),
+                          pref.view == VIEW_HERO ? "view: hero" : "view: list");
+                osd_ms = 900;
+            }
+            menu_press_ms = 0;
+            menu_consumed = 0;
         }
 
         /* ----- face buttons ----- */
@@ -767,12 +781,6 @@ int nes_picker_run(uint16_t *fb,
             favs_save();
             pref_save(&pref);
             return view[sel];
-        }
-
-        if (nes_buttons_menu_pressed()) {
-            favs_save();
-            pref_save(&pref);
-            return -1;
         }
 
         /* Reset marquee whenever the highlighted ROM changes. */
