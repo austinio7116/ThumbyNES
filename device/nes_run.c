@@ -389,9 +389,15 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (any_input) {
             last_input_us = (uint64_t)time_us_64();
             if (sleeping) {
-                /* Wake on any press. */
+                /* Wake on any press. Re-anchor the frame-pacing
+                 * deadline to "now" — otherwise next_frame is still
+                 * the timestamp from however many seconds ago we
+                 * last drew, sleep_until returns immediately, and
+                 * the loop runs flat out at uncapped speed until
+                 * wall-clock catches up. */
                 sleeping = false;
                 nes_lcd_backlight(1);
+                next_frame = get_absolute_time();
             }
         }
         if (!sleeping &&

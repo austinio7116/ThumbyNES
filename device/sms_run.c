@@ -328,7 +328,13 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         if (any_input) {
             last_input_us = (uint64_t)time_us_64();
-            if (sleeping) { sleeping = false; nes_lcd_backlight(1); }
+            if (sleeping) {
+                /* Re-anchor frame pacing on wake — see nes_run.c
+                 * for the full reasoning. */
+                sleeping = false;
+                nes_lcd_backlight(1);
+                next_frame = get_absolute_time();
+            }
         }
         if (!sleeping &&
             (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
