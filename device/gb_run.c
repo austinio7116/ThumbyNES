@@ -206,8 +206,20 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         rom_const = rom_alloc;
     }
 
-    if (gbc_init(22050) != 0)              { free(rom_alloc); return -2; }
-    if (gbc_load_rom(rom_const, sz) != 0)  { free(rom_alloc); return -3; }
+    if (gbc_init(22050) != 0)              { free(rom_alloc); return -20; }
+    int load_rc = gbc_load_rom(rom_const, sz);
+    if (load_rc != 0) {
+        free(rom_alloc);
+        /* Translate the wrapper code to a device-side label so the
+         * user can tell why the cart was rejected:
+         *   -1 -> -10 "bad header / too small"
+         *   -2 -> -11 "MBC unsupported (peanut_gb)"
+         *   -3 -> -12 "header checksum mismatch"  */
+        if (load_rc == -1) return -10;
+        if (load_rc == -2) return -11;
+        if (load_rc == -3) return -12;
+        return -13;
+    }
     battery_load(name);
 
     int          volume       = VOL_DEF;
@@ -280,28 +292,44 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (lb_down && !prev_lb) {
                 show_fps = !show_fps; cfg_dirty = true; menu_consumed = 1;
             }
-            if (up_down && !prev_up) {
-                palette = (palette + 1) % GBC_PALETTE_COUNT;
-                gbc_set_palette(palette);
-                cfg_dirty = true; menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text), "pal: %s",
-                          gbc_palette_name(palette));
-                osd_text_ms = 1000;
-            }
-            if (dn_down && !prev_dn) {
-                fast_forward = !fast_forward; menu_consumed = 1;
-            }
-            if (lt_down && !prev_lt) {
-                if (volume > VOL_MIN) volume--;
-                cfg_dirty = true; menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
-                osd_text_ms = 1000;
-            }
-            if (rt_down && !prev_rt) {
-                if (volume < VOL_MAX) volume++;
-                cfg_dirty = true; menu_consumed = 1;
-                snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
-                osd_text_ms = 1000;
+            if (scale_mode == SCALE_CROP) {
+                /* In CROP mode the cart keeps running and the D-pad
+                 * goes to the game. MENU+dpad pans the viewport
+                 * continuously while held — no rising-edge gating. */
+                const int PAN_STEP = 1;
+                if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
+                if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
+                if (lt_down) { pan_x -= PAN_STEP; menu_consumed = 1; }
+                if (rt_down) { pan_x += PAN_STEP; menu_consumed = 1; }
+                if (pan_x < 0)  pan_x = 0;
+                if (pan_x > 32) pan_x = 32;
+                if (pan_y < 0)  pan_y = 0;
+                if (pan_y > 16) pan_y = 16;
+            } else {
+                /* FIT mode keeps the original chord set. */
+                if (up_down && !prev_up) {
+                    palette = (palette + 1) % GBC_PALETTE_COUNT;
+                    gbc_set_palette(palette);
+                    cfg_dirty = true; menu_consumed = 1;
+                    snprintf(osd_text, sizeof(osd_text), "pal: %s",
+                              gbc_palette_name(palette));
+                    osd_text_ms = 1000;
+                }
+                if (dn_down && !prev_dn) {
+                    fast_forward = !fast_forward; menu_consumed = 1;
+                }
+                if (lt_down && !prev_lt) {
+                    if (volume > VOL_MIN) volume--;
+                    cfg_dirty = true; menu_consumed = 1;
+                    snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
+                    osd_text_ms = 1000;
+                }
+                if (rt_down && !prev_rt) {
+                    if (volume < VOL_MAX) volume++;
+                    cfg_dirty = true; menu_consumed = 1;
+                    snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
+                    osd_text_ms = 1000;
+                }
             }
             /* MENU+A: snapshot framebuffer to .scr32 + .scr64 sidecar. */
             if (a_down && !prev_a) {
@@ -329,24 +357,12 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         prev_lt = lt_down; prev_rt = rt_down;
         prev_a  = a_down;
 
-        if (scale_mode == SCALE_CROP) {
-            gbc_set_buttons(0);
-            const int STEP = 2;
-            if (!menu_down) {
-                if (up_down)   pan_y -= STEP;
-                if (dn_down)   pan_y += STEP;
-                if (lt_down)   pan_x -= STEP;
-                if (rt_down)   pan_x += STEP;
-                if (pan_x < 0)  pan_x = 0;
-                if (pan_x > 32) pan_x = 32;
-                if (pan_y < 0)  pan_y = 0;
-                if (pan_y > 16) pan_y = 16;
-            }
-        } else {
-            gbc_set_buttons(read_gb_buttons());
-        }
+        /* The cart always receives input — even in CROP mode. The
+         * pan controls live on MENU+dpad above. */
+        gbc_set_buttons(menu_down ? 0 : read_gb_buttons());
 
-        if (scale_mode != SCALE_CROP) {
+        /* And the cart always ticks. */
+        {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) gbc_run_frame();
             unsaved_play_frames += frame_runs;
@@ -371,7 +387,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             nes_lcd_present(fb);
         }
 
-        if (scale_mode != SCALE_CROP) {
+        {
             int n = gbc_audio_pull(audio, 1024);
             if (n > 0) {
                 scale_audio(audio, n, volume);

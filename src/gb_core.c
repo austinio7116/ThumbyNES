@@ -62,13 +62,15 @@ static const uint8_t *s_rom;       /* borrowed pointer */
 static size_t         s_rom_len;
 static bool           s_loaded;
 
-/* peanut_gb's max addressable cart RAM is 0x8000 (32 KB). */
+/* peanut_gb's max addressable cart RAM is 0x8000 (32 KB). Allocated
+ * on demand so the GB core costs zero BSS when not running. */
 #define GBC_CART_RAM_MAX  0x8000
-static uint8_t  s_cart_ram[GBC_CART_RAM_MAX];
+static uint8_t *s_cart_ram;
 static size_t   s_cart_ram_size;
 
-/* Full source framebuffer assembled by the line callback. */
-static uint8_t  s_vidbuf[GBC_SCREEN_W * GBC_SCREEN_H];
+/* Full source framebuffer assembled by the line callback. Heap-
+ * allocated per session for the same reason. */
+static uint8_t *s_vidbuf;
 
 /* RGB565 palette LUT (4 entries indexed by shade). */
 static uint16_t s_palette[4];
@@ -148,7 +150,16 @@ int gbc_init(int sample_rate) {
     (void)sample_rate;   /* fixed in vendored minigb_apu wrapper */
     s_loaded   = false;
     s_mixcount = 0;
-    memset(s_vidbuf, 0, sizeof(s_vidbuf));
+    if (!s_vidbuf) {
+        s_vidbuf = (uint8_t *)malloc(GBC_SCREEN_W * GBC_SCREEN_H);
+        if (!s_vidbuf) return -1;
+    }
+    if (!s_cart_ram) {
+        s_cart_ram = (uint8_t *)malloc(GBC_CART_RAM_MAX);
+        if (!s_cart_ram) return -2;
+    }
+    memset(s_vidbuf, 0, GBC_SCREEN_W * GBC_SCREEN_H);
+    memset(s_cart_ram, 0, GBC_CART_RAM_MAX);
     gbc_set_palette(GBC_PALETTE_GREEN);
     return 0;
 }
@@ -167,12 +178,11 @@ int gbc_load_rom(const uint8_t *data, size_t len) {
     if (err != GB_INIT_NO_ERROR) return -(int)err - 1;
 
     /* Ask peanut_gb how much cart RAM the loaded MBC actually uses
-     * and clamp to our static buffer. */
+     * and clamp to our scratch buffer. */
     size_t want = 0;
     gb_get_save_size_s(&s_gb, &want);
     if (want > GBC_CART_RAM_MAX) want = GBC_CART_RAM_MAX;
     s_cart_ram_size = want;
-    memset(s_cart_ram, 0, sizeof(s_cart_ram));
 
     gb_init_lcd(&s_gb, lcd_draw_line_cb);
     minigb_apu_audio_init(&s_apu);
@@ -244,4 +254,6 @@ void gbc_shutdown(void) {
     s_rom           = NULL;
     s_rom_len       = 0;
     s_cart_ram_size = 0;
+    if (s_vidbuf)   { free(s_vidbuf);   s_vidbuf   = NULL; }
+    if (s_cart_ram) { free(s_cart_ram); s_cart_ram = NULL; }
 }

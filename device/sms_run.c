@@ -169,6 +169,21 @@ static void blit_fit_gg(uint16_t *fb, const uint8_t *src, const uint16_t *pal,
     }
 }
 
+/* GG 1:1 native crop into a 128x128 window of the 160x144 viewport.
+ * pan in source coords, max 32 horizontal × 16 vertical. */
+static void blit_crop_gg(uint16_t *fb, const uint8_t *src, const uint16_t *pal,
+                          int vx, int vy, int pan_x, int pan_y) {
+    if (pan_x < 0)  pan_x = 0;
+    if (pan_x > 32) pan_x = 32;
+    if (pan_y < 0)  pan_y = 0;
+    if (pan_y > 16) pan_y = 16;
+    for (int dy = 0; dy < 128; dy++) {
+        const uint8_t *srow = src + (vy + pan_y + dy) * 256 + vx + pan_x;
+        uint16_t      *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) drow[dx] = pal[srow[dx]];
+    }
+}
+
 /* --- per-ROM cfg --------------------------------------------------- */
 
 #define CFG_MAGIC   0x534D5345u   /* 'SMSE' */
@@ -342,6 +357,20 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
                 osd_text_ms = 1000;
             }
+            /* GG CROP: while menu is held, the dpad continuously
+             * pans the viewport. SMS keeps its existing
+             * paused-with-dpad-pan behavior below. */
+            if (gg && scale_mode == SCALE_CROP) {
+                const int PAN_STEP = 1;
+                if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
+                if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
+                if (lt_down) { pan_x -= PAN_STEP; menu_consumed = 1; }
+                if (rt_down) { pan_x += PAN_STEP; menu_consumed = 1; }
+                if (pan_x < 0)  pan_x = 0;
+                if (pan_x > 32) pan_x = 32;
+                if (pan_y < 0)  pan_y = 0;
+                if (pan_y > 16) pan_y = 16;
+            }
             /* MENU+A: snapshot framebuffer to .scr32 + .scr64 sidecar. */
             if (a_down && !prev_a) {
                 int rc = nes_thumb_save(fb, name);
@@ -354,11 +383,11 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         } else {
             if (menu_was_down) {
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
-                    /* Only SMS gets CROP — GG already fills the screen. */
-                    if (!gg) {
-                        scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
-                        cfg_dirty = true;
-                        if (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 32; }
+                    scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+                    cfg_dirty = true;
+                    if (scale_mode == SCALE_CROP) {
+                        if (gg) { pan_x = 16; pan_y = 8; }   /* GG */
+                        else    { pan_x = 64; pan_y = 32; }  /* SMS */
                     }
                 }
                 menu_press_ms = 0;
@@ -372,6 +401,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         prev_a  = a_down;
 
         if (!gg && scale_mode == SCALE_CROP) {
+            /* SMS CROP: paused, dpad pans the viewport directly. */
             smsc_set_buttons(0);
             const int STEP = 4;
             if (!menu_down) {
@@ -385,9 +415,16 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 if (pan_y > 64)  pan_y = 64;
             }
         } else {
-            smsc_set_buttons(read_sms_buttons(gg));
+            /* FIT for either system, or GG CROP — cart receives input.
+             * In GG CROP we additionally suppress the cart's view of
+             * the dpad while MENU is held so MENU+dpad can pan. */
+            smsc_set_buttons((gg && scale_mode == SCALE_CROP && menu_down)
+                              ? 0
+                              : read_sms_buttons(gg));
         }
 
+        /* SMS CROP is the only path where the cart pauses; GG CROP
+         * keeps ticking like FIT. */
         if (gg || scale_mode != SCALE_CROP) {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) smsc_run_frame();
@@ -398,7 +435,10 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (frame) {
             nes_lcd_wait_idle();
             if (gg) {
-                blit_fit_gg(fb, frame, pal, vx, vy);
+                if (scale_mode == SCALE_CROP)
+                    blit_crop_gg(fb, frame, pal, vx, vy, pan_x, pan_y);
+                else
+                    blit_fit_gg (fb, frame, pal, vx, vy);
             } else if (scale_mode == SCALE_CROP) {
                 blit_crop_sms(fb, frame, pal, pan_x, pan_y);
             } else if (blend) {

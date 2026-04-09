@@ -22,7 +22,10 @@ static uint8_t  s_buttons;
 static int      s_sample_rate;
 /* Nofrendo's PPU writes into a host-supplied buffer of size
  * NES_SCREEN_PITCH * NES_SCREEN_HEIGHT bytes (palette indices). */
-static uint8_t  s_vidbuf[NES_SCREEN_PITCH * NES_SCREEN_HEIGHT];
+/* Heap-allocated per-session so we don't pay the 65 KB BSS cost when
+ * the NES core is idle (e.g. while the SMS or GB runner is active). */
+static uint8_t *s_vidbuf;
+#define NES_VIDBUF_BYTES  (NES_SCREEN_PITCH * NES_SCREEN_HEIGHT)
 
 /* Nofrendo blit callback signature: void blit(uint8 *bmp). The bmp
  * pointer is the active PPU framebuffer (with NES_SCREEN_OVERDRAW
@@ -41,7 +44,11 @@ int nesc_init(int system, int sample_rate)
         return -1;
 
     /* Hand the PPU a framebuffer to render into. */
-    memset(s_vidbuf, 0, sizeof(s_vidbuf));
+    if (!s_vidbuf) {
+        s_vidbuf = (uint8_t *)malloc(NES_VIDBUF_BYTES);
+        if (!s_vidbuf) return -2;
+    }
+    memset(s_vidbuf, 0, NES_VIDBUF_BYTES);
     nes_setvidbuf(s_vidbuf);
 
     nesc_set_palette(0);
@@ -137,4 +144,5 @@ void nesc_shutdown(void)
 {
     nofrendo_stop();
     nes_shutdown();
+    if (s_vidbuf) { free(s_vidbuf); s_vidbuf = NULL; }
 }

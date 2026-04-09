@@ -12,9 +12,9 @@
 
 #include "shared.h"   /* pulls in system.h, sms.h, sound/sound.h, render.h */
 
-/* The bitmap smsplus renders into. Must outlive the session. We size it
- * for SMS (256x192 = 49,152 bytes); GG just uses a centred sub-rect. */
-static uint8_t  s_vidbuf[SMSC_BITMAP_W * SMSC_BITMAP_H];
+/* The bitmap smsplus renders into. Allocated per-session on the heap
+ * so we don't pay the 49 KB BSS cost when the SMS core is idle. */
+static uint8_t *s_vidbuf;
 static uint16_t s_palette[256];
 static int16_t  s_mixbuf[2048];
 static int      s_mixcount;
@@ -27,6 +27,13 @@ int smsc_init(int console, int sample_rate)
 {
     s_loaded = false;
     s_mixcount = 0;
+
+    /* Allocate the bitmap on first init; reuse across sessions. */
+    if (!s_vidbuf) {
+        s_vidbuf = (uint8_t *)malloc(SMSC_BITMAP_W * SMSC_BITMAP_H);
+        if (!s_vidbuf) return -1;
+    }
+    memset(s_vidbuf, 0, SMSC_BITMAP_W * SMSC_BITMAP_H);
 
     /* Reset every option to known defaults, then layer our overrides. */
     system_reset_config();
@@ -178,4 +185,5 @@ void smsc_shutdown(void)
         if (cart.sram) { free(cart.sram); cart.sram = NULL; }
         s_loaded = false;
     }
+    if (s_vidbuf) { free(s_vidbuf); s_vidbuf = NULL; }
 }

@@ -232,7 +232,10 @@ uint8_t *nes_picker_load_rom(const char *name, size_t *out_len) {
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return NULL;
     FSIZE_t sz = f_size(&f);
-    if (sz < 16 || sz > 1024 * 1024) { f_close(&f); return NULL; }
+    /* Reject anything obviously larger than the available heap up
+     * front — saves a malloc-then-fail churn. The XIP mmap path
+     * handles the multi-megabyte cases. */
+    if (sz < 16 || sz > 256 * 1024) { f_close(&f); return NULL; }
     uint8_t *buf = (uint8_t *)malloc((size_t)sz);
     if (!buf) { f_close(&f); return NULL; }
     UINT br;
@@ -302,7 +305,8 @@ int nes_picker_mmap_rom(const char *name,
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return -2;
     FSIZE_t sz = f_size(&f);
-    if (sz < 16 || sz > 1024 * 1024) { f_close(&f); return -3; }
+    /* XIP mmap supports up to 8 MB — well past any GB / SMS / NES cart. */
+    if (sz < 16 || sz > 8 * 1024 * 1024) { f_close(&f); return -3; }
 
     DWORD start_cluster = f.obj.sclust;
     f_close(&f);
