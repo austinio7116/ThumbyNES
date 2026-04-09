@@ -841,6 +841,19 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
     int mw = nes_font_width(meta);
     nes_font_draw(fb, meta, (FB_W - mw) / 2, title_y + 13, COL_DIM);
 
+    /* Tab / system name in the larger 2× font, sitting between the
+     * meta line and the position counter. Same dim grey as the meta
+     * so the cart title above stays the focal point. */
+    static const char * const tab_label[TAB_COUNT] = {
+        "FAVORITES", "NES", "MASTER SYSTEM", "GAME BOY", "GAME GEAR",
+    };
+    if (active_tab >= 0 && active_tab < TAB_COUNT) {
+        const char *lbl = tab_label[active_tab];
+        int lw = nes_font_width_2x(lbl);
+        if (lw > FB_W - 4) lw = FB_W - 4;
+        nes_font_draw_2x(fb, lbl, (FB_W - lw) / 2, FB_H - 21, COL_DIM);
+    }
+
     /* Position counter on the bottom row. Favorite signal is the
      * yellow title above. */
     char foot[24];
@@ -1042,15 +1055,21 @@ int nes_picker_run(uint16_t *fb,
         prev_lb = lb_down;
         prev_rb = rb_down;
 
-        /* ----- D-pad: navigate ROMs ----- */
+        /* ----- D-pad: navigate ROMs (wraps at both ends) ----- */
         /* LEFT / RIGHT and UP / DOWN all step prev / next ROM. */
-        if ((pressed & (0x01 | 0x04)) && sel > 0) {
-            sel--;
+        if ((pressed & (0x01 | 0x04)) && n_view > 0) {
+            sel = (sel > 0) ? sel - 1 : n_view - 1;
+            /* Re-anchor `top` so the cursor stays on screen after
+             * the wrap. */
             if (sel < top) top = sel;
-        }
-        if ((pressed & (0x02 | 0x08)) && sel < n_view - 1) {
-            sel++;
             if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
+            if (top < 0) top = 0;
+        }
+        if ((pressed & (0x02 | 0x08)) && n_view > 0) {
+            sel = (sel < n_view - 1) ? sel + 1 : 0;
+            if (sel < top) top = sel;
+            if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
+            if (top < 0) top = 0;
         }
 
         /* ----- shoulder buttons: tab nav ----- */

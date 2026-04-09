@@ -67,9 +67,11 @@ Two views, swapped from the picker menu (`Display: HERO / LIST`):
 
 - **Hero view** (default) — one ROM per screen, 64×64 thumbnail
   centred under the tab strip, large 2×-scaled ROM title (auto-marquees
-  if it doesn't fit), meta line, favorite indication via yellow title
-  text, sort badge in the title row, position counter and prev/next
-  arrows along the bottom.
+  if it doesn't fit), small dim meta line, **the active tab name in
+  the larger 2× font** (`NES`, `MASTER SYSTEM`, `GAME BOY`, `GAME GEAR`,
+  `FAVORITES`), favorite indication via yellow title text, sort badge
+  in the title row, position counter with prev/next arrows along the
+  very bottom.
 - **List view** — three rows per screen, each row a 32×32 thumbnail
   next to the ROM name and meta. Highlighted row glows green; the
   selected row's position-in-tab appears as a third line.
@@ -82,7 +84,7 @@ placeholder: the platform icon centred on a tinted panel.
 
 | Key | Action |
 |---|---|
-| **LEFT / RIGHT / UP / DOWN** | prev / next ROM (any D-pad direction) |
+| **LEFT / RIGHT / UP / DOWN** | prev / next ROM (any D-pad direction; wraps at both ends) |
 | **LB / RB** | prev / next tab (skips empty tabs) |
 | **A** | launch the highlighted ROM |
 | **B tap** (< 300 ms) | toggle favorite (highlighted ROM goes yellow) |
