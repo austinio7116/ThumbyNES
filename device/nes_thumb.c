@@ -80,17 +80,23 @@ static void icon_nes(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
 }
 
 static void icon_sms(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
-    /* SMS: solid square with a single diagonal slash motif and a
-     * small power LED dot. */
-    int side = 8 * s;
-    int x = cx - side / 2, y = cy - side / 2;
-    fill_rect(fb, x, y, side, side, fg);
-    /* diagonal slash punched out */
-    for (int i = 0; i < side; i++) {
-        for (int t = 0; t < s; t++) put(fb, x + i, y + i + t, 0x0000);
-    }
-    /* power LED — small bright dot upper-left */
-    fill_rect(fb, x + s, y + s, s, s, 0xF800); /* red */
+    /* SMS: cartridge silhouette — a rectangular body with a narrower
+     * "handle" tab on top and a red label stripe through the middle.
+     * Reads as "SEGA cart" at 12×8 and scales cleanly to 64×64. */
+    int body_w = 8 * s, body_h = 6 * s;
+    int x = cx - body_w / 2, y = cy - body_h / 2 + s;
+    /* main body */
+    fill_rect(fb, x, y, body_w, body_h, fg);
+    /* handle on top (narrower, 2 px tall) */
+    int handle_w = 4 * s;
+    fill_rect(fb, cx - handle_w / 2, y - 2 * s, handle_w, 2 * s, fg);
+    /* red label stripe across the middle of the body */
+    int label_y = y + body_h / 2 - s / 2;
+    if (label_y < y) label_y = y;
+    fill_rect(fb, x, label_y, body_w, s, 0xF800);
+    /* dark notch at the bottom edge — connector contacts */
+    fill_rect(fb, x + s,           y + body_h - s, s, s, 0x0000);
+    fill_rect(fb, x + body_w - 2*s,y + body_h - s, s, s, 0x0000);
 }
 
 static void icon_gg(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {

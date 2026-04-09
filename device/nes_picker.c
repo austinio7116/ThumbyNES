@@ -399,22 +399,30 @@ static void format_meta(char *out, size_t outsz, const nes_rom_entry *e) {
 #define TAB_GG  3
 #define TAB_COUNT 4
 
+#define SORT_ALPHA 0   /* case-insensitive name */
+#define SORT_FAV   1   /* favorites first, then alpha */
+#define SORT_SIZE  2   /* largest first */
+#define SORT_COUNT 3
+
 typedef struct {
     uint8_t view;   /* VIEW_HERO / VIEW_LIST */
     uint8_t tab;    /* TAB_*                  */
-    uint8_t _pad[2];
+    uint8_t sort;   /* SORT_*                 */
+    uint8_t _pad;
 } picker_pref_t;
 
 static void pref_load(picker_pref_t *p) {
     p->view = VIEW_HERO;
     p->tab  = TAB_NES;
+    p->sort = SORT_ALPHA;
     FIL f;
     if (f_open(&f, VIEW_PATH, FA_READ) != FR_OK) return;
     UINT br = 0;
     f_read(&f, p, sizeof(*p), &br);
     f_close(&f);
-    if (p->view > VIEW_LIST) p->view = VIEW_HERO;
-    if (p->tab  >= TAB_COUNT) p->tab  = TAB_NES;
+    if (p->view >  VIEW_LIST ) p->view = VIEW_HERO;
+    if (p->tab  >= TAB_COUNT ) p->tab  = TAB_NES;
+    if (p->sort >= SORT_COUNT) p->sort = SORT_ALPHA;
 }
 
 static void pref_save(const picker_pref_t *p) {
@@ -425,11 +433,33 @@ static void pref_save(const picker_pref_t *p) {
     f_close(&f);
 }
 
-/* --- view (filtered index list) ------------------------------------ */
+/* --- view (filtered + sorted index list) --------------------------- */
 
-/* Build the visible-index map for the active tab. */
+static int sort_mode_g;   /* read by qsort comparators below */
+static const nes_rom_entry *sort_entries_g;
+
+static int cmp_alpha(const void *a, const void *b) {
+    int ai = *(const int *)a, bi = *(const int *)b;
+    return strcasecmp(sort_entries_g[ai].name, sort_entries_g[bi].name);
+}
+static int cmp_fav(const void *a, const void *b) {
+    int ai = *(const int *)a, bi = *(const int *)b;
+    int fa = nes_picker_is_favorite(sort_entries_g[ai].name) ? 0 : 1;
+    int fb = nes_picker_is_favorite(sort_entries_g[bi].name) ? 0 : 1;
+    if (fa != fb) return fa - fb;
+    return strcasecmp(sort_entries_g[ai].name, sort_entries_g[bi].name);
+}
+static int cmp_size(const void *a, const void *b) {
+    int ai = *(const int *)a, bi = *(const int *)b;
+    /* descending */
+    if (sort_entries_g[ai].size != sort_entries_g[bi].size)
+        return (int64_t)sort_entries_g[bi].size - (int64_t)sort_entries_g[ai].size > 0 ? 1 : -1;
+    return strcasecmp(sort_entries_g[ai].name, sort_entries_g[bi].name);
+}
+
+/* Build the visible-index map for the active tab and sort it in place. */
 static int build_view(const nes_rom_entry *entries, int n_entries,
-                       int *view, int tab) {
+                       int *view, int tab, int sort) {
     int n = 0;
     for (int i = 0; i < n_entries; i++) {
         switch (tab) {
@@ -442,7 +472,21 @@ static int build_view(const nes_rom_entry *entries, int n_entries,
         }
         view[n++] = i;
     }
+    sort_mode_g    = sort;
+    sort_entries_g = entries;
+    int (*cmp)(const void *, const void *) = cmp_alpha;
+    if      (sort == SORT_FAV ) cmp = cmp_fav;
+    else if (sort == SORT_SIZE) cmp = cmp_size;
+    qsort(view, (size_t)n, sizeof(int), cmp);
     return n;
+}
+
+static const char *sort_label(int sort) {
+    switch (sort) {
+    case SORT_FAV:  return "favs";
+    case SORT_SIZE: return "size";
+    default:        return "alpha";
+    }
 }
 
 /* Count entries per tab — used for tab badge labels. */
@@ -484,7 +528,8 @@ static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUN
 /* --- hero view (default, single ROM per screen) -------------------- */
 
 static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
-                      int n_view, int active_tab, const int counts[TAB_COUNT]) {
+                      int n_view, int active_tab, const int counts[TAB_COUNT],
+                      int sort, int marquee_offset) {
     fb_clear(fb, COL_BG);
     draw_tab_bar(fb, active_tab, counts);
 
@@ -500,17 +545,25 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
         nes_thumb_placeholder(fb, thumb_x, thumb_y, 64, e->system);
     }
 
-    /* Title in 2× font, centred. Truncate to fit 16 chars (128 / 8). */
+    /* Title in 2× font. If it overflows the screen width we marquee
+     * it horizontally; otherwise centre it. */
     char nm[64];
     name_no_ext(nm, sizeof(nm), e->name);
-    char title[17];
-    int  L = (int)strlen(nm);
-    if (L > 16) L = 16;
-    memcpy(title, nm, L);
-    title[L] = 0;
-    int tw = nes_font_width_2x(title);
     int title_y = thumb_y + 64 + 4;
-    nes_font_draw_2x(fb, title, (FB_W - tw) / 2, title_y, COL_FG);
+    int tw = nes_font_width_2x(nm);
+    if (tw <= FB_W - 4) {
+        nes_font_draw_2x(fb, nm, (FB_W - tw) / 2, title_y, COL_FG);
+    } else {
+        /* Marquee: render the title at a negative x offset, then a
+         * second copy after a gap so the loop is seamless. put()
+         * inside the font renderer clips against fb edges, so any
+         * glyph cells drawn off-screen on either side are dropped. */
+        const int gap = 24;
+        int loop = tw + gap;
+        int x0 = 2 - (marquee_offset % loop);
+        nes_font_draw_2x(fb, nm, x0,        title_y, COL_FG);
+        nes_font_draw_2x(fb, nm, x0 + loop, title_y, COL_FG);
+    }
 
     /* Meta line in small font under the title. */
     char meta[32];
@@ -526,9 +579,12 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
     int fw = nes_font_width(foot);
     nes_font_draw(fb, foot, (FB_W - fw) / 2, FB_H - 8, is_fav ? COL_TITLE : COL_DIM);
 
-    /* Left / right arrows hint. */
-    if (sel > 0)          nes_font_draw(fb, "<", 2, FB_H - 8, COL_DIM);
-    if (sel < n_view - 1) nes_font_draw(fb, ">", FB_W - 6, FB_H - 8, COL_DIM);
+    /* Up / down arrow hints (matches new control scheme). */
+    if (sel > 0)          nes_font_draw(fb, "^", 2,        FB_H - 8, COL_DIM);
+    if (sel < n_view - 1) nes_font_draw(fb, "v", FB_W - 6, FB_H - 8, COL_DIM);
+
+    /* Sort mode badge in the top right corner of the title row. */
+    nes_font_draw(fb, sort_label(sort), FB_W - 24, title_y - 7, COL_DIM);
 }
 
 /* --- list view (3 rows of 32×32 thumbnail + name + meta) ----------- */
@@ -585,6 +641,21 @@ static void draw_list_view(uint16_t *fb, const nes_rom_entry *e,
 
 /* --- public entry --------------------------------------------------- */
 
+/* Reseat selection across a build_view rebuild so the user stays on
+ * (or near) the same ROM. Returns the new sel. */
+static int reseat_sel(int *view, int n_view, int prev_real) {
+    if (n_view == 0) return 0;
+    /* Try exact match first. */
+    for (int i = 0; i < n_view; i++) if (view[i] == prev_real) return i;
+    /* Otherwise the closest entry by absolute index distance. */
+    int best = 0, best_d = 0x7fffffff;
+    for (int i = 0; i < n_view; i++) {
+        int d = view[i] - prev_real; if (d < 0) d = -d;
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+}
+
 int nes_picker_run(uint16_t *fb,
                     const nes_rom_entry *entries, int n_entries) {
     /* No ROMs: stay in splash, pump USB, exit when caller has files. */
@@ -602,8 +673,7 @@ int nes_picker_run(uint16_t *fb,
     int counts[TAB_COUNT];
     tab_counts(entries, n_entries, counts);
 
-    /* If the persisted tab is empty (e.g. first boot with only NES
-     * ROMs but the pref says GG), find a tab that has ROMs. */
+    /* Land on a tab that actually has ROMs. */
     if (counts[pref.tab] == 0) {
         for (int t = 0; t < TAB_COUNT; t++) {
             if (counts[t] > 0) { pref.tab = t; break; }
@@ -611,18 +681,25 @@ int nes_picker_run(uint16_t *fb,
     }
 
     static int view[NES_PICKER_MAX_ROMS];
-    int n_view = build_view(entries, n_entries, view, pref.tab);
+    int n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
     int sel = 0, top = 0;
 
     uint8_t prev = 0;
-    int prev_lb = 0, prev_rb = 0;
-    bool dirty = true;
+    int marquee = 0;          /* horizontal scroll offset for hero title */
+    int last_sel = -1;        /* reset marquee on selection change       */
+
+    /* Brief OSD overlay shown after sort / view changes. */
+    char osd[24] = {0};
+    int  osd_ms  = 0;
 
     while (1) {
         uint8_t b = nes_buttons_read();
         uint8_t pressed = b & ~prev;
         prev = b;
 
+        /* Read shoulder + menu GPIOs directly so we don't tangle them
+         * up in nes_buttons_read's diagonal-coalescing logic. */
+        static int prev_lb = 0, prev_rb = 0;
         int lb_down = !gpio_get(BTN_LB_GP);
         int rb_down = !gpio_get(BTN_RB_GP);
         int lb_edge = lb_down && !prev_lb;
@@ -630,75 +707,62 @@ int nes_picker_run(uint16_t *fb,
         prev_lb = lb_down;
         prev_rb = rb_down;
 
-        /* LB / RB: switch tab. Skip empty tabs so the user always
-         * lands on something visible. */
-        int tab_change = 0;
-        if (lb_edge) { pref.tab = (pref.tab + TAB_COUNT - 1) % TAB_COUNT; tab_change = -1; }
-        if (rb_edge) { pref.tab = (pref.tab + 1) % TAB_COUNT;             tab_change = +1; }
-        if (tab_change) {
-            for (int tries = 0; tries < TAB_COUNT && counts[pref.tab] == 0; tries++) {
-                pref.tab = (pref.tab + TAB_COUNT + tab_change) % TAB_COUNT;
+        /* ----- D-pad: spatial navigation ----- */
+        /* LEFT / RIGHT = prev / next tab (skip empty tabs).          */
+        int tab_dir = 0;
+        if (pressed & 0x01) tab_dir = -1;
+        if (pressed & 0x02) tab_dir = +1;
+        if (tab_dir) {
+            int prev_real = (n_view > 0) ? view[sel] : -1;
+            for (int tries = 0; tries < TAB_COUNT; tries++) {
+                pref.tab = (pref.tab + TAB_COUNT + tab_dir) % TAB_COUNT;
+                if (counts[pref.tab] > 0) break;
             }
-            n_view = build_view(entries, n_entries, view, pref.tab);
-            sel = 0; top = 0;
-            dirty = true;
+            n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+            sel = reseat_sel(view, n_view, prev_real);
+            top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+        }
+        /* UP / DOWN = prev / next ROM (in either view). */
+        if ((pressed & 0x04) && sel > 0) {
+            sel--;
+            if (sel < top) top = sel;
+        }
+        if ((pressed & 0x08) && sel < n_view - 1) {
+            sel++;
+            if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
         }
 
-        /* MENU short tap = toggle hero <-> list view; long hold =
-         * back to lobby (handled below by nes_buttons_menu_pressed). */
-        /* We approximate "short tap" by detecting MENU rising edge
-         * via the button mask. nes_buttons_read doesn't expose MENU
-         * directly, so we sniff the GPIO ourselves. */
-        /* (handled inside the menu_pressed long-press path below) */
-
-        if (pref.view == VIEW_HERO) {
-            /* LEFT / RIGHT = prev / next ROM in tab. */
-            if ((pressed & 0x01) && sel > 0)            { sel--;       dirty = true; }
-            if ((pressed & 0x02) && sel < n_view - 1)   { sel++;       dirty = true; }
-            /* UP / DOWN = jump to list view. */
-            if (pressed & (0x04 | 0x08)) {
-                pref.view = VIEW_LIST;
-                top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
-                pref_save(&pref);
-                dirty = true;
-            }
-        } else { /* VIEW_LIST */
-            if ((pressed & 0x04) && sel > 0) {
-                sel--;
-                if (sel < top) top = sel;
-                dirty = true;
-            }
-            if ((pressed & 0x08) && sel < n_view - 1) {
-                sel++;
-                if (sel >= top + LIST_ROWS) top = sel - LIST_ROWS + 1;
-                dirty = true;
-            }
-            /* LEFT / RIGHT in list view jump back to hero. */
-            if (pressed & (0x01 | 0x02)) {
-                pref.view = VIEW_HERO;
-                pref_save(&pref);
-                dirty = true;
-            }
+        /* ----- shoulder buttons: sort + view ----- */
+        if (lb_edge) {
+            pref.sort = (pref.sort + 1) % SORT_COUNT;
+            int prev_real = (n_view > 0) ? view[sel] : -1;
+            n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+            sel = reseat_sel(view, n_view, prev_real);
+            top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+            snprintf(osd, sizeof(osd), "sort: %s", sort_label(pref.sort));
+            osd_ms = 900;
+        }
+        if (rb_edge) {
+            pref.view = (pref.view == VIEW_HERO) ? VIEW_LIST : VIEW_HERO;
+            top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+            snprintf(osd, sizeof(osd),
+                      pref.view == VIEW_HERO ? "view: hero" : "view: list");
+            osd_ms = 900;
         }
 
-        /* B = toggle favorite. */
+        /* ----- face buttons ----- */
+        /* B (PICO-8 O = bit 4) = toggle favorite. */
         if ((pressed & 0x10) && n_view > 0) {
             int prev_real = view[sel];
             favs_toggle(entries[prev_real].name);
             tab_counts(entries, n_entries, counts);
-            n_view = build_view(entries, n_entries, view, pref.tab);
-            int new_sel = 0;
-            for (int i = 0; i < n_view; i++) {
-                if (view[i] >= prev_real) { new_sel = i; break; }
-            }
-            sel = (n_view > 0) ? new_sel : 0;
+            n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+            sel = reseat_sel(view, n_view, prev_real);
             if (sel < top) top = sel;
             if (top + LIST_ROWS <= sel) top = sel - LIST_ROWS + 1;
             if (top < 0) top = 0;
-            dirty = true;
         }
-
-        /* X = physical A = launch. */
+        /* A (PICO-8 X = bit 5) = launch. */
         if ((pressed & 0x20) && n_view > 0) {
             favs_save();
             pref_save(&pref);
@@ -711,18 +775,27 @@ int nes_picker_run(uint16_t *fb,
             return -1;
         }
 
-        if (dirty) {
-            if (pref.view == VIEW_HERO) {
-                draw_hero(fb, n_view > 0 ? &entries[view[sel]] : NULL,
-                           sel, n_view, pref.tab, counts);
-            } else {
-                draw_list_view(fb, entries, view, n_view, sel, top,
-                                pref.tab, counts);
-            }
-            nes_lcd_wait_idle();
-            nes_lcd_present(fb);
-            dirty = false;
+        /* Reset marquee whenever the highlighted ROM changes. */
+        if (sel != last_sel) { marquee = 0; last_sel = sel; }
+        else                 { marquee += 1; }
+
+        /* Always redraw — the marquee ticks every frame. */
+        if (pref.view == VIEW_HERO) {
+            draw_hero(fb, n_view > 0 ? &entries[view[sel]] : NULL,
+                       sel, n_view, pref.tab, counts, pref.sort, marquee);
+        } else {
+            draw_list_view(fb, entries, view, n_view, sel, top,
+                            pref.tab, counts);
         }
+        if (osd_ms > 0) {
+            int w = nes_font_width(osd);
+            int x = (FB_W - w) / 2;
+            fb_rect(fb, x - 2, FB_H - 18, w + 4, 9, 0x0000);
+            nes_font_draw(fb, osd, x, FB_H - 17, COL_TITLE);
+            osd_ms -= 16;
+        }
+        nes_lcd_wait_idle();
+        nes_lcd_present(fb);
 
         /* Keep USB alive while picker is up. */
         tud_task();
