@@ -80,3 +80,37 @@ int nes_font_width(const char *text) {
     for (; *text; text++) if (*text != '\n') n++;
     return n * NES_FONT_CELL_W;
 }
+
+/* 2× scaled draw — every glyph pixel becomes a 2×2 block. The glyph
+ * grid is the same 3×5 source as nes_font_draw, so the rendered cell
+ * is 6×10 inside an 8×12 cell. */
+int nes_font_draw_2x(uint16_t *fb, const char *text, int x, int y, uint16_t color) {
+    if (!text || !fb) return x;
+    int cur_x = x, cur_y = y;
+    for (; *text; text++) {
+        unsigned char ch = (unsigned char)*text;
+        if (ch == '\n') { cur_x = x; cur_y += NES_FONT_CELL_H2; continue; }
+        uint16_t g = (ch < 128) ? font[ch] : glyph_unknown;
+        for (int row = 0; row < 5; row++) {
+            int bits = (g >> (row * 3)) & 0x7;
+            int dy = cur_y + row * 2;
+            for (int col = 0; col < 3; col++) {
+                if (!(bits & (1 << col))) continue;
+                int dx = cur_x + col * 2;
+                put(fb, dx,     dy,     color);
+                put(fb, dx + 1, dy,     color);
+                put(fb, dx,     dy + 1, color);
+                put(fb, dx + 1, dy + 1, color);
+            }
+        }
+        cur_x += NES_FONT_CELL_W2;
+    }
+    return cur_x;
+}
+
+int nes_font_width_2x(const char *text) {
+    if (!text) return 0;
+    int n = 0;
+    for (; *text; text++) if (*text != '\n') n++;
+    return n * NES_FONT_CELL_W2;
+}

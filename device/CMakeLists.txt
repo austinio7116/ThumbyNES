@@ -134,6 +134,7 @@ add_executable(nesrun_device
     nes_msc.c
     nes_picker.c
     nes_font.c
+    nes_thumb.c
     nes_run.c
     sms_run.c
     usb_descriptors.c

@@ -17,6 +17,7 @@
 #include "nes_audio_pwm.h"
 #include "nes_buttons.h"
 #include "nes_font.h"
+#include "nes_thumb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -279,7 +280,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
      * scale already shows the entire 160x144 frame. */
     int pan_x = 64, pan_y = 32;
     int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
-    int prev_lt = 0, prev_rt = 0;
+    int prev_lt = 0, prev_rt = 0, prev_a = 0;
 
     int16_t audio[1024];
 
@@ -296,9 +297,10 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         int dn_down = !gpio_get(BTN_DOWN_GP);
         int lt_down = !gpio_get(BTN_LEFT_GP);
         int rt_down = !gpio_get(BTN_RIGHT_GP);
+        int a_down  = !gpio_get(BTN_A_GP);
         int any_input = menu_down || lb_down || rb_down || up_down || dn_down
                         || lt_down || rt_down
-                        || !gpio_get(BTN_A_GP) || !gpio_get(BTN_B_GP);
+                        || a_down || !gpio_get(BTN_B_GP);
 
         if (any_input) {
             last_input_us = (uint64_t)time_us_64();
@@ -340,6 +342,14 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
                 osd_text_ms = 1000;
             }
+            /* MENU+A: snapshot framebuffer to .scr32 + .scr64 sidecar. */
+            if (a_down && !prev_a) {
+                int rc = nes_thumb_save(fb, name);
+                snprintf(osd_text, sizeof(osd_text),
+                          rc == 0 ? "shot saved" : "shot fail");
+                osd_text_ms = 800;
+                menu_consumed = 1;
+            }
             if (menu_press_ms >= 600 && !menu_consumed) exit_after = true;
         } else {
             if (menu_was_down) {
@@ -359,6 +369,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         prev_lb = lb_down; prev_rb = rb_down;
         prev_up = up_down; prev_dn = dn_down;
         prev_lt = lt_down; prev_rt = rt_down;
+        prev_a  = a_down;
 
         if (!gg && scale_mode == SCALE_CROP) {
             smsc_set_buttons(0);

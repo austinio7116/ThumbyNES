@@ -30,6 +30,7 @@
 #include "ff.h"
 
 #include "nes_font.h"
+#include "nes_thumb.h"
 
 /* Pin map mirrors nes_buttons.c. We read raw GPIOs here so we can
  * remap LB/RB to Select/Start without going through the PICO-8
@@ -346,7 +347,7 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int pan_y = 56;
     /* Edge-detect chord buttons so a held press fires once. */
     int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
-    int prev_lt = 0, prev_rt = 0, prev_b = 0;
+    int prev_lt = 0, prev_rt = 0, prev_b = 0, prev_a = 0;
 
     /* Per-frame audio scratch. 22050 / 60 ≈ 368 samples per frame. */
     int16_t audio[1024];
@@ -371,9 +372,9 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         int lt_down = !gpio_get(BTN_LEFT_GP);
         int rt_down = !gpio_get(BTN_RIGHT_GP);
         int b_down  = !gpio_get(BTN_B_GP);
+        int a_down  = !gpio_get(BTN_A_GP);
         int any_input = menu_down || lb_down || rb_down || up_down || dn_down
-                        || lt_down || rt_down || b_down
-                        || !gpio_get(BTN_A_GP);
+                        || lt_down || rt_down || b_down || a_down;
 
         /* --- idle sleep tracking --- */
         if (any_input) {
@@ -454,6 +455,16 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 snprintf(osd_text, sizeof(osd_text), "vol %d", volume);
                 osd_text_ms = 1000;
             }
+            /* MENU+A: snapshot the current 128×128 framebuffer to a
+             * .scr32 + .scr64 sidecar that the picker reads back as
+             * inline / hero thumbnails. */
+            if (a_down && !prev_a) {
+                int rc = nes_thumb_save(fb, name);
+                snprintf(osd_text, sizeof(osd_text),
+                          rc == 0 ? "shot saved" : "shot fail");
+                osd_text_ms = 800;
+                menu_consumed = 1;
+            }
             if (menu_press_ms >= 600 && !menu_consumed) {
                 exit_after = true;
             }
@@ -481,6 +492,7 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         prev_lt = lt_down;
         prev_rt = rt_down;
         prev_b  = b_down;
+        prev_a  = a_down;
 
         /* Input gating: in CROP mode the cart receives nothing — the
          * D-pad pans the viewport instead so the user can read text
