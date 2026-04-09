@@ -40,13 +40,19 @@ int nes_picker_scan(nes_rom_entry *out, int max);
 
 /* Run the picker UI against `fb` (128×128 RGB565). Reads buttons,
  * presents to the LCD each frame. Returns the index of the chosen
- * ROM in `entries[]`, or -1 if MENU was pressed (back/cancel).
+ * ROM in `entries[]` when the user launches a cart.
  *
- * If `n_entries == 0` shows a "no ROMs — drag .nes via USB" splash
- * and stays in that state until a ROM appears, returning 0 once it
- * does. The caller is expected to keep pumping USB MSC tasks. */
+ * `entries` is mutable and `n_entries` is in/out — the picker
+ * re-scans the FAT volume into the buffer whenever it detects USB
+ * MSC activity has gone quiet, so files added or deleted via USB
+ * appear/disappear without having to power-cycle. The caller's
+ * `*n_entries` is updated to reflect the new total.
+ *
+ * If `*n_entries == 0` on entry the picker shows a "no ROMs" splash
+ * and stays in that state until a ROM appears (then returns 0). The
+ * caller is expected to keep pumping USB MSC tasks. */
 int nes_picker_run(uint16_t *fb,
-                    const nes_rom_entry *entries, int n_entries);
+                    nes_rom_entry *entries, int *n_entries);
 
 /* Slurp a ROM file into a malloc'd buffer. Caller frees.
  * Use only for small (< ~300 KB) files — see nes_picker_mmap_rom

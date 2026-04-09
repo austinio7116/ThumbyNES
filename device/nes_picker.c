@@ -831,8 +831,35 @@ static int reseat_sel(int *view, int n_view, int prev_real) {
     return best;
 }
 
+/* Delete a ROM and its sidecars (.sav .cfg .scr32 .scr64). Also
+ * removes it from the favorites list. Returns 0 on success. */
+static int delete_rom_and_sidecars(const char *name) {
+    char p[NES_PICKER_PATH_MAX];
+    snprintf(p, sizeof(p), "/%s", name); f_unlink(p);
+
+    /* Strip the extension once and append each sidecar suffix. */
+    char base[NES_PICKER_NAME_MAX];
+    strncpy(base, name, sizeof(base) - 1);
+    base[sizeof(base) - 1] = 0;
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = 0;
+
+    snprintf(p, sizeof(p), "/%s.sav",   base); f_unlink(p);
+    snprintf(p, sizeof(p), "/%s.cfg",   base); f_unlink(p);
+    snprintf(p, sizeof(p), "/%s.scr32", base); f_unlink(p);
+    snprintf(p, sizeof(p), "/%s.scr64", base); f_unlink(p);
+
+    /* Drop from favorites if present. favs_toggle removes if there. */
+    if (nes_picker_is_favorite(name)) favs_toggle(name);
+
+    nes_flash_disk_flush();
+    return 0;
+}
+
 int nes_picker_run(uint16_t *fb,
-                    const nes_rom_entry *entries, int n_entries) {
+                    nes_rom_entry *entries, int *n_entries_io) {
+    int n_entries = *n_entries_io;
+
     /* No ROMs: stay in splash, pump USB, exit when caller has files. */
     if (n_entries == 0) {
         draw_no_roms_splash(fb);
@@ -866,6 +893,22 @@ int nes_picker_run(uint16_t *fb,
     /* MENU short-tap vs hold disambiguation. */
     int menu_press_ms = 0;
     int menu_consumed = 0;    /* set when hold-fire happens; release is then ignored */
+
+    /* B short-tap vs long-hold-to-delete disambiguation.
+     *   <  300 ms : toggle favorite (on release)
+     *   >= 5000 ms: show DELETE warning overlay (cancellable)
+     *   >=10000 ms: actually delete the highlighted ROM + sidecars
+     */
+    int b_press_ms = 0;
+    int b_consumed = 0;       /* set when delete fires; release is then ignored */
+
+    /* USB MSC rescan watchdog — when MSC writes have gone quiet for
+     * RESCAN_QUIET_MS we re-scan the FAT volume so files added /
+     * deleted via the host appear / disappear without a power cycle.
+     * `last_seen_op` tracks the last MSC op timestamp we noticed so
+     * we only rescan once per quiet window. */
+    const uint64_t RESCAN_QUIET_MS = 400;
+    uint64_t last_seen_op = g_msc_last_op_us;
 
     /* Brief OSD overlay shown after sort / view changes. */
     char osd[24] = {0};
@@ -939,23 +982,94 @@ int nes_picker_run(uint16_t *fb,
             menu_consumed = 0;
         }
 
-        /* ----- face buttons ----- */
-        /* B (PICO-8 O = bit 4) = toggle favorite. */
-        if ((pressed & 0x10) && n_view > 0) {
-            int prev_real = view[sel];
-            favs_toggle(entries[prev_real].name);
-            tab_counts(entries, n_entries, counts);
-            n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
-            sel = reseat_sel(view, n_view, prev_real);
-            if (sel < top) top = sel;
-            if (top + LIST_ROWS <= sel) top = sel - LIST_ROWS + 1;
-            if (top < 0) top = 0;
+        /* ----- B: short tap toggles favorite, long hold deletes ----- */
+        int b_held = (b & 0x10) != 0;
+        if (b_held && n_view > 0) {
+            b_press_ms += 16;
+            if (b_press_ms >= 10000 && !b_consumed) {
+                /* Threshold crossed — actually delete the highlighted
+                 * ROM and all of its sidecars, then re-scan. */
+                int real = view[sel];
+                char doomed[NES_PICKER_NAME_MAX];
+                strncpy(doomed, entries[real].name, sizeof(doomed) - 1);
+                doomed[sizeof(doomed) - 1] = 0;
+                delete_rom_and_sidecars(doomed);
+
+                n_entries  = nes_picker_scan(entries, NES_PICKER_MAX_ROMS);
+                *n_entries_io = n_entries;
+                tab_counts(entries, n_entries, counts);
+                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+                if (sel >= n_view) sel = n_view - 1;
+                if (sel < 0)       sel = 0;
+                if (sel < top)     top = sel;
+                if (top + LIST_ROWS <= sel) top = sel - LIST_ROWS + 1;
+                if (top < 0)       top = 0;
+                snprintf(osd, sizeof(osd), "deleted");
+                osd_ms = 900;
+                b_consumed = 1;
+
+                if (n_entries == 0) {
+                    /* Last ROM gone — bounce back to the lobby splash. */
+                    favs_save();
+                    pref_save(&pref);
+                    return -1;
+                }
+            }
+        } else {
+            if (b_press_ms > 0 && !b_consumed && b_press_ms < 300) {
+                /* Short tap on release: toggle favorite. */
+                int prev_real = view[sel];
+                favs_toggle(entries[prev_real].name);
+                tab_counts(entries, n_entries, counts);
+                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+                sel = reseat_sel(view, n_view, prev_real);
+                if (sel < top) top = sel;
+                if (top + LIST_ROWS <= sel) top = sel - LIST_ROWS + 1;
+                if (top < 0) top = 0;
+            }
+            b_press_ms = 0;
+            b_consumed = 0;
         }
+
         /* A (PICO-8 X = bit 5) = launch. */
         if ((pressed & 0x20) && n_view > 0) {
             favs_save();
             pref_save(&pref);
             return view[sel];
+        }
+
+        /* ----- USB rescan watchdog ----- */
+        uint64_t now_us = (uint64_t)time_us_64();
+        if (g_msc_last_op_us != last_seen_op) {
+            /* Activity is happening — defer the rescan until it goes
+             * quiet. Just remember the latest timestamp. */
+            last_seen_op = g_msc_last_op_us;
+        } else if (last_seen_op != 0
+                && (now_us - last_seen_op) >= RESCAN_QUIET_MS * 1000ull) {
+            /* MSC has been quiet for the watchdog window since the
+             * last write — refresh the directory. */
+            int prev_real = (n_view > 0) ? view[sel] : -1;
+            n_entries  = nes_picker_scan(entries, NES_PICKER_MAX_ROMS);
+            *n_entries_io = n_entries;
+            tab_counts(entries, n_entries, counts);
+            /* If the active tab is now empty, slide to the next
+             * non-empty tab so we never freeze on a deleted view. */
+            if (counts[pref.tab] == 0) {
+                for (int t = 0; t < TAB_COUNT; t++) {
+                    if (counts[t] > 0) { pref.tab = t; break; }
+                }
+            }
+            n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
+            sel = reseat_sel(view, n_view, prev_real);
+            if (sel < top) top = sel;
+            if (top + LIST_ROWS <= sel) top = sel - LIST_ROWS + 1;
+            if (top < 0) top = 0;
+            last_seen_op = 0;       /* arm for the next activity burst */
+            if (n_entries == 0) {
+                favs_save();
+                pref_save(&pref);
+                return -1;
+            }
         }
 
         /* Reset marquee whenever the highlighted ROM changes. */
@@ -970,6 +1084,28 @@ int nes_picker_run(uint16_t *fb,
             draw_list_view(fb, entries, view, n_view, sel, top,
                             pref.tab, counts);
         }
+
+        /* Delete-confirmation overlay. Shown once B has been held for
+         * at least 5 seconds and updates every frame so the user sees
+         * the countdown. Releasing B before 10 s cancels harmlessly. */
+        if (b_held && b_press_ms >= 5000 && !b_consumed) {
+            int remaining = (10000 - b_press_ms + 999) / 1000;
+            if (remaining < 0) remaining = 0;
+            fb_rect(fb, 0, 40, FB_W, 48, 0x4000);
+            fb_rect(fb, 0, 41, FB_W, 1,  COL_ERR);
+            fb_rect(fb, 0, 86, FB_W, 1,  COL_ERR);
+            const char *line1 = "DELETE ROM?";
+            int w1 = nes_font_width_2x(line1);
+            nes_font_draw_2x(fb, line1, (FB_W - w1) / 2, 46, COL_ERR);
+            const char *line2 = "release B to cancel";
+            int w2 = nes_font_width(line2);
+            nes_font_draw(fb, line2, (FB_W - w2) / 2, 64, COL_FG);
+            char cd[16];
+            snprintf(cd, sizeof(cd), "in %d", remaining);
+            int w3 = nes_font_width(cd);
+            nes_font_draw(fb, cd, (FB_W - w3) / 2, 76, COL_ERR);
+        }
+
         if (osd_ms > 0) {
             int w = nes_font_width(osd);
             int x = (FB_W - w) / 2;

@@ -172,10 +172,12 @@ static int lobby(void) {
 
         /* At least one ROM present — hand off to the picker. The
          * picker has its own input + draw loop and pumps tud_task
-         * itself, so we won't lose USB while it's up. */
-        int sel = nes_picker_run(fb, roms, n_roms);
+         * itself, so we won't lose USB while it's up. The picker
+         * mutates `roms` and `n_roms` in place when it re-scans on
+         * USB activity or after a B-hold delete. */
+        int sel = nes_picker_run(fb, roms, &n_roms);
         if (sel >= 0) return sel;
-        /* sel < 0 → MENU pressed; stay in lobby and rescan. */
+        /* sel < 0 → all ROMs deleted; bounce back to the no-roms splash. */
         next_scan = make_timeout_time_ms(0);
     }
 }

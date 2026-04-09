@@ -88,13 +88,44 @@ placeholder: the platform icon centred on a tinted panel.
 | **LEFT / RIGHT / UP / DOWN** | prev / next ROM (any D-pad direction) |
 | **LB / RB** | prev / next tab (skips empty tabs) |
 | **A** | launch the highlighted ROM |
-| **B** | toggle favorite (highlighted ROM goes yellow) |
+| **B tap** (< 300 ms) | toggle favorite (highlighted ROM goes yellow) |
+| **B hold** (≥ 5 s) | red `DELETE ROM?` confirmation overlay with countdown |
+| **B hold** (≥ 10 s) | actually delete the ROM + all its sidecars |
 | **MENU tap** | toggle hero ↔ list view |
 | **MENU hold** (≥ 500 ms) | cycle sort mode (alpha → favs first → size desc) |
 
 The current sort mode is shown briefly as an OSD overlay when changed
 and permanently as a small badge above the title in hero view. Sort,
 view and active tab all persist across reboots in `/.picker_view`.
+
+### Deleting ROMs in the picker
+
+Holding **B** on the highlighted ROM is the explicit-confirmation
+delete path: short taps still toggle the favorite, and you have to
+sit on the button for a full 10 seconds for anything to actually
+happen.
+
+- **0 .. 300 ms** — released here → toggle favorite (no overlay).
+- **300 ms .. 5 s** — released here → cancelled, no effect.
+- **5 s mark** — a full-screen red `DELETE ROM?` overlay drops in
+  with a `release B to cancel` hint and a `in N` countdown updated
+  every frame. Releasing B at any point before the 10 s mark aborts
+  with no side effects.
+- **10 s mark** — the highlighted ROM file is unlinked along with
+  its `.sav`, `.cfg`, `.scr32` and `.scr64` sidecars; the favorite
+  entry is removed if present; the picker re-scans the volume,
+  reseats the selection on the closest surviving entry, and flashes
+  a brief `deleted` OSD. Deleting the last ROM bounces the picker
+  back to the lobby's no-roms splash.
+
+### Live USB rescan
+
+The picker watches USB MSC activity and rescans the FAT volume
+whenever host writes go quiet for ≥ 400 ms. Files added or deleted
+via the host filesystem appear / disappear in the picker without
+having to reboot the device — including the per-tab count badges,
+the active selection if it points at a now-deleted entry, and the
+no-roms splash fallback when the volume is emptied.
 
 ### Persistence
 
