@@ -12,6 +12,15 @@ screenshot capture, live-pan read mode for the handhelds, automatic
 FAT defragmenter, configurable system clock — all in a single
 ~1.1 MB firmware image.
 
+<p align="center">
+<img src="images/nes-smb3.jpg" width="360" alt="NES — Super Mario Bros. 3 title screen">
+<img src="images/sms-alex-kidd.jpg" width="360" alt="SMS — Alex Kidd in Miracle World">
+</p>
+<p align="center">
+<img src="images/gb-super-mario-land.jpg" width="360" alt="Game Boy — Super Mario Land">
+<img src="images/sms-sonic-fit.jpg" width="360" alt="SMS — Sonic the Hedgehog (FIT mode)">
+</p>
+
 [`firmware/nesrun_device.uf2`](firmware/nesrun_device.uf2) is committed
 to the repo if you want to flash without setting up the toolchain.
 
@@ -65,6 +74,11 @@ are skipped automatically when stepping with the shoulder buttons.
 
 Two views, swapped from the picker menu (`Display: HERO / LIST`):
 
+<p align="center">
+<img src="images/picker-hero.jpg" width="360" alt="Picker — Hero view">
+<img src="images/picker-list.jpg" width="360" alt="Picker — List view">
+</p>
+
 - **Hero view** (default) — one ROM per screen, 64×64 thumbnail
   centred under the tab strip, large 2×-scaled ROM title (auto-marquees
   if it doesn't fit), small dim meta line, **the active tab name in
@@ -100,6 +114,10 @@ something.
 
 Tap **MENU** in the picker to open a full-screen overlay listing
 system-wide settings, current device status, and one-shot actions:
+
+<p align="center">
+<img src="images/menu-overlay.jpg" width="360" alt="Picker menu overlay">
+</p>
 
 | Item | Kind | Notes |
 |---|---|---|
@@ -373,6 +391,11 @@ intentionally does not persist scale mode in the `.cfg` sidecar, so
 launching a cart never traps you in a stale CROP setting.
 
 ### FIT (default)
+
+<p align="center">
+<img src="images/sms-sonic-fit.jpg" width="360" alt="Sonic — FIT mode (downscaled to 128×128)">
+<img src="images/sms-sonic-crop.jpg" width="360" alt="Sonic — CROP mode (1:1 native pixels)">
+</p>
 
 The entire native frame is downscaled to fit the 128×128 display.
 
