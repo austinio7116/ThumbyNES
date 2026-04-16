@@ -851,6 +851,47 @@ Explicit scope cuts to protect the RAM/CPU budget:
 
 ---
 
+## Changelog
+
+### v1.01
+
+- **NES save-state hang fix (SMB and other NROM carts).** Nofrendo's
+  native SNSS format drops a pile of runtime state (PPU internal
+  latches, APU frame-counter mode, machine-level scanline/cycle
+  counters, CPU pending-IRQ flag). For mapper 1 / 4 carts the MPRD
+  bank/state restore incidentally corrects it; NROM has no MPRD
+  block so the game booted into a limbo state and hung on the first
+  NMI after a cold reload. Added a `THMB` extension block to the
+  save file format that carries the dropped fields. Backward-
+  compatible with older readers, but old `.sta` files made before
+  v1.01 still hang — re-save after flashing.
+- **Boot UX cleanup.** Removed the dim-blue / orange / cyan / green
+  debug splashes that strobed between hardware init and the boot
+  logo. The logo is now the first visible frame on a healthy boot,
+  held while the filesystem mount and USB enumeration pump run
+  beneath it. Error splashes (red / magenta / yellow-format)
+  preserved for real failure states.
+- **SMS Z80 dispatch in SRAM.** `z80_execute()` was silently running
+  from XIP flash because the smsplus target was missing the
+  `IRAM_ATTR` section override the nofrendo target had. Moved it
+  into `.time_critical.sms` to join nofrendo's 6502 + PPU loops;
+  ~12 KB of SRAM cost for meaningfully faster SMS/GG dispatch.
+- **Host SDL runner frame pacing.** The NES host runner relied on
+  `SDL_RENDERER_PRESENTVSYNC`, which WSLg (and some native compositor-
+  driver combos) silently drop, so it ran unthrottled. Added
+  explicit `SDL_Delay` pacing to match the existing pattern in the
+  SMS and GB host runners. F5 / F7 / F8 save-state debug hotkeys
+  added to the NES runner while at it.
+
+### v1.0
+
+Initial milestone release — NES + SMS + Game Gear + Game Boy cores,
+in-game pause menu, picker menu, save states, screenshots, in-
+firmware defragmenter, configurable overclock, global volume, per-tab
+memory, hot-rescan delete.
+
+---
+
 ## Credits
 
 - **nofrendo** by Matthew Conte (1998–2000), Neil Stevens, and the
