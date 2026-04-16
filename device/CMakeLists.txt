@@ -136,7 +136,14 @@ target_compile_options(smsplus PRIVATE
     -fno-strict-aliasing
 )
 # Same state-save bridge nofrendo uses — see the comment above.
-target_compile_definitions(smsplus PRIVATE THUMBY_STATE_BRIDGE)
+# Also redirect IRAM_ATTR to a linker section the pico-sdk copies into
+# SRAM at boot, so smsplus's `z80_execute()` (tagged in vendor/smsplus/
+# cpu/z80.c) runs from RAM instead of XIP flash — same trick nofrendo
+# uses for nes6502_execute() / ppu_renderline().
+target_compile_definitions(smsplus PRIVATE
+    THUMBY_STATE_BRIDGE
+    "IRAM_ATTR=__attribute__((section(\".time_critical.sms\")))"
+)
 target_include_directories(smsplus PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
 # Cross-platform glue lives outside the device directory; build it

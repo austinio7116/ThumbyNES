@@ -48,8 +48,18 @@ Sega Master System / Game Gear emulation core. Vendored from
   from Eke-Eke (SMS Plus GX) and the retro-go maintainers.
 
 The standalone fallback in `shared.h` (`#ifndef RETRO_GO`) makes
-LOG_PRINTF degrade to printf and IRAM_ATTR to nothing — verbatim
-vendor with **no patches** as of the initial drop.
+LOG_PRINTF degrade to printf and IRAM_ATTR to nothing.
+
+### Patches applied
+
+1. **`shared.h`** — wrapped the `#define IRAM_ATTR` fallback in
+   `#ifndef` so the device build can override it with a platform-
+   specific attribute via `-DIRAM_ATTR=...`. Mirrors the
+   `nofrendo/nes/utils.h` patch. No effect on host builds (still
+   expands to nothing). `cpu/z80.c`'s existing upstream
+   `IRAM_ATTR int z80_execute(...)` then resolves to the Pico SDK
+   section attribute on device, placing the Z80 dispatch loop in
+   `.time_critical.sms` (SRAM) instead of XIP flash.
 
 ## nofrendo/
 

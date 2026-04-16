@@ -31,7 +31,9 @@ typedef int32_t int32;
 #define crc32_le(a, b, c) rg_crc32(a, b, c)
 #else
 #define LOG_PRINTF(level, x...) printf(x)
+#ifndef IRAM_ATTR
 #define IRAM_ATTR
+#endif
 #define crc32_le(a, b, c) (0)
 #endif
 
