@@ -294,6 +294,65 @@ int state_save(const char* fn)
 
    /****************************************************/
 
+   /* THUMBYNES PATCH: ThumbyNES extension block.
+    *
+    * The native SNSS format drops a pile of runtime state that games
+    * like SMB (NROM) depend on across a power cycle — PPU internal
+    * latches and scroll state, APU frame counter state, machine-level
+    * scanline/cycle counters, CPU int_pending. For mapper-1/4 carts
+    * these happen to be corrected as a side effect of MPRD's mapper
+    * bank/state restore; NROM has no MPRD block so the game boots
+    * into a limbo state and hangs.
+    *
+    * This THMB block is a ThumbyNES extension: older readers ignore
+    * unknown block types (see "unknown block" branch in state_load).
+    * Length is fixed at 44 bytes, version 1. All multi-byte fields
+    * are stored as uint32 big-endian to match the SNSS convention;
+    * bool fields are a single byte. */
+   {
+      MESSAGE_INFO("  - Saving ThumbyNES extension block\n");
+
+      memset(buffer, 0, sizeof(buffer));
+
+      uint32 u32;
+      int off = 0;
+
+      /* PPU internals not covered by BASR. */
+      buffer[off++] = machine->ppu->stat;
+      buffer[off++] = machine->ppu->latch;
+      buffer[off++] = machine->ppu->vdata_latch;
+      buffer[off++] = machine->ppu->nametab_base;
+      buffer[off++] = machine->ppu->vram_accessible ? 1 : 0;
+
+      u32 = swap32((uint32)machine->ppu->vaddr_latch);  memcpy(&buffer[off], &u32, 4); off += 4;
+      u32 = swap32((uint32)machine->ppu->vaddr_inc);    memcpy(&buffer[off], &u32, 4); off += 4;
+      u32 = swap32((uint32)machine->ppu->left_bg_counter); memcpy(&buffer[off], &u32, 4); off += 4;
+      u32 = swap32(machine->ppu->strike_cycle);         memcpy(&buffer[off], &u32, 4); off += 4;
+      u32 = swap32((uint32)machine->ppu->scanline);     memcpy(&buffer[off], &u32, 4); off += 4;
+
+      /* NES machine-level counters. */
+      u32 = swap32((uint32)machine->scanline);          memcpy(&buffer[off], &u32, 4); off += 4;
+      u32 = swap32((uint32)machine->cycles);            memcpy(&buffer[off], &u32, 4); off += 4;
+
+      /* APU frame counter state — $4017 is NOT in the SOUN register
+       * replay (which only covers $4000-$4015), so fc.state is wrong
+       * after a cold reload. */
+      buffer[off++] = (uint8)machine->apu->fc.state;
+      u32 = swap32(machine->apu->fc.cycles);            memcpy(&buffer[off], &u32, 4); off += 4;
+      buffer[off++] = machine->apu->fc.irq_occurred ? 1 : 0;
+
+      /* CPU pending-IRQ flag (APU frame IRQ / mapper IRQ). */
+      buffer[off++] = machine->cpu->int_pending ? 1 : 0;
+
+      /* off == 44 here. */
+      _fwrite("THMB\x00\x00\x00\x01\x00\x00\x00\x2C", 12);
+      _fwrite(&buffer, 44);
+      numberOfBlocks++;
+   }
+
+
+   /****************************************************/
+
    // Update number of blocks
    STATE_SEEK(file, 4, SEEK_SET);
    numberOfBlocks = swap32(numberOfBlocks);
@@ -482,6 +541,57 @@ int state_load(const char* fn)
          _fread(buffer, 0x100);
 
          // We don't currently do anything with it, it's just to help report bugs to me :)
+      }
+
+
+      /****************************************************/
+
+      else if (memcmp(buffer, "THMB", 4) == 0)
+      {
+         /* ThumbyNES extension block — see state_save for the layout
+          * and rationale. Runs AFTER BASR in the save file so the
+          * ppu_write calls during BASR-load (which re-derive some
+          * internal fields from ctrl0/ctrl1) don't clobber our
+          * authoritative values. */
+         MESSAGE_INFO("  - Found ThumbyNES extension block (%u bytes)\n", blockLength);
+
+         /* Defensive: only the current version layout is understood;
+          * older saves won't have this block at all (they hit the
+          * "unknown block" branch in original nofrendo readers and
+          * get ignored). */
+         uint32 want = 44;
+         if (blockLength != want)
+         {
+            MESSAGE_ERROR("THMB: unexpected length %u (want %u), skipping\n",
+                          blockLength, want);
+            continue;
+         }
+
+         _fread(buffer, want);
+
+         uint32 u32;
+         int off = 0;
+
+         machine->ppu->stat            = buffer[off++];
+         machine->ppu->latch           = buffer[off++];
+         machine->ppu->vdata_latch     = buffer[off++];
+         machine->ppu->nametab_base    = buffer[off++];
+         machine->ppu->vram_accessible = buffer[off++] ? true : false;
+
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->ppu->vaddr_latch     = (int)swap32(u32);
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->ppu->vaddr_inc       = (int)swap32(u32);
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->ppu->left_bg_counter = (int)swap32(u32);
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->ppu->strike_cycle    = swap32(u32);
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->ppu->scanline        = (int)swap32(u32);
+
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->scanline             = (int)swap32(u32);
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->cycles               = (int)swap32(u32);
+
+         machine->apu->fc.state = buffer[off++];
+         memcpy(&u32, &buffer[off], 4); off += 4; machine->apu->fc.cycles = swap32(u32);
+         machine->apu->fc.irq_occurred = buffer[off++] ? true : false;
+
+         machine->cpu->int_pending = buffer[off++] ? true : false;
       }
 
 

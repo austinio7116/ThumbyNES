@@ -37,7 +37,7 @@
 #include "sms_run.h"
 #include "gb_run.h"
 
-#define THUMBYNES_VERSION "1.0"
+#define THUMBYNES_VERSION "1.01"
 
 /* Static framebuffer + filesystem state. */
 static uint16_t       fb[128 * 128];
@@ -68,8 +68,10 @@ static void splash_text(const char *line1, const char *line2, uint16_t bg) {
     nes_lcd_wait_idle();
 }
 
-/* Boot splash: shown for ~1.5 s after the hardware comes up. Pure
- * text — no logo bitmap to vendor. Doubles as the version readout. */
+/* Boot splash: pure-text logo, drawn once as the first visible
+ * frame. No internal sleep — the caller enforces a minimum on-screen
+ * duration by deadline so the real init work underneath (USB
+ * enumeration pump etc.) runs with the logo already visible. */
 static void boot_splash(void) {
     fb_fill(0x0000);
     nes_font_draw(fb, "ThumbyNES",       32, 32, 0xFD20);  /* orange  */
@@ -81,7 +83,6 @@ static void boot_splash(void) {
     nes_font_draw(fb, "GPLv2",           44, 108, 0x4208);
     nes_lcd_present(fb);
     nes_lcd_wait_idle();
-    sleep_ms(1500);
 }
 
 /* --- filesystem boot ------------------------------------------------ */
@@ -195,23 +196,27 @@ int main(void) {
     nes_buttons_init();
     nes_lcd_init();
     nes_audio_pwm_init();
-    splash_color(0x194a);   /* dim blue = LCD alive */
 
     /* FAT must come up BEFORE USB. If we let the host start
      * enumerating while mkfs is mid-flight, Windows reads
      * inconsistent BPB state and File Explorer trips over the
-     * half-written directory tree. */
-    splash_color(0xfd00);   /* orange = mounting / formatting */
+     * half-written directory tree. The yellow "formatting" splash
+     * inside boot_filesystem() only fires on first-boot / mount
+     * failure; a normal boot mounts silently. */
     nes_flash_disk_init();
     if (boot_filesystem() < 0) {
         splash_color(0xf81f);   /* magenta = mount/format failed */
         while (1) tight_loop_contents();
     }
-    /* Drain mkfs writes to flash before the host can read the disk. */
     nes_flash_disk_flush();
 
+    /* Logo is the first thing on screen. Enforce a minimum on-
+     * screen duration so a healthy boot still gives the user a
+     * moment to read it — the USB pump below runs while it's up. */
+    boot_splash();
+    absolute_time_t splash_until = make_timeout_time_ms(1200);
+
     /* USB stack. Disk is fully on flash → enumeration is safe. */
-    splash_color(0x07ff);   /* cyan = USB stack starting */
     tusb_init();
     {
         absolute_time_t until = make_timeout_time_ms(1000);
@@ -220,10 +225,10 @@ int main(void) {
             sleep_us(100);
         }
     }
-    splash_color(0x07E0);   /* green = ready */
-    sleep_ms(120);
 
-    boot_splash();
+    /* Hold the logo until the minimum has elapsed. Fast boot path
+     * finishes USB before 1200 ms; slow path already blew past it. */
+    while (!time_reached(splash_until)) sleep_ms(10);
 
     /* Old firmware versions wrote /.last for a quick-resume feature
      * that has since been removed. Sweep it away on boot so the

@@ -91,3 +91,25 @@ build. Any such patches are listed below as they happen.
    boot, so the two hottest functions in the emulator run from RAM
    rather than XIP flash and avoid cache-miss stalls on the inner
    loops.
+
+3. **`nes/state.c`** — added a `THMB` extension block to the save
+   file format. The native SNSS format drops a pile of runtime state
+   (PPU `stat` / `latch` / `vdata_latch` / `vaddr_latch` / `vaddr_inc`
+   / `nametab_base` / `left_bg_counter` / `vram_accessible` /
+   `strike_cycle` / `scanline`, NES-level `scanline` / `cycles`, APU
+   frame counter `fc.state` / `fc.cycles` / `fc.irq_occurred`, CPU
+   `int_pending`). For mapper-1/4 carts these are incidentally
+   corrected as a side effect of MPRD's mapper bank restore, but
+   NROM has no MPRD block so the game boots into a limbo state and
+   hangs (observed with SMB — see the diagnostic trail in state.c
+   comments).
+
+   `THMB` is 44 data bytes, version 1, big-endian multi-byte fields
+   matching SNSS convention. The save path writes it unconditionally
+   after MPRD; the load path handles it in the usual if/else block
+   chain and skips it gracefully on unexpected length. Older readers
+   without the patch fall through to the "unknown block type" branch
+   and ignore it — forward and backward compatible with the format
+   itself; however, old `.sta` files made before the patch still
+   hang SMB on load because they don't contain the missing state.
+   Re-save on the patched firmware to get working saves.

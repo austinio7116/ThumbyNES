@@ -12,6 +12,10 @@
  *   X          → B
  *   Enter      → Start
  *   RShift     → Select
+ *   F5         → Save state to /tmp/thumbynes.sta
+ *   F7         → Cold-reboot load: shutdown + re-init + re-load ROM + load state
+ *                (mimics the device's save-then-power-cycle-then-load flow)
+ *   F8         → Warm load (in-session) for comparison
  *   Esc        → Quit
  */
 #include <SDL2/SDL.h>
@@ -84,12 +88,41 @@ int main(int argc, char **argv)
     int16_t  audio_buf[2048];
     uint16_t scanline[NESC_SCREEN_W];
 
+    /* Explicit frame pacing. PRESENTVSYNC above is a hint the driver
+     * is allowed to drop (WSLg does exactly that), so we can't rely
+     * on it to throttle to 60 Hz. Target the cart's native refresh
+     * (60 for NTSC, 50 for PAL) using an SDL_GetTicks() deadline. */
+    const int fps = nesc_refresh_rate();
+    const double frame_ms = 1000.0 / (fps > 0 ? fps : 60);
+    double next_frame_ms = (double)SDL_GetTicks();
+
     bool running = true;
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) running = false;
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = false;
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F5) {
+                int rc = nesc_save_state("/tmp/thumbynes.sta");
+                fprintf(stderr, "F5 save_state -> %d\n", rc);
+            }
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F7) {
+                /* Simulate a cold reboot between save and load: the device
+                 * wipes SRAM on power-off, so the fields nofrendo's SNSS
+                 * format doesn't save come up at fresh-reset values rather
+                 * than their live pre-save values. Reproduce here by
+                 * shutting the core down and re-inserting the cart before
+                 * calling state_load. */
+                nesc_shutdown();
+                nesc_init(NESC_SYS_NTSC, SAMPLE_RATE);
+                nesc_load_rom(rom, sz);
+                int rc = nesc_load_state("/tmp/thumbynes.sta");
+                fprintf(stderr, "F7 cold-reboot load_state -> %d\n", rc);
+            }
+            if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_F8) {
+                int rc = nesc_load_state("/tmp/thumbynes.sta");
+                fprintf(stderr, "F8 warm load_state -> %d\n", rc);
+            }
         }
 
         nesc_set_buttons(poll_buttons());
@@ -115,6 +148,15 @@ int main(int argc, char **argv)
         /* Drain one frame of audio. */
         int n = nesc_audio_pull(audio_buf, sizeof(audio_buf) / sizeof(audio_buf[0]));
         if (dev && n > 0) SDL_QueueAudio(dev, audio_buf, n * sizeof(int16_t));
+
+        /* Sleep until the next frame deadline. If we're already
+         * behind (e.g. a save/load dumped several lines of stderr)
+         * reset the deadline to "now" so we don't try to catch up. */
+        next_frame_ms += frame_ms;
+        double now_ms = (double)SDL_GetTicks();
+        double wait_ms = next_frame_ms - now_ms;
+        if (wait_ms > 0) SDL_Delay((Uint32)wait_ms);
+        else if (wait_ms < -100) next_frame_ms = now_ms;
     }
 
     nesc_shutdown();
