@@ -413,19 +413,20 @@ nearest-neighbor shimmer. Toggle BLEND from the in-game menu.
 ### FILL (SMS only)
 
 A third MENU-tap cycle position between FIT and CROP, specific to
-the SMS runner. Fills the full 128×128 display with a 1.5×
-uniform-scale nearest blit: the middle 192×192 of the native
-256×192 frame is mapped to the screen, cropping 32 source columns
-off each side. Square pixels, no letterbox, and the cart keeps
-playing (unlike SMS CROP which pauses). The trade is visible — for
-games with action or HUD at the far edges (scoreboards, end-of-
-stage indicators) you'll lose some of it — so FIT / BLEND remain
-the defaults; FILL is there when you want the maximum playable
-screen area.
+the SMS runner. Fills the full 128×128 display with a 1.5× uniform
+area-weighted blit: the middle 192×192 of the native 256×192 frame
+is mapped to the screen, cropping 32 source columns off each side.
+Square pixels, no letterbox, and the cart keeps playing (unlike
+SMS CROP which pauses). The trade is visible — for games with
+action or HUD at the far edges (scoreboards, end-of-stage
+indicators) you'll lose some of it — so FIT / BLEND remain the
+defaults; FILL is there when you want the maximum playable screen
+area.
 
-BLEND is ignored in FILL because 1.5× reduction has no clean 2×2
-kernel. Game Gear doesn't expose FILL in the cycle (its existing
-FIT already fills the screen via asymmetric scaling).
+FILL is always area-weighted blended; the BLEND toggle doesn't
+apply (there's no nearest-neighbour alternative offered). Game Gear
+doesn't expose FILL in the cycle (its existing FIT already fills
+the screen via asymmetric scaling).
 
 ### CROP
 
@@ -869,6 +870,18 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.02
+
+- **New SMS display option: FILL.** A third MENU-tap cycle position
+  between FIT and CROP on Sega Master System carts. Fills the full
+  screen at uniform 1.5× scale (no letterbox, square pixels) by
+  cropping ~25% of the horizontal source — you lose a strip off
+  each side but gain meaningfully more vertical pixels for the
+  action. Area-weighted blended for image quality, and the cart
+  keeps playing (unlike SMS CROP which pauses). Game Gear doesn't
+  need it — the existing FIT already fills the screen via
+  asymmetric scaling.
 
 ### v1.01
 

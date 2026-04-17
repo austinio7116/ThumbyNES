@@ -138,21 +138,72 @@ static void blit_blend_sms(uint16_t *fb, const uint8_t *src,
     memset(fb + (16 + 96) * 128, 0, 128 * 16 * 2);
 }
 
-/* SMS 256x192 → 128x128 nearest, 1.5x uniform reduction, 32 source
- * columns cropped each side so the middle 192x192 of the source fills
- * the full display with square pixels and no letterbox. Playable —
- * no pause. No BLEND variant for now: 2x2 box average only yields a
- * clean result at exactly 2:1, which this mode isn't.
+/* SMS 256x192 → 128x128 area-weighted, 1.5x uniform reduction, 32
+ * source columns cropped each side so the middle 192x192 of the
+ * source fills the full display with square pixels and no letterbox.
+ * Playable — no pause.
  *
- *   dx in [0,128): src_x = 32 + floor(dx * 1.5) = 32 + (dx * 3) / 2
- *   dy in [0,128): src_y =       floor(dy * 1.5) =     (dy * 3) / 2
+ * Geometry. At 1.5x reduction each output pixel covers a 1.5x1.5
+ * source-pixel area, and the 3/2 scale makes pairs of outputs land
+ * on a repeating 2-pattern. Per axis, with the leftmost source
+ * column of the output's footprint at src_base = floor(d * 1.5):
+ *
+ *   d even: src[base]   gets weight 1.0 (fully covered)
+ *           src[base+1] gets weight 0.5 (half covered)
+ *   d odd:  src[base]   gets weight 0.5
+ *           src[base+1] gets weight 1.0
+ *
+ * Two axes give a 2x2 source-pixel sample per output with weights
+ * that are the outer product of the per-axis pair. Scaling each
+ * axis pair by 2 (so integer weights {2,1} / {1,2}) gives 2D
+ * weights whose sum is 3*3 = 9 in every parity combo. One
+ * divide-by-9 per channel at the end.
+ *
+ *   (dx&1, dy&1) = (0,0) → 2D weights { {4,2}, {2,1} }  (sum 9)
+ *                = (1,0) →             { {2,4}, {1,2} }
+ *                = (0,1) →             { {2,1}, {4,2} }
+ *                = (1,1) →             { {1,2}, {2,4} }
+ *
+ * Compiler (gcc -O3, ARM Cortex-M33) turns /9 into a multiply-high
+ * + shift; no runtime division.
  */
 static void blit_fill_sms(uint16_t *fb, const uint8_t *src,
                            const uint16_t *pal) {
     for (int dy = 0; dy < 128; dy++) {
-        const uint8_t *srow = src + ((dy * 3) >> 1) * 256 + 32;
-        uint16_t      *drow = fb + dy * 128;
-        for (int dx = 0; dx < 128; dx++) drow[dx] = pal[srow[(dx * 3) >> 1]];
+        int sy    = (dy * 3) >> 1;
+        int w_top = (dy & 1) ? 1 : 2;
+        int w_bot = (dy & 1) ? 2 : 1;
+        const uint8_t *row_t = src + sy       * 256 + 32;
+        const uint8_t *row_b = src + (sy + 1) * 256 + 32;
+        uint16_t      *drow  = fb  + dy * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx    = (dx * 3) >> 1;
+            int w_l   = (dx & 1) ? 1 : 2;
+            int w_r   = (dx & 1) ? 2 : 1;
+            int w00   = w_top * w_l;
+            int w01   = w_top * w_r;
+            int w10   = w_bot * w_l;
+            int w11   = w_bot * w_r;
+            uint16_t a = pal[row_t[sx    ]];
+            uint16_t b = pal[row_t[sx + 1]];
+            uint16_t c = pal[row_b[sx    ]];
+            uint16_t d = pal[row_b[sx + 1]];
+            uint32_t rsum = ((a >> 11) & 0x1F) * w00
+                          + ((b >> 11) & 0x1F) * w01
+                          + ((c >> 11) & 0x1F) * w10
+                          + ((d >> 11) & 0x1F) * w11;
+            uint32_t gsum = ((a >>  5) & 0x3F) * w00
+                          + ((b >>  5) & 0x3F) * w01
+                          + ((c >>  5) & 0x3F) * w10
+                          + ((d >>  5) & 0x3F) * w11;
+            uint32_t bsum = (a & 0x1F) * w00
+                          + (b & 0x1F) * w01
+                          + (c & 0x1F) * w10
+                          + (d & 0x1F) * w11;
+            drow[dx] = (uint16_t)(((rsum / 9) << 11)
+                                | ((gsum / 9) <<  5)
+                                |  (bsum / 9));
+        }
     }
 }
 
@@ -629,9 +680,10 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             } else if (scale_mode == SCALE_CROP) {
                 blit_crop_sms(fb, frame, pal, pan_x, pan_y);
             } else if (scale_mode == SCALE_FILL) {
-                /* BLEND flag intentionally ignored — FILL is always
-                 * nearest because 1.5x reduction has no clean 2x2
-                 * kernel. */
+                /* FILL is always area-weighted blended — BLEND toggle
+                 * has no meaning here since nearest-neighbour isn't
+                 * offered as an alternative. See blit_fill_sms for
+                 * the weight math. */
                 blit_fill_sms(fb, frame, pal);
             } else if (blend) {
                 blit_blend_sms(fb, frame, pal);
