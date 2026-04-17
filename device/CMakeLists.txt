@@ -16,14 +16,27 @@
 #
 cmake_minimum_required(VERSION 3.16)
 
-set(PICO_BOARD tinycircuits_thumby_color_rp2350)
-set(PICO_PLATFORM rp2350)
-include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
+# Standalone vs. embedded-in-ThumbyOne build.
+#
+#   THUMBYONE_SLOT_MODE is set by the ThumbyOne top-level build
+#   when it pulls this firmware in via add_subdirectory. In that
+#   mode the parent project has already configured the Pico SDK,
+#   called project(), and will consume our ELF directly — we
+#   skip the top-level scaffolding and the standalone UF2 output.
+#
+#   When THUMBYONE_SLOT_MODE is unset, this file configures the
+#   SDK + project itself, just like before. The standalone build
+#   at `cmake -B build_device -S device` still works unchanged.
+if (NOT THUMBYONE_SLOT_MODE)
+    set(PICO_BOARD tinycircuits_thumby_color_rp2350)
+    set(PICO_PLATFORM rp2350)
+    include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
 
-project(thumbynes_device C CXX ASM)
-set(CMAKE_C_STANDARD 11)
+    project(thumbynes_device C CXX ASM)
+    set(CMAKE_C_STANDARD 11)
 
-pico_sdk_init()
+    pico_sdk_init()
+endif()
 
 set(NES_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 
@@ -208,4 +221,30 @@ target_link_libraries(nesrun_device PRIVATE
 )
 pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
-pico_add_extra_outputs(nesrun_device)
+
+if (THUMBYONE_SLOT_MODE)
+    # Embedded in ThumbyOne's NES partition.
+    #
+    # - Flash-disk offset is overridden to point at the shared FAT
+    #   region in ThumbyOne's flash layout (0x660000, 9.6 MB).
+    #   Without this override, FatFs would try to read/write
+    #   inside the NES partition itself (because the default
+    #   FLASH_DISK_OFFSET of 0x100000 is inside the 1 MB NES
+    #   slot when rom_chain_image's ATRANS mapping is active),
+    #   and the auto-reformat-on-mount-failure would erase our
+    #   own code. See common/slot_layout.h in the ThumbyOne repo
+    #   for the canonical values.
+    target_compile_definitions(nesrun_device PRIVATE
+        FLASH_DISK_OFFSET=0x660000u
+        FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
+    )
+    # UF2 family: "absolute" so ThumbyOne's combiner treats these
+    # blocks as direct-address flash writes. The image itself is
+    # still linked at 0x10000000; the parent combiner rebases the
+    # UF2 block target addresses to the NES partition offset.
+    pico_set_uf2_family(nesrun_device "absolute")
+    pico_add_extra_outputs(nesrun_device)
+else()
+    # Standalone: emit the normal UF2 alongside the ELF.
+    pico_add_extra_outputs(nesrun_device)
+endif()
