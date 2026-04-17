@@ -26,6 +26,21 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 
+#ifdef THUMBYONE_SLOT_MODE
+/* RP2350 QMI regs — used to snapshot/restore ATRANS around flash
+ * operations. The SDK's flash_range_erase / flash_range_program
+ * internally call rom_flash_enter_cmd_xip which RESETS all QMI
+ * registers (including the ATRANS mapping the bootrom set up for
+ * our chained image). Without save/restore, the next instruction
+ * fetch after the flash op faults because XIP now points to the
+ * lobby's code (identity mapping) instead of our slot's.
+ *
+ * Note: the SDK's flash_range_* routines call flash_flush_cache
+ * internally, so the XIP cache is already invalidated by the time
+ * control returns to us. We only need to restore ATRANS. */
+#include "hardware/structs/qmi.h"
+#endif
+
 #define XIP_BASE_ADDR 0x10000000u
 
 /* Cache: 8 erase-blocks (32 KB). With continuous draining (one
@@ -65,6 +80,27 @@ void nes_flash_disk_init(void) {
     }
     cache_clock = 0;
     last_write_time = get_absolute_time();
+
+#ifdef THUMBYONE_SLOT_MODE
+    /* When chained into a partition, the bootrom only sets ATRANS
+     * slot 0 for our partition's own XIP window; slots 1..3 are
+     * left at SIZE=0 which traps every access in their windows
+     * with a bus fault. The shared FAT region lives at physical
+     * 0x660000 — which falls in ATRANS slot 1 (logical
+     * 0x10400000..0x10800000). Map that whole 4 MB window to
+     * physical 0x400000..0x800000 (identity for that slice of
+     * flash). The FAT reads at logical 0x10660000 now resolve to
+     * physical 0x660000 correctly.
+     *
+     * This is done here because nes_flash_disk_init runs in main
+     * just before boot_filesystem, which is the first code to
+     * read the FAT region. crt0 and the earlier init only touch
+     * slot 0's window. */
+    const uint32_t window = 0x400;   /* 4 MB = 0x400 sectors   */
+    const uint32_t base   = 0x400;   /* physical 0x400000/4K   */
+    qmi_hw->atrans[1] = (window << 16) | base;
+    __asm__ volatile("dsb" ::: "memory");
+#endif
 }
 
 uint32_t nes_flash_disk_sector_count(void) { return FLASH_DISK_SECTORS; }
@@ -114,6 +150,26 @@ static int __not_in_flash_func(pick_evict)(void) {
  * the device would disconnect mid-flush. */
 #define PROG_CHUNK 256
 
+#ifdef THUMBYONE_SLOT_MODE
+/* Save the ATRANS mapping the bootrom set up when it chained us
+ * into this partition, so we can restore it after the SDK's flash
+ * erase/program routines reset QMI. Must be called with IRQs
+ * disabled if the surrounding flash op also disables IRQs. */
+static inline void thumbyone_save_atrans(uint32_t out[4]) {
+    out[0] = qmi_hw->atrans[0];
+    out[1] = qmi_hw->atrans[1];
+    out[2] = qmi_hw->atrans[2];
+    out[3] = qmi_hw->atrans[3];
+}
+static inline void thumbyone_restore_atrans(const uint32_t in[4]) {
+    qmi_hw->atrans[0] = in[0];
+    qmi_hw->atrans[1] = in[1];
+    qmi_hw->atrans[2] = in[2];
+    qmi_hw->atrans[3] = in[3];
+    __asm__ volatile("dsb" ::: "memory");
+}
+#endif
+
 static void __not_in_flash_func(commit_entry)(int idx) {
     if (idx < 0 || cache[idx].block < 0 || !cache[idx].dirty) return;
     uint32_t flash_off = FLASH_DISK_OFFSET +
@@ -122,14 +178,28 @@ static void __not_in_flash_func(commit_entry)(int idx) {
     /* Erase — atomic */
     {
         uint32_t ints = save_and_disable_interrupts();
+#ifdef THUMBYONE_SLOT_MODE
+        uint32_t saved_atrans[4];
+        thumbyone_save_atrans(saved_atrans);
+#endif
         flash_range_erase(flash_off, FLASH_DISK_ERASE);
+#ifdef THUMBYONE_SLOT_MODE
+        thumbyone_restore_atrans(saved_atrans);
+#endif
         restore_interrupts(ints);
     }
 
     /* Program — chunked, IRQs re-enabled between chunks */
     for (uint32_t off = 0; off < FLASH_DISK_ERASE; off += PROG_CHUNK) {
         uint32_t ints = save_and_disable_interrupts();
+#ifdef THUMBYONE_SLOT_MODE
+        uint32_t saved_atrans[4];
+        thumbyone_save_atrans(saved_atrans);
+#endif
         flash_range_program(flash_off + off, cache[idx].data + off, PROG_CHUNK);
+#ifdef THUMBYONE_SLOT_MODE
+        thumbyone_restore_atrans(saved_atrans);
+#endif
         restore_interrupts(ints);
         /* IRQs are now on — USB controller can service any pending
          * packets / endpoint transfers before we start the next page. */

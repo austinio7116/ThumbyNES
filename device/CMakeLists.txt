@@ -235,6 +235,7 @@ if (THUMBYONE_SLOT_MODE)
     #   own code. See common/slot_layout.h in the ThumbyOne repo
     #   for the canonical values.
     target_compile_definitions(nesrun_device PRIVATE
+        THUMBYONE_SLOT_MODE=1
         FLASH_DISK_OFFSET=0x660000u
         FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
     )
