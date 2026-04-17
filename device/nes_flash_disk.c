@@ -81,26 +81,14 @@ void nes_flash_disk_init(void) {
     cache_clock = 0;
     last_write_time = get_absolute_time();
 
-#ifdef THUMBYONE_SLOT_MODE
-    /* When chained into a partition, the bootrom only sets ATRANS
-     * slot 0 for our partition's own XIP window; slots 1..3 are
-     * left at SIZE=0 which traps every access in their windows
-     * with a bus fault. The shared FAT region lives at physical
-     * 0x660000 — which falls in ATRANS slot 1 (logical
-     * 0x10400000..0x10800000). Map that whole 4 MB window to
-     * physical 0x400000..0x800000 (identity for that slice of
-     * flash). The FAT reads at logical 0x10660000 now resolve to
-     * physical 0x660000 correctly.
-     *
-     * This is done here because nes_flash_disk_init runs in main
-     * just before boot_filesystem, which is the first code to
-     * read the FAT region. crt0 and the earlier init only touch
-     * slot 0's window. */
-    const uint32_t window = 0x400;   /* 4 MB = 0x400 sectors   */
-    const uint32_t base   = 0x400;   /* physical 0x400000/4K   */
-    qmi_hw->atrans[1] = (window << 16) | base;
-    __asm__ volatile("dsb" ::: "memory");
-#endif
+    /* ATRANS slots 1..3 identity setup now lives in ThumbyOne's
+     * common/thumbyone_handoff.c as a priority-101 constructor,
+     * so it runs before this init function and covers the whole
+     * 9.6 MB shared-FAT region rather than only the first 4 MB
+     * (which used to cap us at about 5-6 P8 carts before reads
+     * past physical 0x800000 started bus-faulting). The qmi.h
+     * include stays because commit_entry still uses atrans for
+     * save/restore around flash writes. */
 }
 
 uint32_t nes_flash_disk_sector_count(void) { return FLASH_DISK_SECTORS; }
