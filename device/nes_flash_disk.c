@@ -28,17 +28,14 @@
 
 #ifdef THUMBYONE_SLOT_MODE
 /* RP2350 QMI regs — used to snapshot/restore ATRANS around flash
- * operations. The SDK's flash_range_erase / flash_range_program
- * internally call rom_flash_enter_cmd_xip which RESETS all QMI
- * registers (including the ATRANS mapping the bootrom set up for
- * our chained image). Without save/restore, the next instruction
- * fetch after the flash op faults because XIP now points to the
- * lobby's code (identity mapping) instead of our slot's.
- *
- * Note: the SDK's flash_range_* routines call flash_flush_cache
- * internally, so the XIP cache is already invalidated by the time
- * control returns to us. We only need to restore ATRANS. */
+ * ops. The SDK's flash_range_erase / flash_range_program call
+ * rom_flash_enter_cmd_xip internally, which RESETS all QMI regs
+ * including ATRANS (our image's code remap) and M0_TIMING /
+ * M0_RCMD / M0_RFMT (the fast-QPI XIP config). Without restoring
+ * both, instruction fetch after the flash op either faults (wrong
+ * ATRANS) or runs ~2x slower (slow cmd-XIP). */
 #include "hardware/structs/qmi.h"
+#include "thumbyone_handoff.h"   /* for thumbyone_xip_fast_setup */
 #endif
 
 #define XIP_BASE_ADDR 0x10000000u
@@ -154,7 +151,8 @@ static inline void thumbyone_restore_atrans(const uint32_t in[4]) {
     qmi_hw->atrans[1] = in[1];
     qmi_hw->atrans[2] = in[2];
     qmi_hw->atrans[3] = in[3];
-    __asm__ volatile("dsb" ::: "memory");
+    /* Restore fast QPI XIP config too — flash_range_* reset it. */
+    thumbyone_xip_fast_setup();
 }
 #endif
 
