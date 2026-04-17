@@ -138,6 +138,24 @@ static void blit_blend_sms(uint16_t *fb, const uint8_t *src,
     memset(fb + (16 + 96) * 128, 0, 128 * 16 * 2);
 }
 
+/* SMS 256x192 → 128x128 nearest, 1.5x uniform reduction, 32 source
+ * columns cropped each side so the middle 192x192 of the source fills
+ * the full display with square pixels and no letterbox. Playable —
+ * no pause. No BLEND variant for now: 2x2 box average only yields a
+ * clean result at exactly 2:1, which this mode isn't.
+ *
+ *   dx in [0,128): src_x = 32 + floor(dx * 1.5) = 32 + (dx * 3) / 2
+ *   dy in [0,128): src_y =       floor(dy * 1.5) =     (dy * 3) / 2
+ */
+static void blit_fill_sms(uint16_t *fb, const uint8_t *src,
+                           const uint16_t *pal) {
+    for (int dy = 0; dy < 128; dy++) {
+        const uint8_t *srow = src + ((dy * 3) >> 1) * 256 + 32;
+        uint16_t      *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) drow[dx] = pal[srow[(dx * 3) >> 1]];
+    }
+}
+
 /* SMS 256x192 1:1 crop into a 128x128 window. pan in source coords. */
 static void blit_crop_sms(uint16_t *fb, const uint8_t *src,
                            const uint16_t *pal, int pan_x, int pan_y) {
@@ -196,7 +214,7 @@ static void blit_crop_gg(uint16_t *fb, const uint8_t *src, const uint16_t *pal,
 #define VOL_MAX  30
 #define VOL_DEF  15
 
-typedef enum { SCALE_FIT = 0, SCALE_CROP = 1, SCALE_COUNT } scale_mode_t;
+typedef enum { SCALE_FIT = 0, SCALE_FILL = 1, SCALE_CROP = 2, SCALE_COUNT } scale_mode_t;
 
 typedef struct {
     uint32_t magic;
@@ -415,6 +433,12 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (menu_was_down) {
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
                     scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+                    /* GG already fills the screen via the asymmetric
+                     * fit blitter, so the dedicated FILL mode is SMS-
+                     * only — skip it in the GG cycle. */
+                    if (gg && scale_mode == SCALE_FILL) {
+                        scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+                    }
                     cfg_dirty = true;
                     if (scale_mode == SCALE_CROP) {
                         if (gg) { pan_x = 16; pan_y = 8; }   /* GG */
@@ -434,7 +458,22 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* ----- in-game menu ----- */
         if (open_menu) {
             open_menu = 0;
-            int v_scale = (int)scale_mode;
+            /* FILL is SMS-only (GG's FIT already fills the screen),
+             * so the Display choice list has a different length on
+             * each system. Map between the choice index and the
+             * stable scale_mode_t enum via a small lookup. */
+            static const char * const display_choices_sms[] = { "FIT", "FILL", "CROP" };
+            static const char * const display_choices_gg[]  = { "FIT", "CROP" };
+            static const scale_mode_t sms_idx_to_mode[] = { SCALE_FIT, SCALE_FILL, SCALE_CROP };
+            static const scale_mode_t gg_idx_to_mode[]  = { SCALE_FIT, SCALE_CROP };
+            const char * const *display_choices = gg ? display_choices_gg : display_choices_sms;
+            const scale_mode_t  *idx_to_mode    = gg ? gg_idx_to_mode     : sms_idx_to_mode;
+            int display_num = gg ? 2 : 3;
+
+            int v_scale = 0;
+            for (int i = 0; i < display_num; i++)
+                if (idx_to_mode[i] == scale_mode) { v_scale = i; break; }
+
             int v_vol   = volume;
             int v_ff    = fast_forward ? 1 : 0;
             int v_fps   = show_fps ? 1 : 0;
@@ -445,7 +484,6 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (cart_clock_mhz == 200) v_clock = 3;
             if (cart_clock_mhz == 250) v_clock = 4;
 
-            static const char * const display_choices[] = { "FIT", "CROP" };
             static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
             static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
 
@@ -465,7 +503,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 { .kind = NES_MENU_KIND_ACTION, .label = "Load state",
                   .enabled = sta_exists, .action_id = ACT_LOAD_STATE },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
-                  .value_ptr = &v_scale, .choices = display_choices, .num_choices = 2,
+                  .value_ptr = &v_scale, .choices = display_choices, .num_choices = display_num,
                   .enabled = true },
                 { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
                   .value_ptr = &v_vol, .min = VOL_MIN, .max = VOL_MAX,
@@ -492,8 +530,9 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             nes_menu_result_t r = nes_menu_run(fb, "PAUSED", sub,
                                                 items, sizeof(items) / sizeof(items[0]));
 
-            if (v_scale != (int)scale_mode) {
-                scale_mode = (scale_mode_t)v_scale;
+            scale_mode_t new_scale = idx_to_mode[v_scale];
+            if (new_scale != scale_mode) {
+                scale_mode = new_scale;
                 if (scale_mode == SCALE_CROP) {
                     if (gg) { pan_x = 16; pan_y = 8; }
                     else    { pan_x = 64; pan_y = 32; }
@@ -589,6 +628,11 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     blit_fit_gg (fb, frame, pal, vx, vy);
             } else if (scale_mode == SCALE_CROP) {
                 blit_crop_sms(fb, frame, pal, pan_x, pan_y);
+            } else if (scale_mode == SCALE_FILL) {
+                /* BLEND flag intentionally ignored — FILL is always
+                 * nearest because 1.5x reduction has no clean 2x2
+                 * kernel. */
+                blit_fill_sms(fb, frame, pal);
             } else if (blend) {
                 blit_blend_sms(fb, frame, pal);
             } else {

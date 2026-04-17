@@ -410,6 +410,23 @@ With **BLEND** on (the NES/SMS default) each output pixel is a
 2×2 box average of four source pixels — softer image, no
 nearest-neighbor shimmer. Toggle BLEND from the in-game menu.
 
+### FILL (SMS only)
+
+A third MENU-tap cycle position between FIT and CROP, specific to
+the SMS runner. Fills the full 128×128 display with a 1.5×
+uniform-scale nearest blit: the middle 192×192 of the native
+256×192 frame is mapped to the screen, cropping 32 source columns
+off each side. Square pixels, no letterbox, and the cart keeps
+playing (unlike SMS CROP which pauses). The trade is visible — for
+games with action or HUD at the far edges (scoreboards, end-of-
+stage indicators) you'll lose some of it — so FIT / BLEND remain
+the defaults; FILL is there when you want the maximum playable
+screen area.
+
+BLEND is ignored in FILL because 1.5× reduction has no clean 2×2
+kernel. Game Gear doesn't expose FILL in the cycle (its existing
+FIT already fills the screen via asymmetric scaling).
+
 ### CROP
 
 A 1:1 native viewport into the cart frame, pannable across the full
