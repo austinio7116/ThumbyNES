@@ -223,29 +223,21 @@ pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
 
 if (THUMBYONE_SLOT_MODE)
-    # Embedded in ThumbyOne's NES partition.
-    #
-    # - Flash-disk offset is overridden to point at the shared FAT
-    #   region in ThumbyOne's flash layout (0x660000, 9.6 MB).
-    #   Without this override, FatFs would try to read/write
-    #   inside the NES partition itself (because the default
-    #   FLASH_DISK_OFFSET of 0x100000 is inside the 1 MB NES
-    #   slot when rom_chain_image's ATRANS mapping is active),
-    #   and the auto-reformat-on-mount-failure would erase our
-    #   own code. See common/slot_layout.h in the ThumbyOne repo
-    #   for the canonical values.
+    # Embedded in ThumbyOne's NES partition. See common/slot_layout.h
+    # in the ThumbyOne repo for the canonical flash-offset values.
     target_compile_definitions(nesrun_device PRIVATE
         THUMBYONE_SLOT_MODE=1
         FLASH_DISK_OFFSET=0x660000u
         FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
     )
-    # UF2 family: "absolute" so ThumbyOne's combiner treats these
-    # blocks as direct-address flash writes. The image itself is
-    # still linked at 0x10000000; the parent combiner rebases the
-    # UF2 block target addresses to the NES partition offset.
+    # Compile ThumbyOne's handoff source into this target directly
+    # (common is not a CMake library — see common/CMakeLists.txt
+    # for why). Parent project exports THUMBYONE_COMMON_SRC and
+    # THUMBYONE_COMMON_INCLUDE from its add_subdirectory(common).
+    target_sources(nesrun_device PRIVATE ${THUMBYONE_COMMON_SRC})
+    target_include_directories(nesrun_device PRIVATE ${THUMBYONE_COMMON_INCLUDE})
     pico_set_uf2_family(nesrun_device "absolute")
     pico_add_extra_outputs(nesrun_device)
 else()
-    # Standalone: emit the normal UF2 alongside the ELF.
     pico_add_extra_outputs(nesrun_device)
 endif()
