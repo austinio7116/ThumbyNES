@@ -112,6 +112,22 @@ static int boot_filesystem(void) {
     FRESULT r = f_mount(&g_fs, "", 1);
     if (r != FR_OK) needs_format = 1;
 
+#ifdef THUMBYONE_SLOT_MODE
+    /* Under ThumbyOne, the lobby is the ONLY thing allowed to format
+     * the shared FAT. Auto-format from a slot would wipe the user's
+     * content across every system (roms/carts/games) whenever a
+     * transient mount failure happened — a data-loss bug, not a
+     * "self-recovery". Fail loudly instead: show a red splash and
+     * ask the user to return to the lobby (where LB+RB at boot is
+     * the documented wipe path).
+     *
+     * The MENU-held-at-boot force path is also blocked here — lobby
+     * owns that chord too. */
+    if (needs_format) {
+        splash_text("FS error", "hold MENU at lobby", 0xf800);
+        return -1;
+    }
+#else
     if (needs_format) {
         splash_color(0xffe0);   /* yellow = formatting */
 
@@ -136,6 +152,7 @@ static int boot_filesystem(void) {
         f_setlabel("THUMBYNES");
         nes_flash_disk_flush();
     }
+#endif
     return 0;
 }
 
