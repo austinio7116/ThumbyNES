@@ -176,6 +176,24 @@ target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 # ----------------------------------------------------------------------
 # nesrun_device — Phase 3 firmware: lobby + picker, no emulator yet.
 # ----------------------------------------------------------------------
+# FatFs library — ThumbyOne slot builds consume the shared copy at
+# ThumbyOne/common/lib/fatfs/ (symlinked from mp-thumby/lib/fatfs so
+# the MicroPython slot also sees bit-identical code). Standalone
+# builds keep the vendored copy in device/fatfs/ so ThumbyNES can
+# still build outside ThumbyOne. Our own diskio glue (fatfs/diskio.c)
+# stays either way — it routes FatFs sectors to nes_flash_disk and
+# is NES-specific.
+if (THUMBYONE_SLOT_MODE)
+    set(NES_FATFS_LIB_SRC ${THUMBYONE_FATFS_SRC})
+    set(NES_FATFS_LIB_INC ${THUMBYONE_FATFS_INCLUDE})
+else()
+    set(NES_FATFS_LIB_SRC
+        fatfs/ff.c
+        fatfs/ffsystem.c
+        fatfs/ffunicode.c)
+    set(NES_FATFS_LIB_INC ${CMAKE_CURRENT_LIST_DIR}/fatfs)
+endif()
+
 add_executable(nesrun_device
     nes_device_main.c
     nes_lcd_gc9107.c
@@ -193,14 +211,12 @@ add_executable(nesrun_device
     sms_run.c
     gb_run.c
     usb_descriptors.c
-    fatfs/ff.c
-    fatfs/ffsystem.c
-    fatfs/ffunicode.c
     fatfs/diskio.c
+    ${NES_FATFS_LIB_SRC}
 )
 target_include_directories(nesrun_device PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
-    ${CMAKE_CURRENT_LIST_DIR}/fatfs
+    ${NES_FATFS_LIB_INC}
 )
 target_compile_options(nesrun_device PRIVATE -O3 -Wno-unused-parameter)
 target_link_libraries(nesrun_device PRIVATE
