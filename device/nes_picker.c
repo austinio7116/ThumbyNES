@@ -30,6 +30,9 @@
 #include "tusb.h"
 #endif
 #include "ff.h"
+#ifdef THUMBYONE_SLOT_MODE
+#include "thumbyone_handoff.h"
+#endif
 
 #include "nes_flash_disk.h"
 
@@ -1281,7 +1284,12 @@ int nes_picker_run(uint16_t *fb,
             static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz" };
             static const int          clock_mhz[]     = {  125,      150,      200,      250 };
 
-            enum { ACT_NONE, ACT_DEFRAG };
+            /* ACT_LOBBY is only offered when compiled into ThumbyOne
+             * (standalone NES has nothing to fall back to). The
+             * menu_item enum stays stable otherwise so the picker
+             * state machine below doesn't care about conditional
+             * item ordering. */
+            enum { ACT_NONE, ACT_DEFRAG, ACT_LOBBY };
 
             nes_menu_item_t items[] = {
                 { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
@@ -1308,6 +1316,10 @@ int nes_picker_run(uint16_t *fb,
                   .enabled = true },
                 { .kind = NES_MENU_KIND_ACTION, .label = "Defragment now",
                   .enabled = true, .action_id = ACT_DEFRAG },
+#ifdef THUMBYONE_SLOT_MODE
+                { .kind = NES_MENU_KIND_ACTION, .label = "Back to lobby",
+                  .enabled = true, .action_id = ACT_LOBBY },
+#endif
                 { .kind = NES_MENU_KIND_INFO, .label = "About",
                   .info_text = about_text, .enabled = true },
             };
@@ -1348,6 +1360,22 @@ int nes_picker_run(uint16_t *fb,
                 n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
                 sel = reseat_sel(view, n_view, prev_real);
             }
+
+#ifdef THUMBYONE_SLOT_MODE
+            if (r.kind == NES_MENU_ACTION && r.action_id == ACT_LOBBY) {
+                /* Save prefs + favourites + shut down the flash
+                 * cache before firing the handoff — any dirty
+                 * state left behind would be lost when the bootrom
+                 * chain-reloads the lobby from a cold state. */
+                pref_save(&pref);
+                favs_save();
+                nes_flash_disk_flush();
+                f_unmount("");
+                nes_lcd_wait_idle();
+                thumbyone_handoff_request_lobby();
+                /* does not return */
+            }
+#endif
 
             pref_save(&pref);
         }
