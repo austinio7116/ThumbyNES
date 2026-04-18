@@ -154,17 +154,64 @@ static void drain_one_if_quiet(void) {
     }
 }
 
-/* Pump USB + drain + scan loop, returning the index of a chosen ROM. */
+#ifdef THUMBYONE_SLOT_MODE
+#include "thumbyone_handoff.h"
+
+/* ThumbyOne slot mode: USB lives in the top-level lobby, so users
+ * can only add ROMs by rebooting back to it. That makes the
+ * standalone "wait here until you drop a .nes" polling loop dead
+ * UX — we either have ROMs or we don't, no live arrival. Skip
+ * straight to the picker when we do, and show a one-shot "no roms,
+ * return to lobby" splash when we don't. MENU long-hold in that
+ * splash returns to the lobby, same as everywhere else. */
+static int lobby(void) {
+    int n_roms = nes_picker_scan(roms, NES_PICKER_MAX_ROMS);
+
+    if (n_roms == 0) {
+        fb_fill(0x0000);
+        nes_font_draw(fb, "ThumbyNES",     32, 20, 0xFD20);
+        nes_font_draw(fb, "no roms in",    22, 48, 0xFFFF);
+        nes_font_draw(fb, "/roms/",        50, 58, 0xFFFF);
+        nes_font_draw(fb, "hold MENU to",  18, 88, 0x8410);
+        nes_font_draw(fb, "return to lobby",12, 98, 0x8410);
+        nes_font_draw(fb, "USB transfer",  18, 114, 0xFFE0);
+        nes_font_draw(fb, "happens there", 18, 122, 0xFFE0);
+        nes_lcd_present(fb);
+        nes_lcd_wait_idle();
+
+        /* Block until the user long-holds MENU (800 ms) to go back
+         * to the top-level lobby. Short taps are ignored. */
+        while (1) {
+            if (nes_buttons_menu_pressed()) {
+                absolute_time_t d = make_timeout_time_ms(800);
+                bool held = true;
+                while (nes_buttons_menu_pressed()) {
+                    if (time_reached(d)) break;
+                    sleep_ms(10);
+                }
+                held = time_reached(d);
+                if (held) thumbyone_handoff_request_lobby();
+                /* Wait for release so a still-held button doesn't
+                 * instantly re-trigger after we come back. */
+                while (nes_buttons_menu_pressed()) sleep_ms(10);
+            }
+            sleep_ms(30);
+        }
+    }
+
+    int sel = nes_picker_run(fb, roms, &n_roms);
+    return sel;   /* may be <0 if user deleted everything; main() retries */
+}
+#else
+/* Standalone: pump USB + drain + scan loop. */
 static int lobby(void) {
     absolute_time_t next_scan = make_timeout_time_ms(0);
     int n_roms = 0;
     int splash_drawn = 0;
 
     while (1) {
-#ifndef THUMBYONE_SLOT_MODE
         tud_task();
         drain_one_if_quiet();
-#endif
 
         if (absolute_time_diff_us(get_absolute_time(), next_scan) <= 0) {
             n_roms = nes_picker_scan(roms, NES_PICKER_MAX_ROMS);
@@ -199,6 +246,7 @@ static int lobby(void) {
         next_scan = make_timeout_time_ms(0);
     }
 }
+#endif
 
 /* --- entry point ---------------------------------------------------- */
 
