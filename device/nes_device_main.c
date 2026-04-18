@@ -24,7 +24,13 @@
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "hardware/clocks.h"
+#ifndef THUMBYONE_SLOT_MODE
 #include "tusb.h"
+#else
+/* Slot mode: tinyUSB isn't linked. Stub tud_task() so the call
+ * sites in the lobby loop + boot enumeration pump compile away. */
+#define tud_task()  do { } while (0)
+#endif
 #include "ff.h"
 
 #include "nes_lcd_gc9107.h"
@@ -45,8 +51,17 @@ FATFS                 g_fs;   /* exported to nes_picker for XIP mmap */
 static nes_rom_entry  roms[NES_PICKER_MAX_ROMS];
 
 
+#ifndef THUMBYONE_SLOT_MODE
+/* In ThumbyOne slot mode the NES slot doesn't own USB — the lobby
+ * handles all file transfers. Stub out the MSC activity globals so
+ * the rest of this file can reference them unconditionally, and
+ * skip the tinyUSB init + pump calls below. */
 extern volatile int      g_msc_ejected;
 extern volatile uint64_t g_msc_last_op_us;
+#else
+static volatile int      g_msc_ejected    = 0;
+static volatile uint64_t g_msc_last_op_us = 0;
+#endif
 
 /* --- helpers -------------------------------------------------------- */
 
@@ -146,8 +161,10 @@ static int lobby(void) {
     int splash_drawn = 0;
 
     while (1) {
+#ifndef THUMBYONE_SLOT_MODE
         tud_task();
         drain_one_if_quiet();
+#endif
 
         if (absolute_time_diff_us(get_absolute_time(), next_scan) <= 0) {
             n_roms = nes_picker_scan(roms, NES_PICKER_MAX_ROMS);
@@ -216,7 +233,10 @@ int main(void) {
     boot_splash();
     absolute_time_t splash_until = make_timeout_time_ms(1200);
 
-    /* USB stack. Disk is fully on flash → enumeration is safe. */
+#ifndef THUMBYONE_SLOT_MODE
+    /* USB stack. Disk is fully on flash → enumeration is safe.
+     * In ThumbyOne slot mode, the lobby owns USB — we don't
+     * enumerate at all from this slot. */
     tusb_init();
     {
         absolute_time_t until = make_timeout_time_ms(1000);
@@ -225,6 +245,7 @@ int main(void) {
             sleep_us(100);
         }
     }
+#endif
 
     /* Hold the logo until the minimum has elapsed. Fast boot path
      * finishes USB before 1200 ms; slow path already blew past it. */

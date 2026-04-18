@@ -194,13 +194,17 @@ else()
     set(NES_FATFS_LIB_INC ${CMAKE_CURRENT_LIST_DIR}/fatfs)
 endif()
 
-add_executable(nesrun_device
+# MSC + tinyUSB are only linked into the standalone build. The
+# ThumbyOne slot build gets its USB handled by the lobby, so the
+# slot itself never enumerates — skip nes_msc.c, usb_descriptors.c,
+# and the tinyusb_* link libs entirely. Also frees ~8 KB of SRAM
+# and a couple KB of flash the slot doesn't need to carry.
+set(NES_SRC_BASE
     nes_device_main.c
     nes_lcd_gc9107.c
     nes_buttons.c
     nes_audio_pwm.c
     nes_flash_disk.c
-    nes_msc.c
     nes_picker.c
     nes_font.c
     nes_thumb.c
@@ -210,16 +214,24 @@ add_executable(nesrun_device
     nes_run.c
     sms_run.c
     gb_run.c
-    usb_descriptors.c
     fatfs/diskio.c
     ${NES_FATFS_LIB_SRC}
 )
+if (NOT THUMBYONE_SLOT_MODE)
+    list(APPEND NES_SRC_BASE
+        nes_msc.c
+        usb_descriptors.c
+    )
+endif()
+
+add_executable(nesrun_device ${NES_SRC_BASE})
 target_include_directories(nesrun_device PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${NES_FATFS_LIB_INC}
 )
 target_compile_options(nesrun_device PRIVATE -O3 -Wno-unused-parameter)
-target_link_libraries(nesrun_device PRIVATE
+
+set(NES_LINK_BASE
     thumbynes_core
     pico_stdlib
     pico_unique_id
@@ -232,9 +244,11 @@ target_link_libraries(nesrun_device PRIVATE
     hardware_flash
     hardware_sync
     hardware_adc
-    tinyusb_device
-    tinyusb_board
 )
+if (NOT THUMBYONE_SLOT_MODE)
+    list(APPEND NES_LINK_BASE tinyusb_device tinyusb_board)
+endif()
+target_link_libraries(nesrun_device PRIVATE ${NES_LINK_BASE})
 pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
 

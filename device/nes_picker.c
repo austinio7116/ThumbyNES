@@ -26,7 +26,9 @@
 #include "hardware/flash.h"
 #include "hardware/gpio.h"
 #include "hardware/regs/addressmap.h"
+#ifndef THUMBYONE_SLOT_MODE
 #include "tusb.h"
+#endif
 #include "ff.h"
 
 #include "nes_flash_disk.h"
@@ -42,7 +44,15 @@ extern FATFS g_fs;
 #define FB_W 128
 #define FB_H 128
 
+#ifdef THUMBYONE_SLOT_MODE
+/* Lobby owns USB in slot mode — no MSC timestamp, and tud_task() is
+ * a no-op because tinyUSB isn't compiled into this slot. Macro both
+ * out at translation time so the call sites below stay readable. */
+#define tud_task()             do { } while (0)
+static volatile uint64_t g_msc_last_op_us = 0;
+#else
 extern volatile uint64_t g_msc_last_op_us;
+#endif
 
 /* --- favorites store ------------------------------------------------ */
 

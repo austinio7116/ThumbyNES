@@ -28,7 +28,14 @@
 
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#ifndef THUMBYONE_SLOT_MODE
 #include "tusb.h"
+#else
+/* Slot mode: lobby owns USB, slot doesn't enumerate. tud_task()
+ * peppers the menu's wait loops as a keep-USB-alive helper that's
+ * simply a no-op here. */
+#define tud_task()  do { } while (0)
+#endif
 
 #define FB_W 128
 #define FB_H 128
