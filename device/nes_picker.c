@@ -59,26 +59,16 @@ extern volatile uint64_t g_msc_last_op_us;
 
 /* --- favorites store ------------------------------------------------ */
 
-/* ThumbyOne slot mode places ROMs under /roms/ (canonical folder
- * layout; the lobby creates this folder at format time). Standalone
- * builds keep ROMs at the filesystem root — the mkfs default.
- *
- * State files (.favs / .global / defrag tmp) stay at root in either
- * mode — they're per-install config, not content. */
-#ifdef THUMBYONE_SLOT_MODE
-#define ROMS_DIR       "/roms"
-#define ROMS_DIR_SLASH "/roms/"
-#else
-#define ROMS_DIR       ""        /* root */
-#define ROMS_DIR_SLASH "/"
-#endif
+/* ROMS_DIR / ROMS_DIR_SLASH are defined in nes_picker.h so every
+ * ThumbyNES source file agrees on the layout. Under slot mode all
+ * content + sidecars + state files live in /roms/. */
 
-/* /.favs is a plain newline-separated list of base file names that
- * the user has marked as favorites. We keep the whole file in a small
- * RAM buffer, mutated in place, and write it back on picker exit if
- * anything changed. 4 KB holds ~80 ROM names, more than fits in
- * the 64-entry NES_PICKER_MAX_ROMS cap anyway. */
-#define FAVS_PATH      "/.favs"
+/* Favourites: a plain newline-separated list of base file names that
+ * the user has marked as favorites. Kept in a small RAM buffer,
+ * mutated in place, written back on picker exit if anything changed.
+ * 4 KB holds ~80 ROM names, more than fits in the 64-entry
+ * NES_PICKER_MAX_ROMS cap anyway. */
+#define FAVS_PATH      ROMS_DIR_SLASH ".favs"
 #define FAVS_BUF_SIZE  4096
 
 static char   favs_buf[FAVS_BUF_SIZE];
@@ -470,7 +460,7 @@ int nes_picker_defrag(uint16_t *fb) {
 
     DIR dir;
     FILINFO info;
-    if (f_opendir(&dir, "/") != FR_OK) return -1;
+    if (f_opendir(&dir, ROMS_DIR) != FR_OK) return -1;
     while (n_frag < NES_PICKER_MAX_ROMS && f_readdir(&dir, &info) == FR_OK) {
         if (info.fname[0] == 0) break;
         if (info.fattrib & AM_DIR) continue;
@@ -584,7 +574,7 @@ static void format_meta(char *out, size_t outsz, const nes_rom_entry *e) {
 
 /* --- global preferences (volume etc.) ------------------------------ */
 
-#define GLOBAL_PATH       "/.global"
+#define GLOBAL_PATH       ROMS_DIR_SLASH ".global"
 #define GLOBAL_MAGIC      0x47424C31u   /* 'GBL1' */
 #define VOL_DEFAULT       15
 #define VOL_LIMIT         30
@@ -993,10 +983,10 @@ static int delete_rom_and_sidecars(const char *name) {
     char *dot = strrchr(base, '.');
     if (dot) *dot = 0;
 
-    snprintf(p, sizeof(p), "/%s.sav",   base); f_unlink(p);
-    snprintf(p, sizeof(p), "/%s.cfg",   base); f_unlink(p);
-    snprintf(p, sizeof(p), "/%s.scr32", base); f_unlink(p);
-    snprintf(p, sizeof(p), "/%s.scr64", base); f_unlink(p);
+    snprintf(p, sizeof(p), ROMS_DIR_SLASH "%s.sav",   base); f_unlink(p);
+    snprintf(p, sizeof(p), ROMS_DIR_SLASH "%s.cfg",   base); f_unlink(p);
+    snprintf(p, sizeof(p), ROMS_DIR_SLASH "%s.scr32", base); f_unlink(p);
+    snprintf(p, sizeof(p), ROMS_DIR_SLASH "%s.scr64", base); f_unlink(p);
 
     /* Drop from favorites if present. favs_toggle removes if there. */
     if (nes_picker_is_favorite(name)) favs_toggle(name);

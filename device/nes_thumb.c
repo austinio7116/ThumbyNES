@@ -21,6 +21,7 @@
  *      for 32×32, 2×2 → 1 px for 64×64).
  */
 #include "nes_thumb.h"
+#include "nes_picker.h"   /* ROMS_DIR_SLASH — sidecar location */
 
 #include <stdio.h>
 #include <string.h>
@@ -203,7 +204,7 @@ static void scr_path(char *out, size_t outsz, const char *rom_name, int size) {
     base[sizeof(base) - 1] = 0;
     char *dot = strrchr(base, '.');
     if (dot) *dot = 0;
-    snprintf(out, outsz, "/%s.scr%d", base, size);
+    snprintf(out, outsz, ROMS_DIR_SLASH "%s.scr%d", base, size);
 }
 
 bool nes_thumb_draw(uint16_t *fb, int x, int y, int size, const char *rom_name) {

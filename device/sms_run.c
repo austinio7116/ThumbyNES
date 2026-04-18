@@ -49,7 +49,7 @@ static void make_sidecar_path(char *out, size_t outsz,
     base[sizeof(base) - 1] = 0;
     char *dot = strrchr(base, '.');
     if (dot) *dot = 0;
-    snprintf(out, outsz, "/%s%s", base, ext);
+    snprintf(out, outsz, ROMS_DIR_SLASH "%s%s", base, ext);
 }
 
 static void battery_load(const char *rom_name) {

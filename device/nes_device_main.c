@@ -347,7 +347,7 @@ int main(void) {
         int  scanned      = 0;
         int  large_count  = 0;
         int  frag_count   = 0;
-        if (f_opendir(&d, "/") == FR_OK) {
+        if (f_opendir(&d, ROMS_DIR) == FR_OK) {
             while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
                 if (fi.fattrib & AM_DIR) continue;
                 if (fi.fname[0] == '.')  continue;

@@ -11,6 +11,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Root directory for all ThumbyNES content. Under THUMBYONE_SLOT_MODE
+ * everything lives in /roms/ (ROMs and per-ROM sidecars, plus the
+ * picker's own /.favs + /.global state) so the shared FAT stays tidy
+ * and each slot owns a single folder. Standalone builds keep the
+ * files at the root. Shared with nes_run.c / gb_run.c / sms_run.c /
+ * nes_thumb.c so every write path agrees on the layout. */
+#ifdef THUMBYONE_SLOT_MODE
+#define ROMS_DIR       "/roms"
+#define ROMS_DIR_SLASH "/roms/"
+#else
+#define ROMS_DIR       ""
+#define ROMS_DIR_SLASH "/"
+#endif
+
 #define NES_PICKER_MAX_ROMS  64
 /* Max file name length stored in nes_rom_entry. Real ROM dumps with
  * full no-intro / GoodNES tags push 60+ chars (e.g. "Super Mario
