@@ -275,16 +275,16 @@ int main(void) {
     }
     nes_flash_disk_flush();
 
-    /* Logo is the first thing on screen. Enforce a minimum on-
-     * screen duration so a healthy boot still gives the user a
-     * moment to read it — the USB pump below runs while it's up. */
+#ifndef THUMBYONE_SLOT_MODE
+    /* Standalone boot: show the ThumbyNES logo for at least 1.2 s
+     * and pump USB enumeration behind it. In slot mode we skip
+     * this entirely — the ThumbyOne lobby already showed a logo
+     * when the user selected NES, so a second "ThumbyNES" splash
+     * is a second lobby screen for no reason. */
     boot_splash();
     absolute_time_t splash_until = make_timeout_time_ms(1200);
 
-#ifndef THUMBYONE_SLOT_MODE
-    /* USB stack. Disk is fully on flash → enumeration is safe.
-     * In ThumbyOne slot mode, the lobby owns USB — we don't
-     * enumerate at all from this slot. */
+    /* USB stack. Disk is fully on flash → enumeration is safe. */
     tusb_init();
     {
         absolute_time_t until = make_timeout_time_ms(1000);
@@ -293,11 +293,11 @@ int main(void) {
             sleep_us(100);
         }
     }
-#endif
 
     /* Hold the logo until the minimum has elapsed. Fast boot path
      * finishes USB before 1200 ms; slow path already blew past it. */
     while (!time_reached(splash_until)) sleep_ms(10);
+#endif
 
     /* Old firmware versions wrote /.last for a quick-resume feature
      * that has since been removed. Sweep it away on boot so the
@@ -331,13 +331,16 @@ int main(void) {
 #define BTN_B_GP_BOOT 25
     int force_defrag = !gpio_get(BTN_B_GP_BOOT);
     {
-        /* Always show a brief diagnostic so the user can see the
-         * pre-flight ran. */
-        fb_fill(0x0000);
-        nes_font_draw(fb, "checking files",   18, 56, 0xFD20);
-        nes_lcd_present(fb);
-        nes_lcd_wait_idle();
-
+        /* Silently walk the disk and only paint a diagnostic splash
+         * when there's actually something to defragment (or the user
+         * asked for it via B-at-boot). Under THUMBYONE_SLOT_MODE that
+         * means a clean boot with no fragmented ROMs goes straight
+         * from the lobby's handoff into the picker — no intermediate
+         * "checking files" screen to flick past. Standalone boot
+         * behaves the same: pre-flight is silent unless there's work
+         * to do or the user forced it. Previously the pre-flight
+         * always rendered a diagnostic with file counts; felt like
+         * lobby UI for a debug feature. */
         DIR  d;
         FILINFO fi;
         int  needs_defrag = force_defrag;
@@ -355,37 +358,36 @@ int main(void) {
                 if (nes_picker_mmap_rom(fi.fname, &p, &l) != 0) {
                     frag_count++;
                     needs_defrag = 1;
-                    /* Don't break — count them all so we can show
-                     * the total in the diagnostic. */
                 }
             }
             f_closedir(&d);
         }
 
-        /* Diagnostic line so we can tell at a glance whether the
-         * pre-flight saw any large files at all. */
-        char line[40];
-        snprintf(line, sizeof(line), "%d files / %d big",
-                  scanned, large_count);
-        int lw = nes_font_width(line);
-        nes_font_draw(fb, line, (128 - lw) / 2, 70, 0xFFFF);
-        snprintf(line, sizeof(line), "%d need defrag", frag_count);
-        lw = nes_font_width(line);
-        nes_font_draw(fb, line, (128 - lw) / 2, 80,
-                       (frag_count || force_defrag) ? 0xFFE0 : 0x07E0);
-        if (force_defrag) {
-            const char *forced = "B HELD - forcing";
-            int fw = nes_font_width(forced);
-            nes_font_draw(fb, forced, (128 - fw) / 2, 92, 0xF81F);
-        }
-        nes_lcd_present(fb);
-        nes_lcd_wait_idle();
-        sleep_ms(800);
-
         if (needs_defrag) {
+            /* Show the diagnostic so the user knows what the
+             * long pause is. Only when work is actually happening. */
+            fb_fill(0x0000);
+            nes_font_draw(fb, "checking files",   18, 56, 0xFD20);
+            char line[40];
+            snprintf(line, sizeof(line), "%d files / %d big",
+                      scanned, large_count);
+            int lw = nes_font_width(line);
+            nes_font_draw(fb, line, (128 - lw) / 2, 70, 0xFFFF);
+            snprintf(line, sizeof(line), "%d need defrag", frag_count);
+            lw = nes_font_width(line);
+            nes_font_draw(fb, line, (128 - lw) / 2, 80, 0xFFE0);
+            if (force_defrag) {
+                const char *forced = "B HELD - forcing";
+                int fw = nes_font_width(forced);
+                nes_font_draw(fb, forced, (128 - fw) / 2, 92, 0xF81F);
+            }
+            nes_lcd_present(fb);
+            nes_lcd_wait_idle();
+            sleep_ms(400);
+
             int n = nes_picker_defrag(fb);
             (void)n;
-            sleep_ms(400);
+            sleep_ms(200);
         }
     }
 
