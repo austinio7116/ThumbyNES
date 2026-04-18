@@ -46,6 +46,20 @@ extern volatile uint64_t g_msc_last_op_us;
 
 /* --- favorites store ------------------------------------------------ */
 
+/* ThumbyOne slot mode places ROMs under /roms/ (canonical folder
+ * layout; the lobby creates this folder at format time). Standalone
+ * builds keep ROMs at the filesystem root — the mkfs default.
+ *
+ * State files (.favs / .global / defrag tmp) stay at root in either
+ * mode — they're per-install config, not content. */
+#ifdef THUMBYONE_SLOT_MODE
+#define ROMS_DIR       "/roms"
+#define ROMS_DIR_SLASH "/roms/"
+#else
+#define ROMS_DIR       ""        /* root */
+#define ROMS_DIR_SLASH "/"
+#endif
+
 /* /.favs is a plain newline-separated list of base file names that
  * the user has marked as favorites. We keep the whole file in a small
  * RAM buffer, mutated in place, and write it back on picker exit if
@@ -131,7 +145,7 @@ static void favs_toggle(const char *name) {
  * iNES magic isn't present. */
 static int read_ines_header(const char *fname, uint8_t hdr[16]) {
     char path[NES_PICKER_PATH_MAX];
-    snprintf(path, sizeof(path), "/%s", fname);
+    snprintf(path, sizeof(path), ROMS_DIR_SLASH "%s", fname);
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return -1;
     UINT br = 0;
@@ -194,7 +208,7 @@ static uint8_t mapper_from_header(const uint8_t hdr[16]) {
 int nes_picker_scan(nes_rom_entry *out, int max) {
     DIR dir;
     FILINFO info;
-    if (f_opendir(&dir, "/") != FR_OK) return 0;
+    if (f_opendir(&dir, ROMS_DIR) != FR_OK) return 0;
     int n = 0;
     while (n < max && f_readdir(&dir, &info) == FR_OK) {
         if (info.fname[0] == 0) break;
@@ -230,7 +244,7 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
 
 uint8_t *nes_picker_load_rom(const char *name, size_t *out_len) {
     char path[NES_PICKER_PATH_MAX];
-    snprintf(path, sizeof(path), "/%s", name);
+    snprintf(path, sizeof(path), ROMS_DIR_SLASH "%s", name);
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return NULL;
     FSIZE_t sz = f_size(&f);
@@ -298,7 +312,7 @@ static int chain_is_contiguous(DWORD start_cluster, DWORD n_clusters) {
  * exposed locally so we can call it without the size checks. */
 static int file_is_contiguous(const char *name) {
     char path[NES_PICKER_PATH_MAX];
-    snprintf(path, sizeof(path), "/%s", name);
+    snprintf(path, sizeof(path), ROMS_DIR_SLASH "%s", name);
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return 1;  /* assume yes if we can't tell */
     FSIZE_t sz = f_size(&f);
@@ -373,7 +387,7 @@ static void defrag_progress(uint16_t *fb, const char *name, int done, int total)
  * original is unlinked and the temp is renamed in its place. */
 static int defrag_one(const char *name, uint16_t *fb, int done, int total) {
     char src_path[NES_PICKER_PATH_MAX], tmp_path[16];
-    snprintf(src_path, sizeof(src_path), "/%s", name);
+    snprintf(src_path, sizeof(src_path), ROMS_DIR_SLASH "%s", name);
     snprintf(tmp_path, sizeof(tmp_path), DEFRAG_TMP);
 
     FIL src;
@@ -483,7 +497,7 @@ int nes_picker_mmap_rom(const char *name,
     nes_flash_disk_flush();
 
     char path[NES_PICKER_PATH_MAX];
-    snprintf(path, sizeof(path), "/%s", name);
+    snprintf(path, sizeof(path), ROMS_DIR_SLASH "%s", name);
 
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return -2;
@@ -957,7 +971,7 @@ static int sel_by_name(const nes_rom_entry *entries, const int *view,
  * removes it from the favorites list. Returns 0 on success. */
 static int delete_rom_and_sidecars(const char *name) {
     char p[NES_PICKER_PATH_MAX];
-    snprintf(p, sizeof(p), "/%s", name); f_unlink(p);
+    snprintf(p, sizeof(p), ROMS_DIR_SLASH "%s", name); f_unlink(p);
 
     /* Strip the extension once and append each sidecar suffix. */
     char base[NES_PICKER_NAME_MAX];
