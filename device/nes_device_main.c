@@ -292,6 +292,18 @@ int main(void) {
     }
     nes_flash_disk_flush();
 
+#ifdef THUMBYONE_SLOT_MODE
+    /* Apply the ThumbyOne system-wide brightness (/.brightness on
+     * the shared FAT). Default is full-on if the file is absent;
+     * otherwise we honour whatever the lobby or a sibling slot's
+     * menu was last set to. */
+    {
+        extern uint8_t thumbyone_settings_load_brightness(void);
+        extern void thumbyone_backlight_set(uint8_t);
+        thumbyone_backlight_set(thumbyone_settings_load_brightness());
+    }
+#endif
+
 #ifndef THUMBYONE_SLOT_MODE
     /* Standalone boot: show the ThumbyNES logo for at least 1.2 s
      * and pump USB enumeration behind it. In slot mode we skip

@@ -244,6 +244,8 @@ set(NES_LINK_BASE
     hardware_flash
     hardware_sync
     hardware_adc
+    hardware_pio   # shared thumbyone_backlight (PIO PWM on GP7 —
+                    # HW PWM slice 3 aliases with audio on GP23)
 )
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_LINK_BASE tinyusb_device tinyusb_board)
@@ -267,11 +269,15 @@ if (THUMBYONE_SLOT_MODE)
     target_sources(nesrun_device PRIVATE
         ${THUMBYONE_COMMON_SRC}
         ${THUMBYONE_COMMON_BATTERY_SRC}
-        ${THUMBYONE_COMMON_FS_STATS_SRC})
+        ${THUMBYONE_COMMON_FS_STATS_SRC}
+        ${THUMBYONE_COMMON_BACKLIGHT_SRC}
+        ${THUMBYONE_COMMON_SETTINGS_SRC})
     target_include_directories(nesrun_device PRIVATE
         ${THUMBYONE_COMMON_INCLUDE}
         ${THUMBYONE_COMMON_BATTERY_INCLUDE}
-        ${THUMBYONE_COMMON_FS_STATS_INCLUDE})
+        ${THUMBYONE_COMMON_FS_STATS_INCLUDE}
+        ${THUMBYONE_COMMON_BACKLIGHT_INCLUDE}
+        ${THUMBYONE_COMMON_SETTINGS_INCLUDE})
     pico_set_uf2_family(nesrun_device "absolute")
     pico_add_extra_outputs(nesrun_device)
 else()

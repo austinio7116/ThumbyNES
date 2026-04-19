@@ -19,6 +19,8 @@
 
 #ifdef THUMBYONE_SLOT_MODE
 #  include "thumbyone_fs_stats.h"
+#  include "thumbyone_settings.h"
+#  include "thumbyone_backlight.h"
 #endif
 
 #include <stdio.h>
@@ -600,8 +602,16 @@ static int valid_clock_mhz(int m) {
 
 static void global_load(void) {
     if (g_volume_cached >= 0 && g_clock_cached >= 0) return;
+#ifdef THUMBYONE_SLOT_MODE
+    /* Slot mode: volume lives in /.volume, NOT /.global — we don't
+     * want this path to populate g_volume_cached with the /.global
+     * byte (which would shadow the /.volume lookup in
+     * nes_picker_global_volume below). Only load the clock. */
+    g_clock_cached = CLOCK_DEFAULT_MHZ;
+#else
     g_volume_cached = VOL_DEFAULT;
     g_clock_cached  = CLOCK_DEFAULT_MHZ;
+#endif
     FIL f;
     if (f_open(&f, GLOBAL_PATH, FA_READ) != FR_OK) return;
     picker_global_t g = {0};
@@ -609,7 +619,9 @@ static void global_load(void) {
     f_read(&f, &g, sizeof(g), &br);
     f_close(&f);
     if (br < 4 || g.magic != GLOBAL_MAGIC) return;
+#ifndef THUMBYONE_SLOT_MODE
     if (g.volume <= VOL_LIMIT) g_volume_cached = g.volume;
+#endif
     /* The clock_mhz field was added in a later version of the file —
      * older 8-byte writes may have left it as 0 or arbitrary, so
      * fall back to the default unless the value validates. */
@@ -633,8 +645,23 @@ static void global_save(void) {
 }
 
 int nes_picker_global_volume(void) {
+#ifdef THUMBYONE_SLOT_MODE
+    /* Under ThumbyOne: the user-facing volume lives in /.volume
+     * (range 0..20, shared by lobby + NES + P8 + MPY picker / games).
+     * Rescale to the NES internal 0..VOL_LIMIT range the audio
+     * path expects. Standalone NES still uses /.global.volume.
+     *
+     * Cached so repeated-per-sample callers (nes_run.c pulls this
+     * at the top of the audio callback) don't hit FatFs every call. */
+    if (g_volume_cached < 0) {
+        int ui = thumbyone_settings_load_volume();   /* 0..20 */
+        g_volume_cached = (ui * VOL_LIMIT) / THUMBYONE_VOLUME_MAX;
+    }
+    return g_volume_cached;
+#else
     global_load();
     return g_volume_cached;
+#endif
 }
 
 void nes_picker_global_set_volume(int v) {
@@ -642,7 +669,15 @@ void nes_picker_global_set_volume(int v) {
     if (v > VOL_LIMIT) v = VOL_LIMIT;
     if (v == g_volume_cached) return;
     g_volume_cached = v;
+#ifdef THUMBYONE_SLOT_MODE
+    /* Translate NES internal (0..30) -> unified 0..20 and persist
+     * to /.volume so the next lobby / P8 / MPY boot picks it up. */
+    int ui = (v * THUMBYONE_VOLUME_MAX + VOL_LIMIT / 2) / VOL_LIMIT;
+    if (ui < 0) ui = 0; if (ui > THUMBYONE_VOLUME_MAX) ui = THUMBYONE_VOLUME_MAX;
+    thumbyone_settings_save_volume((uint8_t)ui);
+#else
     global_save();
+#endif
     nes_flash_disk_flush();
 }
 
@@ -1281,6 +1316,7 @@ int nes_picker_run(uint16_t *fb,
             char  battery_text[24];
             int   batt_v_int  = (int)batt_v;
             int   batt_v_dec  = (int)((batt_v - batt_v_int) * 100.0f + 0.5f);
+#ifdef THUMBYONE_SLOT_MODE
             if (charging) {
                 snprintf(battery_text, sizeof(battery_text), "CHRG %d.%02dV",
                           batt_v_int, batt_v_dec);
@@ -1288,6 +1324,15 @@ int nes_picker_run(uint16_t *fb,
                 snprintf(battery_text, sizeof(battery_text), "%d%% %d.%02dV",
                           v_batt_pct, batt_v_int, batt_v_dec);
             }
+#else
+            if (charging) {
+                snprintf(battery_text, sizeof(battery_text), "CHRG %d.%02dV",
+                          batt_v_int, batt_v_dec);
+            } else {
+                snprintf(battery_text, sizeof(battery_text), "%d%% %d.%02dV",
+                          v_batt_pct, batt_v_int, batt_v_dec);
+            }
+#endif
 
             char about_text[24];
             snprintf(about_text, sizeof(about_text), "ThumbyNES v1.02");
@@ -1302,7 +1347,7 @@ int nes_picker_run(uint16_t *fb,
              * menu_item enum stays stable otherwise so the picker
              * state machine below doesn't care about conditional
              * item ordering. */
-            enum { ACT_NONE, ACT_DEFRAG, ACT_LOBBY };
+            enum { ACT_NONE, ACT_LOBBY };
 
             nes_menu_item_t items[] = {
                 { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
@@ -1327,8 +1372,6 @@ int nes_picker_run(uint16_t *fb,
                   .value_ptr = &v_storage_used_kb, .min = 0,
                   .max = v_storage_total_kb > 0 ? v_storage_total_kb : 1,
                   .enabled = true },
-                { .kind = NES_MENU_KIND_ACTION, .label = "Defragment now",
-                  .enabled = true, .action_id = ACT_DEFRAG },
 #ifdef THUMBYONE_SLOT_MODE
                 { .kind = NES_MENU_KIND_ACTION, .label = "Back to lobby",
                   .enabled = true, .action_id = ACT_LOBBY },
@@ -1358,20 +1401,6 @@ int nes_picker_run(uint16_t *fb,
                 n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
                 sel = reseat_sel(view, n_view, prev_real);
                 top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
-            }
-
-            if (r.kind == NES_MENU_ACTION && r.action_id == ACT_DEFRAG) {
-                int n = nes_picker_defrag(fb);
-                snprintf(osd, sizeof(osd), "defrag: %d files", n);
-                osd_ms = 1500;
-                /* Re-scan after the rewrite — file metadata may have
-                 * shifted even though contents are the same. */
-                int prev_real = (n_view > 0) ? view[sel] : -1;
-                n_entries  = nes_picker_scan(entries, NES_PICKER_MAX_ROMS);
-                *n_entries_io = n_entries;
-                tab_counts(entries, n_entries, counts);
-                n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
-                sel = reseat_sel(view, n_view, prev_real);
             }
 
 #ifdef THUMBYONE_SLOT_MODE

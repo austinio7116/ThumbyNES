@@ -310,6 +310,15 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
     int prev_lt = 0, prev_rt = 0, prev_up = 0, prev_dn = 0;
     int prev_a = 0, prev_b = 0, prev_menu = 0;
 
+    /* Slider autorepeat: hold LEFT/RIGHT to keep stepping. Matches
+     * the lobby + MPY picker menu timings (300 ms warm-up, 60 ms
+     * cadence). Only applies to KIND_SLIDER — CHOICE cycles too
+     * fast and TOGGLE doesn't benefit. */
+    const uint32_t AR_DELAY_US = 300u * 1000u;
+    const uint32_t AR_STEP_US  =  60u * 1000u;
+    uint32_t ar_lt_next_us = 0;
+    uint32_t ar_rt_next_us = 0;
+
     while (1) {
         int lt = !gpio_get(BTN_LEFT_GP);
         int rt = !gpio_get(BTN_RIGHT_GP);
@@ -329,6 +338,24 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
 
         prev_lt = lt; prev_rt = rt; prev_up = up; prev_dn = dn;
         prev_a  = a;  prev_b  = b;  prev_menu = mn;
+
+        /* Slider autorepeat arming. Only fire the "extra" repeat
+         * when the row under the cursor is actually a slider. */
+        uint32_t now_us = (uint32_t)time_us_64();
+        int slider_here = (cursor >= 0 && cursor < n_items
+                           && items[cursor].kind == NES_MENU_KIND_SLIDER
+                           && items[cursor].enabled);
+        int ar_lt = 0, ar_rt = 0;
+        if (slider_here) {
+            if (e_lt)        ar_lt_next_us = now_us + AR_DELAY_US;
+            if (e_rt)        ar_rt_next_us = now_us + AR_DELAY_US;
+            if (lt && !e_lt && (int32_t)(now_us - ar_lt_next_us) >= 0) {
+                ar_lt = 1; ar_lt_next_us = now_us + AR_STEP_US;
+            }
+            if (rt && !e_rt && (int32_t)(now_us - ar_rt_next_us) >= 0) {
+                ar_rt = 1; ar_rt_next_us = now_us + AR_STEP_US;
+            }
+        }
 
         /* B or MENU = close menu without action. Drain the same
          * way to avoid the runner re-reading the press. */
@@ -364,8 +391,8 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
             }
             break;
         case NES_MENU_KIND_SLIDER:
-            if (e_lt && *it->value_ptr > it->min) (*it->value_ptr)--;
-            if (e_rt && *it->value_ptr < it->max) (*it->value_ptr)++;
+            if ((e_lt || ar_lt) && *it->value_ptr > it->min) (*it->value_ptr)--;
+            if ((e_rt || ar_rt) && *it->value_ptr < it->max) (*it->value_ptr)++;
             break;
         case NES_MENU_KIND_CHOICE:
             if (e_lt) {

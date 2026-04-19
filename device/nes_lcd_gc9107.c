@@ -12,6 +12,14 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 
+#ifdef THUMBYONE_SLOT_MODE
+/* Shared hardware-PWM backlight driver (GP7, slice 3 channel B)
+ * + shared /.brightness system setting. Standalone ThumbyNES keeps
+ * the simple gpio_put(1/0) pattern. */
+#  include "thumbyone_backlight.h"
+#  include "thumbyone_settings.h"
+#endif
+
 #define LCD_SPI            spi0
 #define LCD_SPI_HZ         (80 * 1000 * 1000)
 
@@ -67,8 +75,12 @@ void nes_lcd_init(void) {
     gpio_init(PIN_DC);  gpio_set_dir(PIN_DC,  GPIO_OUT); gpio_put(PIN_DC,  1);
     gpio_init(PIN_RST); gpio_set_dir(PIN_RST, GPIO_OUT); gpio_put(PIN_RST, 1);
 
-    /* Backlight: drive high for full brightness. PWM later. */
+    /* Backlight off during panel init. */
+#ifdef THUMBYONE_SLOT_MODE
+    thumbyone_backlight_init();   /* starts at 0 */
+#else
     gpio_init(PIN_BL);  gpio_set_dir(PIN_BL,  GPIO_OUT); gpio_put(PIN_BL,  0);
+#endif
 
     /* Hardware reset pulse */
     sleep_ms(5);
@@ -125,8 +137,18 @@ void nes_lcd_init(void) {
     channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_16);
     channel_config_set_dreq(&dma_cfg, DREQ_SPI0_TX);
 
-    /* Backlight on */
+    /* Backlight on — DEFAULT=full-brightness if the FAT isn't
+     * mounted yet (common case: first nes_lcd_init is called
+     * before boot_filesystem). Once the FAT is up any subsequent
+     * nes_lcd_init (overclock reapply, game launch) will pick up
+     * /.brightness via thumbyone_settings_load_brightness — that
+     * returns DEFAULT cleanly if the file isn't readable, so this
+     * is safe to call always. */
+#ifdef THUMBYONE_SLOT_MODE
+    thumbyone_backlight_set(thumbyone_settings_load_brightness());
+#else
     gpio_put(PIN_BL, 1);
+#endif
 }
 
 void nes_lcd_wait_idle(void) {
@@ -153,5 +175,13 @@ void nes_lcd_present(const uint16_t *fb_rgb565) {
 }
 
 void nes_lcd_backlight(int on) {
+#ifdef THUMBYONE_SLOT_MODE
+    /* Honour the user-saved /.brightness when restoring after
+     * an idle-dim — otherwise each game launch / wake-from-idle
+     * blast to full, ignoring whatever the lobby was set to. */
+    if (on) thumbyone_backlight_set(thumbyone_settings_load_brightness());
+    else    thumbyone_backlight_set(0);   /* clamps up to FLOOR */
+#else
     gpio_put(PIN_BL, on ? 1 : 0);
+#endif
 }
