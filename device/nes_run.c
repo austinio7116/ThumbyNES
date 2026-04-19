@@ -31,6 +31,12 @@
 #include "ff.h"
 
 #include "nes_font.h"
+
+#ifdef THUMBYONE_SLOT_MODE
+#  include "thumbyone_settings.h"
+#  include "thumbyone_backlight.h"
+#  include "nes_flash_disk.h"
+#endif
 #include "nes_thumb.h"
 #include "nes_menu.h"
 #include "nes_flash_disk.h"
@@ -504,6 +510,10 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             /* Pack current state into ints the menu can mutate. */
             int v_scale = (int)scale_mode;
             int v_vol   = volume;
+#ifdef THUMBYONE_SLOT_MODE
+            int v_bri   = thumbyone_settings_load_brightness();
+            int old_bri = v_bri;
+#endif
             int v_ff    = fast_forward ? 1 : 0;
             int v_fps   = show_fps ? 1 : 0;
             int v_blend = blend ? 1 : 0;
@@ -552,6 +562,10 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
                   .value_ptr = &v_vol, .min = VOL_MIN, .max = VOL_MAX,
                   .enabled = true },
+#ifdef THUMBYONE_SLOT_MODE
+                { .kind = NES_MENU_KIND_SLIDER, .label = "Brightness",
+                  .value_ptr = &v_bri, .min = 0, .max = 255, .enabled = true },
+#endif
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "Fast-fwd",
                   .value_ptr = &v_ff, .enabled = true },
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "Show FPS",
@@ -591,6 +605,15 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 volume = v_vol;
                 nes_picker_global_set_volume(v_vol);
             }
+#ifdef THUMBYONE_SLOT_MODE
+            if (v_bri != old_bri) {
+                if (v_bri < 0)   v_bri = 0;
+                if (v_bri > 255) v_bri = 255;
+                thumbyone_settings_save_brightness((uint8_t)v_bri);
+                nes_flash_disk_flush();
+                thumbyone_backlight_set((uint8_t)v_bri);
+            }
+#endif
             if ((bool)v_ff    != fast_forward) {  fast_forward = (bool)v_ff;          /* not persisted */ }
             if ((bool)v_fps   != show_fps    ) {  show_fps     = (bool)v_fps; cfg_dirty = true; }
             if ((bool)v_blend != blend       ) {  blend        = (bool)v_blend; cfg_dirty = true; }

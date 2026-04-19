@@ -390,10 +390,23 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
                 *it->value_ptr = !*it->value_ptr;
             }
             break;
-        case NES_MENU_KIND_SLIDER:
-            if ((e_lt || ar_lt) && *it->value_ptr > it->min) (*it->value_ptr)--;
-            if ((e_rt || ar_rt) && *it->value_ptr < it->max) (*it->value_ptr)++;
+        case NES_MENU_KIND_SLIDER: {
+            /* Auto-step so any slider range takes ~20 clicks end-to-
+             * end, matching the lobby's "feel" — without it a 0..255
+             * brightness slider takes 256 taps. Volume 0..30 gives
+             * step=1; brightness 0..255 gives step=12. */
+            int step = (it->max - it->min) / 20;
+            if (step < 1) step = 1;
+            if ((e_lt || ar_lt) && *it->value_ptr > it->min) {
+                *it->value_ptr -= step;
+                if (*it->value_ptr < it->min) *it->value_ptr = it->min;
+            }
+            if ((e_rt || ar_rt) && *it->value_ptr < it->max) {
+                *it->value_ptr += step;
+                if (*it->value_ptr > it->max) *it->value_ptr = it->max;
+            }
             break;
+        }
         case NES_MENU_KIND_CHOICE:
             if (e_lt) {
                 if (*it->value_ptr > 0) (*it->value_ptr)--;

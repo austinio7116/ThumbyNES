@@ -1265,6 +1265,11 @@ int nes_picker_run(uint16_t *fb,
             int v_view = (pref.view == VIEW_HERO) ? 0 : 1;
             int v_sort = pref.sort;
             int v_vol  = nes_picker_global_volume();
+#ifdef THUMBYONE_SLOT_MODE
+            /* ThumbyOne global brightness (0..255). */
+            int v_bri  = thumbyone_settings_load_brightness();
+            int old_bri = v_bri;
+#endif
             int v_clock_mhz = nes_picker_global_clock_mhz();
             int v_clock = (v_clock_mhz == 125) ? 0
                         : (v_clock_mhz == 150) ? 1
@@ -1354,6 +1359,10 @@ int nes_picker_run(uint16_t *fb,
                   .enabled = true, .action_id = ACT_NONE },
                 { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
                   .value_ptr = &v_vol, .min = 0, .max = VOL_LIMIT, .enabled = true },
+#ifdef THUMBYONE_SLOT_MODE
+                { .kind = NES_MENU_KIND_SLIDER, .label = "Brightness",
+                  .value_ptr = &v_bri, .min = 0, .max = 255, .enabled = true },
+#endif
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
                   .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 4,
                   .enabled = true, .suffix = "next launch" },
@@ -1372,12 +1381,14 @@ int nes_picker_run(uint16_t *fb,
                   .value_ptr = &v_storage_used_kb, .min = 0,
                   .max = v_storage_total_kb > 0 ? v_storage_total_kb : 1,
                   .enabled = true },
+                { .kind = NES_MENU_KIND_INFO, .label = "About",
+                  .info_text = about_text, .enabled = true },
 #ifdef THUMBYONE_SLOT_MODE
+                /* "Back to lobby" is always the last item so a single
+                 * UP from the top wraps to it — muscle-memory "go back". */
                 { .kind = NES_MENU_KIND_ACTION, .label = "Back to lobby",
                   .enabled = true, .action_id = ACT_LOBBY },
 #endif
-                { .kind = NES_MENU_KIND_INFO, .label = "About",
-                  .info_text = about_text, .enabled = true },
             };
 
             nes_menu_result_t r = nes_menu_run(fb, "PICKER", "settings",
@@ -1387,6 +1398,18 @@ int nes_picker_run(uint16_t *fb,
             if (v_vol != nes_picker_global_volume()) {
                 nes_picker_global_set_volume(v_vol);
             }
+#ifdef THUMBYONE_SLOT_MODE
+            /* Brightness: write /.brightness + flush + apply PWM.
+             * Clamp before cast — the slider max is 255 so the int
+             * value always fits in uint8_t, but be defensive. */
+            if (v_bri != old_bri) {
+                if (v_bri < 0)   v_bri = 0;
+                if (v_bri > 255) v_bri = 255;
+                thumbyone_settings_save_brightness((uint8_t)v_bri);
+                nes_flash_disk_flush();
+                thumbyone_backlight_set((uint8_t)v_bri);
+            }
+#endif
             int new_mhz = clock_mhz[v_clock];
             if (new_mhz != nes_picker_global_clock_mhz()) {
                 nes_picker_global_set_clock_mhz(new_mhz);
