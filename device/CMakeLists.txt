@@ -266,10 +266,12 @@ if (THUMBYONE_SLOT_MODE)
     # THUMBYONE_COMMON_INCLUDE from its add_subdirectory(common).
     target_sources(nesrun_device PRIVATE
         ${THUMBYONE_COMMON_SRC}
-        ${THUMBYONE_COMMON_BATTERY_SRC})
+        ${THUMBYONE_COMMON_BATTERY_SRC}
+        ${THUMBYONE_COMMON_FS_STATS_SRC})
     target_include_directories(nesrun_device PRIVATE
         ${THUMBYONE_COMMON_INCLUDE}
-        ${THUMBYONE_COMMON_BATTERY_INCLUDE})
+        ${THUMBYONE_COMMON_BATTERY_INCLUDE}
+        ${THUMBYONE_COMMON_FS_STATS_INCLUDE})
     pico_set_uf2_family(nesrun_device "absolute")
     pico_add_extra_outputs(nesrun_device)
 else()

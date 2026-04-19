@@ -17,6 +17,10 @@
 #include "nes_menu.h"
 #include "nes_battery.h"
 
+#ifdef THUMBYONE_SLOT_MODE
+#  include "thumbyone_fs_stats.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1231,25 +1235,44 @@ int nes_picker_run(uint16_t *fb,
                         : (v_clock_mhz == 150) ? 1
                         : (v_clock_mhz == 200) ? 2 : 3;
 
-            /* Storage info — read once when the menu opens. */
-            DWORD free_clusters = 0;
-            FATFS *fs_ptr = NULL;
-            uint32_t total_kb = 0, free_kb = 0;
-            if (f_getfree("", &free_clusters, &fs_ptr) == FR_OK && fs_ptr) {
-                uint32_t bytes_per_cluster = (uint32_t)fs_ptr->csize * 512u;
-                uint32_t total_clusters    = (uint32_t)(fs_ptr->n_fatent - 2);
-                total_kb = (total_clusters * bytes_per_cluster) / 1024u;
-                free_kb  = ((uint32_t)free_clusters * bytes_per_cluster) / 1024u;
-            }
-            uint32_t used_kb = (total_kb > free_kb) ? (total_kb - free_kb) : 0;
-            int v_storage_used_kb = (int)used_kb;
-            int v_storage_total_kb = (int)total_kb;
+            /* Storage info — read once when the menu opens. Under
+             * ThumbyOne slot mode, format via the shared helper so
+             * the NES picker matches the lobby / P8 / MPY picker
+             * readouts exactly. Standalone NES keeps the old
+             * "X.XX/Y.YYMB" format. */
+            int v_storage_used_kb = 0;
+            int v_storage_total_kb = 0;
             char storage_text[24];
-            snprintf(storage_text, sizeof(storage_text), "%lu.%02lu/%lu.%02luMB",
-                      (unsigned long)(used_kb / 1024),
-                      (unsigned long)((used_kb % 1024) * 100 / 1024),
-                      (unsigned long)(total_kb / 1024),
-                      (unsigned long)((total_kb % 1024) * 100 / 1024));
+#ifdef THUMBYONE_SLOT_MODE
+            {
+                uint64_t used_b = 0, total_b = 0;
+                thumbyone_fs_get_usage(&used_b, NULL, &total_b);
+                thumbyone_fs_fmt_used_total(used_b, total_b,
+                                            storage_text, sizeof(storage_text));
+                v_storage_used_kb  = (int)(used_b / 1024);
+                v_storage_total_kb = (int)(total_b / 1024);
+            }
+#else
+            {
+                DWORD free_clusters = 0;
+                FATFS *fs_ptr = NULL;
+                uint32_t total_kb = 0, free_kb = 0;
+                if (f_getfree("", &free_clusters, &fs_ptr) == FR_OK && fs_ptr) {
+                    uint32_t bytes_per_cluster = (uint32_t)fs_ptr->csize * 512u;
+                    uint32_t total_clusters    = (uint32_t)(fs_ptr->n_fatent - 2);
+                    total_kb = (total_clusters * bytes_per_cluster) / 1024u;
+                    free_kb  = ((uint32_t)free_clusters * bytes_per_cluster) / 1024u;
+                }
+                uint32_t used_kb = (total_kb > free_kb) ? (total_kb - free_kb) : 0;
+                v_storage_used_kb  = (int)used_kb;
+                v_storage_total_kb = (int)total_kb;
+                snprintf(storage_text, sizeof(storage_text), "%lu.%02lu/%lu.%02luMB",
+                          (unsigned long)(used_kb / 1024),
+                          (unsigned long)((used_kb % 1024) * 100 / 1024),
+                          (unsigned long)(total_kb / 1024),
+                          (unsigned long)((total_kb % 1024) * 100 / 1024));
+            }
+#endif
 
             /* Battery info. */
             int   v_batt_pct  = nes_battery_percent();
