@@ -1,7 +1,25 @@
 /*
  * ThumbyNES — Thumby Color battery monitor (RP2350 ADC).
+ *
+ * Under THUMBYONE_SLOT_MODE we delegate to the shared battery
+ * helper in common/lib/thumbyone_battery so every slot + lobby
+ * reports the same smoothed / hysteresised number.  Standalone
+ * ThumbyNES keeps the old single-sample implementation so the
+ * repo still builds on its own.
  */
 #include "nes_battery.h"
+
+#include <stddef.h>   /* NULL */
+
+#ifdef THUMBYONE_SLOT_MODE
+#  include "thumbyone_battery.h"
+
+void nes_battery_init(void)          { thumbyone_battery_init(); }
+float nes_battery_voltage(void)      { float v = 0.0f; thumbyone_battery_read(NULL, NULL, &v); return v; }
+int   nes_battery_percent(void)      { int   p = 0;    thumbyone_battery_read(&p,   NULL, NULL); return p; }
+bool  nes_battery_charging(void)     { bool  c = false; thumbyone_battery_read(NULL, &c,   NULL); return c; }
+
+#else /* standalone ThumbyNES build */
 
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
@@ -64,3 +82,5 @@ bool nes_battery_charging(void)
 {
     return read_half_voltage() >= HALF_MAX_V;
 }
+
+#endif /* THUMBYONE_SLOT_MODE */
