@@ -627,6 +627,20 @@ buffers — regardless of how full the disk is. A file-level approach
 (copy-to-scratch + rename) can't operate on a near-full volume
 because it needs 2× the file size free at once; cluster-level doesn't.
 
+### Flash wear — don't run it habitually
+
+A full defrag rewrites every moved cluster to flash. The RP2350's
+internal QSPI flash is a consumer-grade chip with a finite
+erase/program endurance (spec is ~100k cycles per sector), so
+treat defrag as an **occasional cleanup / optimisation**, not
+something to fire off after every USB session. One pass after a
+big batch of uploads is fine; running it for its own sake every
+boot is wasteful.
+
+The preview-and-confirm step partly exists to make accidental
+runs hard. Repeat runs on an already-clean volume are also a true
+no-op — preview shows `0 mv` and zero writes land on flash.
+
 ### Preview + confirm
 
 <p align="center">
