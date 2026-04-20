@@ -561,31 +561,44 @@ There are two XIP paths:
    uint8_t *` pointer into flash.
 2. **Chained XIP** — the fallback when the file is fragmented.
    The loader walks the FAT chain, records the XIP address of each
-   cluster into a `cluster_ptrs[]` table, and the core reads through
-   that table instead of a flat pointer. Still fully zero-copy, still
-   runs at 60 fps — but the extra shift/mask/lookup per byte access
-   has a measurable CPU cost on tight inner loops and uses ~4 KB of
-   heap for the pointer table on a 1 MB cart.
+   cluster into a `cluster_ptrs[]` table, and every ROM byte access
+   does a shift + mask + table lookup to find the right cluster
+   before hitting flash. Still zero-copy (no RAM copy of the cart),
+   still backed by XIP, but the per-byte indirection costs CPU on
+   every single read the core performs. The table itself is ~4 KB
+   of heap for a 1 MB cart.
+
+**Fragmented doesn't mean broken.** Most games stay locked to their
+native refresh rate on chained XIP — early NES, Game Boy, most SMS /
+GG carts have plenty of CPU headroom to absorb the lookup overhead.
+The ones that can drop frames when fragmented are the busy ones:
+dense NES mapper carts (MMC3/MMC5 games with big tilemap bandwidth),
+some GBC titles with heavy per-scanline palette work, a handful of
+SMS titles hammering the PSG. If a fragmented cart feels sluggish,
+the defragmenter is the fix.
 
 **What defragmenting actually buys you:**
 
-- **Lower CPU overhead during play.** Contiguous mmap skips the
-  per-byte cluster-pointer lookup that chained XIP does. On heavier
-  cores (NES MMC-mapped carts, dense SMS title loops) this is a
-  few percent of headroom you can spend on audio quality or a
-  lower overclock.
-- **Free contiguous space for big new uploads.** The real win.
-  Dropping a 2 MB ROM over USB requires 2 MB of **contiguous** free
-  clusters, not just 2 MB of free clusters total. A fragmented free
-  list can refuse a large write even with lots of room on disk.
-  Defragmenting compacts free space into one run at the end of
-  the volume so the next big ROM lands in one go.
+- **Existing fragmented carts get moved onto the fast path.**
+  Every cart on the volume ends up as a contiguous cluster chain,
+  so every cart runs through direct mmap with no per-byte
+  indirection. If a cart was dropping frames because it was
+  fragmented, defrag puts it right.
+- **New uploads stay on the fast path too.** Defragging
+  consolidates all free space into one run at the end of the
+  volume. The next ROM you drop over USB lands in that contiguous
+  run, so it starts life as a contiguous file — no fragmentation,
+  no chained XIP, no re-defrag needed. Writing a file to a
+  fragmented free list *works* (the host's FAT driver is happy to
+  chain scattered clusters into a fragmented file), but the
+  resulting file is then fragmented itself and needs chained XIP
+  to run.
 - **Cleaner cluster map.** Satisfying to look at.
 
 **What it doesn't do:** ROMs still load and play correctly whether
 the volume is defragmented or not. Chained XIP is the safety net —
 you can drop a ROM, play it immediately, and defragment later (or
-never) at your discretion.
+never) if the cart runs fine either way.
 
 ### The cluster-level defragmenter
 
@@ -976,9 +989,12 @@ Explicit scope cuts to protect the RAM/CPU budget:
 - **Chained-XIP fallback for fragmented carts.** When a cart's
   cluster chain isn't contiguous the runners fall back to a
   per-cluster pointer table so the file still maps straight out of
-  flash — no RAM load, still full 60 fps. Drop a ROM, play it,
-  defragment whenever (or never). The contiguous mmap path is
-  still preferred when available.
+  flash — no RAM load. Most games run at full speed either way;
+  heavier carts (dense NES mappers, some GBC titles) can drop
+  frames on chained XIP when they wouldn't on contiguous mmap.
+  Defragment if a fragmented cart feels sluggish; otherwise it's
+  optional. See [Defragmenter](#defragmenter) for the full
+  explanation.
 - **New cluster-level defragmenter** with live cluster-map
   visualisation. Replaces the old file-level `f_expand` approach.
   Works on near-full volumes (the file-level path couldn't — it
