@@ -43,7 +43,7 @@
 #include "sms_run.h"
 #include "gb_run.h"
 
-#define THUMBYNES_VERSION "1.02"
+#define THUMBYNES_VERSION "1.03"
 
 /* Static framebuffer + filesystem state. */
 static uint16_t       fb[128 * 128];
