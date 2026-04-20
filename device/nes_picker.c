@@ -307,7 +307,12 @@ static int chain_is_contiguous(DWORD start_cluster, DWORD n_clusters) {
             sector_buf_lba = lba;
         }
         DWORD next = (DWORD)fat_sec[entry_off] | ((DWORD)fat_sec[entry_off + 1] << 8);
-        if (next == 0xFFFF) {
+        /* FAT16 end-of-chain is ANY value in 0xFFF8..0xFFFF. Checking
+         * only 0xFFFF misses valid EOC variants that FatFs and other
+         * FAT writers may produce, causing chain_is_contiguous to
+         * treat a legitimate EOC as an invalid next-cluster pointer
+         * and incorrectly return 0 (fragmented). */
+        if (next >= 0xFFF8) {
             /* End-of-chain. Should only happen at i == n_clusters - 1.
              * If it happens earlier the file is shorter than expected. */
             return (i == n_clusters - 1);
@@ -974,8 +979,31 @@ static int defrag_one_via_scratch(const char *src_path, uint16_t *fb,
  */
 
 enum {
-    CLD_MAX_FILES        = 220,
+    /* Must cover every file+dir on the shared FAT, or phase 3b's
+     * from-scratch FAT rebuild zeros the missing ones' chains —
+     * corrupting them even though the defrag itself is correct.
+     *
+     * Sized for the worst realistic case: a MicroPython game with
+     * many small asset files (sprites, tilemaps, fonts) alongside
+     * NES/GB/SMS ROMs and their sidecars. 2000 is the physical
+     * ceiling at which allocations start crowding the defrag's
+     * cluster maps on a 9.4 MB volume; above that, files would
+     * average < 1 cluster and the volume is effectively full of
+     * directory entries.
+     *
+     * Cost is dynamic-only — malloc'd in nes_picker_defrag_compact
+     * and free'd on exit. 2000 × 24 B = 48 KB during defrag, 0
+     * permanent SRAM. */
+    CLD_MAX_FILES        = 2000,
     CLD_MAX_DIRS         = 32,
+    /* Defrag-local path buffer size. Must be large enough for the
+     * deepest nested path on the shared FAT — e.g.
+     * /games/<longname>/assets/sprites/<longname>.bmp which can
+     * easily run to 120+ chars. NES_PICKER_NAME_MAX (96) was the
+     * original ROM filename cap, too short here, causing snprintf
+     * to silently truncate and f_opendir to fail on the mangled
+     * path — dropping entire subtrees from the analysis. */
+    CLD_PATH_MAX         = 192,
     /* Upper cap on cluster count so our heap allocations can't run
      * away on a misidentified volume. 32k clusters × 4 bytes ×
      * 2 owner maps = 256 KB — too much. Cap at 16k (128 KB for maps).
@@ -985,7 +1013,6 @@ enum {
 };
 
 typedef struct {
-    char     path[NES_PICKER_NAME_MAX];
     DWORD    current_sclust;
     DWORD    target_sclust;       /* 0 = couldn't place, leave alone */
     uint32_t n_clusters;
@@ -1092,22 +1119,22 @@ static int cld_analyze(cld_ctx_t *ctx) {
     /* The BFS queue has to remember each pending dir's INDEX in
      * files[] so children we enumerate inside it can set parent_idx.
      * Root-level dirs use parent_idx = -1. */
-    typedef struct { char path[NES_PICKER_NAME_MAX]; int parent_idx; } queue_ent_t;
+    typedef struct { char path[CLD_PATH_MAX]; int parent_idx; } queue_ent_t;
     queue_ent_t *dir_q = (queue_ent_t *)malloc((size_t)CLD_MAX_DIRS * sizeof(queue_ent_t));
     if (!dir_q) return -6;
 
     int q_head = 0, q_tail = 0;
-    strncpy(dir_q[0].path, "/", NES_PICKER_NAME_MAX - 1);
-    dir_q[0].path[NES_PICKER_NAME_MAX - 1] = 0;
+    strncpy(dir_q[0].path, "/", CLD_PATH_MAX - 1);
+    dir_q[0].path[CLD_PATH_MAX - 1] = 0;
     dir_q[0].parent_idx = -1;
     q_tail = 1;
 
     int n_files = 0;
     while (q_head < q_tail && n_files < CLD_MAX_FILES) {
-        char        cur_dir_path[NES_PICKER_NAME_MAX];
+        char        cur_dir_path[CLD_PATH_MAX];
         int         cur_parent_idx;
-        strncpy(cur_dir_path, dir_q[q_head].path, NES_PICKER_NAME_MAX - 1);
-        cur_dir_path[NES_PICKER_NAME_MAX - 1] = 0;
+        strncpy(cur_dir_path, dir_q[q_head].path, CLD_PATH_MAX - 1);
+        cur_dir_path[CLD_PATH_MAX - 1] = 0;
         cur_parent_idx = dir_q[q_head].parent_idx;
         q_head++;
 
@@ -1140,7 +1167,7 @@ static int cld_analyze(cld_ctx_t *ctx) {
              * (now-freed) cluster positions. */
             DWORD e_byte_in_parent = (dir.dptr >= 32) ? (dir.dptr - 32) : 0;
 
-            char full[NES_PICKER_NAME_MAX];
+            char full[CLD_PATH_MAX];
             if (cur_dir_path[0] == '/' && cur_dir_path[1] == 0)
                 snprintf(full, sizeof(full), "/%s", info.fname);
             else
@@ -1190,8 +1217,6 @@ static int cld_analyze(cld_ctx_t *ctx) {
             }
 
             int my_idx = n_files;
-            strncpy(ctx->files[my_idx].path, full, NES_PICKER_NAME_MAX - 1);
-            ctx->files[my_idx].path[NES_PICKER_NAME_MAX - 1] = 0;
             ctx->files[my_idx].current_sclust = entry_sclust;
             ctx->files[my_idx].n_clusters     = nc;
             ctx->files[my_idx].parent_idx     = cur_parent_idx;
@@ -1202,8 +1227,8 @@ static int cld_analyze(cld_ctx_t *ctx) {
 
             /* Enqueue subdir for later walking. */
             if (is_dir && q_tail < CLD_MAX_DIRS) {
-                strncpy(dir_q[q_tail].path, full, NES_PICKER_NAME_MAX - 1);
-                dir_q[q_tail].path[NES_PICKER_NAME_MAX - 1] = 0;
+                strncpy(dir_q[q_tail].path, full, CLD_PATH_MAX - 1);
+                dir_q[q_tail].path[CLD_PATH_MAX - 1] = 0;
                 dir_q[q_tail].parent_idx = my_idx;
                 q_tail++;
             }
@@ -1244,6 +1269,46 @@ static int cld_analyze(cld_ctx_t *ctx) {
     for (int f = 0; f < n_files; f++) {
         cld_owner_arg_t oa = { .ctx = ctx, .fidx = f, .off = 0 };
         cld_walk_fat(ctx->files[f].current_sclust, cld_cb_set_owner, &oa);
+    }
+
+    /* ORPHAN-CLUSTER SCAN — critical correctness fix.
+     *
+     * Any cluster the on-disk FAT says is in use but which isn't owned
+     * by some file in ctx->files[] belongs to a file the BFS missed
+     * (deep subdir, CLD_MAX_FILES/CLD_MAX_DIRS cap hit, f_opendir
+     * transient failure, etc.). If we leave those clusters unmarked,
+     * phase 3b's from-scratch FAT rebuild ZEROES them — their dir
+     * entries still point at the old sclust but the chain is now
+     * broken, and count_fragmented_named reports them as fragmented.
+     * Worst case: the cycle-sort in phase 3a overwrites the cluster
+     * data before phase 3b wipes the chain, losing user content.
+     *
+     * Pin every such orphan cluster so: (a) phase 3a skips it, (b)
+     * phase 3b preserves its existing FAT entry, (c) target placement
+     * routes around it. User data survives even when enumeration is
+     * incomplete. */
+    {
+        static uint8_t fat_sec[512];
+        LBA_t cached_lba = (LBA_t)-1;
+        for (DWORD ci = 0; ci < ctx->n_clust; ci++) {
+            if (ctx->current_owner[ci] != 0) continue;
+            if (CLD_BIT_GET(ctx->pinned_bits, ci)) continue;
+            DWORD fat_c = ci + 2;
+            DWORD eb = fat_c * 2;
+            DWORD es = eb / 512;
+            DWORD eo = eb % 512;
+            LBA_t lba = (LBA_t)g_fs.fatbase + es;
+            if (lba != cached_lba) {
+                if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) break;
+                cached_lba = lba;
+            }
+            uint16_t v = (uint16_t)fat_sec[eo]
+                       | ((uint16_t)fat_sec[eo + 1] << 8);
+            /* FAT[c] = 0 → free; = 1 → reserved; = 0xFFF7 → bad; else
+             * (2..EOC) → used. Pin only the used entries. */
+            if (v == 0 || v == 1 || v == 0xFFF7) continue;
+            CLD_BIT_SET(ctx->pinned_bits, ci);
+        }
     }
 
     /* Compute target layout with a first-fit free-run list.
@@ -1388,10 +1453,10 @@ static void cld_draw_execute_overlay(uint16_t *fb, const cld_ctx_t *ctx,
 static void cld_draw_map_small(uint16_t *fb, const uint32_t *owner_map,
                                 const uint8_t *pinned_bits,
                                 DWORD n_clust, int y_top) {
-    /* Map size trimmed to 18 rows to make room for an extra diagnostic
-     * line (FS type + cluster count) below the bottom map. Each cell
-     * now covers n_clust / 1080 clusters (~9 on a 9845-cluster vol). */
-    enum { COLS = 60, ROWS = 18, CELL = 2, X0 = 4, N_CELLS = COLS * ROWS };
+    /* 17-row map (34 px tall) leaves 30 px below the bottom map
+     * which fits three 8 px stat lines + prompt. Each cell covers
+     * n_clust / 1020 clusters (~10 on a 9788-cluster volume). */
+    enum { COLS = 60, ROWS = 17, CELL = 2, X0 = 4, N_CELLS = COLS * ROWS };
     static const uint16_t palette[15] = {
         0x07FF, 0xFFE0, 0x07E0, 0xF81F, 0xFD20,
         0xAFE5, 0x87FF, 0xFB56, 0x5E7F, 0xFCE0,
@@ -1444,62 +1509,82 @@ static void cld_show_preview(const cld_ctx_t *ctx, uint16_t *fb,
     cld_draw_map_small(fb, ctx->current_owner, ctx->pinned_bits,
                         ctx->n_clust, 20);
 
-    nes_font_draw(fb, "after", 4, 60, COL_DIM);
+    nes_font_draw(fb, "after", 4, 56, COL_DIM);
     cld_draw_map_small(fb, ctx->target_owner, ctx->pinned_bits,
-                        ctx->n_clust, 68);
+                        ctx->n_clust, 64);
 
-    /* Count current-used vs target-used cluster totals. These SHOULD
-     * match — same files occupying the same total cluster count. If
-     * they differ, we know the current_owner walk missed entries
-     * (probably a chain-walk bug). Shown in red when mismatched. */
-    int used_now = 0, used_tgt = 0;
+    /* Count files whose CURRENT chain isn't contiguous (skip 1-cluster
+     * files — trivially contig). After-defrag count is simply the
+     * "stuck" count (every placed entry is contig by construction). */
+    int frag_before = 0;
+    for (int f = 0; f < ctx->n_files; f++) {
+        uint32_t nc = ctx->files[f].n_clusters;
+        if (nc <= 1) continue;
+        if (!chain_is_contiguous(ctx->files[f].current_sclust, nc)) {
+            frag_before++;
+        }
+    }
+    int frag_after = unplaceable;
+
+    /* Largest contiguous free run — before uses current_owner, after
+     * uses target_owner. Shows how much contiguous free space a new
+     * big upload would find. */
+    uint32_t cur_before = 0, max_free_before = 0;
+    uint32_t cur_after  = 0, max_free_after  = 0;
     for (DWORD c = 0; c < ctx->n_clust; c++) {
-        if (ctx->current_owner[c] != 0) used_now++;
-        if (ctx->target_owner[c]  != 0) used_tgt++;
+        int pinned = CLD_BIT_GET(ctx->pinned_bits, c) ? 1 : 0;
+        if (ctx->current_owner[c] == 0 && !pinned) {
+            cur_before++;
+            if (cur_before > max_free_before) max_free_before = cur_before;
+        } else cur_before = 0;
+        if (ctx->target_owner[c] == 0 && !pinned) {
+            cur_after++;
+            if (cur_after > max_free_after) max_free_after = cur_after;
+        } else cur_after = 0;
     }
-    char stat[40];
-    if (unplaceable > 0) {
-        snprintf(stat, sizeof(stat), "%d/%d used  %d mv  %d stuck",
-                 used_now, used_tgt, moves_planned, unplaceable);
-    } else {
-        snprintf(stat, sizeof(stat), "%d/%d used  %d moves",
-                 used_now, used_tgt, moves_planned);
-    }
-    nes_font_draw(fb, stat,
-                   (FB_W - nes_font_width(stat)) / 2, 106,
-                   (used_now == used_tgt) ? COL_FG : COL_ERR);
+    uint32_t free_b_kb = (uint32_t)((max_free_before * ctx->bpc) / 1024);
+    uint32_t free_a_kb = (uint32_t)((max_free_after  * ctx->bpc) / 1024);
 
-    /* FS diagnostic line: fs_type (1=FAT12, 2=FAT16, 3=FAT32),
-     * cluster size in sectors, total cluster count. If fs_type isn't
-     * 2 then my FAT-chain math is wrong and that explains why
-     * current_owner is under-populated. */
-    const char *ft_name = (g_fs.fs_type == 1) ? "FAT12"
-                        : (g_fs.fs_type == 2) ? "FAT16"
-                        : (g_fs.fs_type == 3) ? "FAT32"
-                                              : "????";
-    /* Diagnostic line: FS type, cluster size, cluster count, file
-     * count, total file KB, pinned cluster count. If pinned is huge
-     * (e.g. hundreds), the subdir chain walk is over-counting and
-     * that's why so many files are ending up "stuck" (target runs
-     * blocked by bogus-pinned ranges). */
+    /* Total file bytes (for the summary line). */
     DWORD total_bytes = 0;
     for (int f = 0; f < ctx->n_files; f++) {
         total_bytes += ctx->files[f].n_clusters * ctx->bpc;
     }
-    int pinned_count = 0;
-    for (DWORD c = 0; c < ctx->n_clust; c++) {
-        if (CLD_BIT_GET(ctx->pinned_bits, c)) pinned_count++;
-    }
-    char fs_line[64];
-    snprintf(fs_line, sizeof(fs_line), "n=%lu f=%d %luk p=%d",
-             (unsigned long)ctx->n_clust, ctx->n_files,
-             (unsigned long)(total_bytes / 1024), pinned_count);
-    nes_font_draw(fb, fs_line,
-                   (FB_W - nes_font_width(fs_line)) / 2, 114, COL_DIM);
+
+    /* Helper to print a KB count in compact form (e.g. 4700K -> 4.7M). */
+    #define CLD_FMT_KB(buf, kb) do { \
+        if ((kb) >= 1024) snprintf((buf), sizeof(buf), "%lu.%luM", \
+                                    (unsigned long)((kb)/1024), \
+                                    (unsigned long)(((kb)%1024)/103)); \
+        else              snprintf((buf), sizeof(buf), "%luK", \
+                                    (unsigned long)(kb)); \
+    } while (0)
+    char free_b[16], free_a[16];
+    CLD_FMT_KB(free_b, free_b_kb);
+    CLD_FMT_KB(free_a, free_a_kb);
+    #undef CLD_FMT_KB
+
+    char line1[40];
+    snprintf(line1, sizeof(line1), "frag: %d -> %d", frag_before, frag_after);
+    nes_font_draw(fb, line1,
+                   (FB_W - nes_font_width(line1)) / 2, 100,
+                   (frag_after == 0) ? COL_FG : COL_ERR);
+
+    char line2[40];
+    snprintf(line2, sizeof(line2), "free: %s -> %s", free_b, free_a);
+    nes_font_draw(fb, line2,
+                   (FB_W - nes_font_width(line2)) / 2, 107, COL_HIGHLT);
+
+    char line3[40];
+    snprintf(line3, sizeof(line3), "%d files  %luK  %d mv",
+             ctx->n_files, (unsigned long)(total_bytes / 1024),
+             moves_planned);
+    nes_font_draw(fb, line3,
+                   (FB_W - nes_font_width(line3)) / 2, 114, COL_DIM);
 
     const char *prompt = "A=apply  B=cancel";
     nes_font_draw(fb, prompt,
-                   (FB_W - nes_font_width(prompt)) / 2, 122, COL_HIGHLT);
+                   (FB_W - nes_font_width(prompt)) / 2, 121, COL_HIGHLT);
 
     nes_lcd_wait_idle();
     nes_lcd_present(fb);
@@ -1610,7 +1695,8 @@ static int cld_execute(cld_ctx_t *ctx, uint16_t *fb, int moves_planned) {
     nes_flash_disk_flush();
 
     /* --- Phase 3b: rebuild FAT --- */
-    defrag_progress_impl(fb, "rewriting FAT", "", ctx->n_files, ctx->n_files + 1, true);
+    cld_draw_execute_overlay(fb, ctx, "rewriting FAT",
+                              moves_planned, moves_planned);
 
     uint16_t *new_fat = (uint16_t *)malloc(n_clust * sizeof(uint16_t));
     if (!new_fat) return -20;
@@ -2015,7 +2101,11 @@ void nes_picker_mmap_rom_chain_free(nes_picker_rom_chain_t *chain) {
  * count, or negative on error. */
 int nes_picker_count_fragmented_named(char *out_first_name, size_t out_sz) {
     if (out_first_name && out_sz > 0) out_first_name[0] = 0;
-    enum { PATH_LEN = NES_PICKER_NAME_MAX, MAX_DIRS = 32 };
+    /* Use CLD_PATH_MAX (192) rather than NES_PICKER_NAME_MAX (96) so
+     * deeply nested paths like /games/<long>/assets/sprites/foo.bmp
+     * don't get truncated by snprintf and cause f_opendir to fail —
+     * which silently drops entire subtrees from the count. */
+    enum { PATH_LEN = CLD_PATH_MAX, MAX_DIRS = 32 };
     char (*queue)[PATH_LEN] = (char(*)[PATH_LEN])malloc((size_t)MAX_DIRS * PATH_LEN);
     if (!queue) return -1;
 
@@ -2031,7 +2121,13 @@ int nes_picker_count_fragmented_named(char *out_first_name, size_t out_sz) {
         if (f_opendir(&dir, dir_path) != FR_OK) continue;
         while (f_readdir(&dir, &info) == FR_OK) {
             if (info.fname[0] == 0) break;
-            if (info.fname[0] == '.') continue;
+            /* Skip only "." / ".." — dotfiles like /.volume are real
+             * files we want to count. */
+            if (info.fname[0] == '.'
+                && (info.fname[1] == 0
+                    || (info.fname[1] == '.' && info.fname[2] == 0))) {
+                continue;
+            }
             char full[PATH_LEN];
             if (dir_path[0] == '/' && dir_path[1] == 0)
                 snprintf(full, sizeof(full), "/%s", info.fname);
@@ -2048,6 +2144,11 @@ int nes_picker_count_fragmented_named(char *out_first_name, size_t out_sz) {
             }
             if (info.fsize < 4096) continue;
 
+            /* Use the same chain_is_contiguous check the preview uses
+             * so before/after numbers are produced by identical logic
+             * — eliminates the "preview said 0 but summary said 15"
+             * discrepancy we were seeing when the two checks used
+             * different implementations. */
             FIL f;
             if (f_open(&f, full, FA_READ) != FR_OK) continue;
             DWORD sc = f.obj.sclust;
@@ -2058,8 +2159,11 @@ int nes_picker_count_fragmented_named(char *out_first_name, size_t out_sz) {
             DWORD nc  = ((DWORD)sz + bpc - 1) / bpc;
             if (!chain_is_contiguous(sc, nc)) {
                 if (frag == 0 && out_first_name && out_sz > 0) {
-                    strncpy(out_first_name, full, out_sz - 1);
-                    out_first_name[out_sz - 1] = 0;
+                    const char *tail = full;
+                    size_t len = strlen(full);
+                    if (len > 16) tail = full + len - 16;
+                    snprintf(out_first_name, out_sz, "%s s%lu n%lu",
+                             tail, (unsigned long)sc, (unsigned long)nc);
                 }
                 frag++;
             }
@@ -2981,7 +3085,7 @@ int nes_picker_run(uint16_t *fb,
                  * Show a dedicated summary splash the user dismisses
                  * with any button — a brief OSD gets missed on long
                  * runs where the eye is tracking the red overlay. */
-                char stuck[NES_PICKER_NAME_MAX] = {0};
+                char stuck[CLD_PATH_MAX] = {0};
                 int before = nes_picker_count_fragmented_named(NULL, 0);
                 int rc     = nes_picker_defrag_compact(fb);
                 int after  = nes_picker_count_fragmented_named(stuck, sizeof(stuck));
@@ -3018,6 +3122,15 @@ int nes_picker_run(uint16_t *fb,
                     nes_font_draw(fb, l4,
                                    (FB_W - nes_font_width(l4)) / 2, 80,
                                    COL_ERR);
+                }
+                /* Show the first path count_fragmented_named flagged —
+                 * tells us whether the residual 15 are real fragments
+                 * in specific files or phantoms from a buggy check.
+                 * stuck now holds "<tail> s<sclust> n<nclusters>". */
+                if (after > 0 && stuck[0]) {
+                    nes_font_draw(fb, stuck,
+                                   (FB_W - nes_font_width(stuck)) / 2, 92,
+                                   COL_DIM);
                 }
                 nes_font_draw(fb, "press any button",
                               (FB_W - nes_font_width("press any button")) / 2,

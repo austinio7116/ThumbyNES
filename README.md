@@ -4,17 +4,19 @@
 >
 > This repo remains the standalone build of ThumbyNES and the source of truth for the emulator itself — the code here is what ThumbyOne's NES slot compiles. Use this repo if you specifically want NES-only firmware, or to hack on the emulator code.
 
-A bare-metal **NES + Sega Master System + Game Gear + Game Boy (DMG)**
+A bare-metal **NES + Sega Master System + Game Gear + Game Boy (DMG + Color)**
 emulator firmware for the **TinyCircuits Thumby Color** (RP2350,
 128×128 RGB565 LCD, PWM audio, 520 KB SRAM, 16 MB flash).
 
-Drop `.nes`, `.sms`, `.gg`, or `.gb` ROMs onto the device over USB,
-browse them in a tabbed picker with thumbnail screenshots, play with
-sound. Per-ROM saves and **save states**, per-ROM and global settings,
-in-game pause menu, idle sleep, fast-forward, palettes, in-game
-screenshot capture, live-pan read mode for the handhelds, automatic
-FAT defragmenter, configurable system clock — all in a single
-~1.1 MB firmware image.
+Drop `.nes`, `.sms`, `.gg`, `.gb`, or `.gbc` ROMs onto the device over
+USB, browse them in a tabbed picker with thumbnail screenshots, play
+with sound. Per-ROM saves and **save states**, per-ROM and global
+settings, in-game pause menu, idle sleep, fast-forward, palettes,
+in-game screenshot capture, live-pan read mode for the handhelds,
+**cluster-level FAT defragmenter with live cluster map**,
+**chained-XIP fallback** so fragmented carts still load at full
+speed, configurable system clock — all in a single ~1.2 MB
+firmware image.
 
 <p align="center">
 <img src="images/nes-smb3.jpg" width="360" alt="NES — Super Mario Bros. 3 title screen">
@@ -41,9 +43,9 @@ to the repo if you want to flash without setting up the toolchain.
    `THUMBYNES` (a yellow splash flashes briefly).
 
 3. **Drop ROMs.** Plug the device into a host. It enumerates as a
-   removable drive — copy any number of `.nes`, `.sms`, `.gg`, or
-   `.gb` files into the root. Eject from the host. The device flushes
-   the cache and the picker rescans.
+   removable drive — copy any number of `.nes`, `.sms`, `.gg`, `.gb`,
+   or `.gbc` files into the root. Eject from the host. The device
+   flushes the cache and the picker rescans.
 
 4. **Pick + play.** Browse with the **D-pad**, shoulder buttons
    switch tabs, **A** to launch.
@@ -497,6 +499,11 @@ Six 4-shade palettes: `GREEN` (the classic Game Boy LCD green,
 default), `GREY`, `POCKET`, `CREAM`, `BLUE`, `RED`. Cycle from the
 in-game menu's Palette row. Persisted per-ROM.
 
+**GBC carts** ignore the palette setting — they supply their own
+per-tile CGB palette from the cart, which peanut_gb resolves
+per-pixel at line time into RGB565 for the framebuffer. The Palette
+row in the in-game menu stays visible but is inert for `.gbc` files.
+
 ### SMS / GG
 
 No palette toggle — those cores manage their own VDP palette directly.
@@ -536,56 +543,142 @@ on hardware is identical between ThumbyNES and the engine builds.
 
 ---
 
-## In-firmware defragmenter
+## Defragmenter
 
-Large ROMs (≳ 256 KB) need to be loaded via the **XIP mmap** path
-because the malloc-into-RAM fallback can't fit them. XIP mmap requires
-the file to be physically contiguous on flash, but after a few rounds
-of dropping ROMs over USB and saving screenshots the FatFs free-list
-can fragment, producing a red `load err -35` splash on bigger carts.
+### Why you might (or might not) want to defragment
 
-The firmware ships with an in-place defragmenter that uses FatFs's
-`f_expand` to allocate contiguous cluster chains.
+ThumbyNES runs carts straight out of flash via **XIP mmap** rather
+than copying them to RAM. That's how a 1 MB GBC cart fits on a
+device with a ~330 KB heap budget: the core reads each byte directly
+from its memory-mapped address in flash.
+
+There are two XIP paths:
+
+1. **Contiguous mmap** — the fast, simple path. The file's FAT chain
+   is a straight cluster run (e.g. clusters 500→501→502→…→1523) so
+   the entire ROM maps to a single flat address range in the XIP
+   region. No per-byte indirection; the core has a plain `const
+   uint8_t *` pointer into flash.
+2. **Chained XIP** — the fallback when the file is fragmented.
+   The loader walks the FAT chain, records the XIP address of each
+   cluster into a `cluster_ptrs[]` table, and the core reads through
+   that table instead of a flat pointer. Still fully zero-copy, still
+   runs at 60 fps — but the extra shift/mask/lookup per byte access
+   has a measurable CPU cost on tight inner loops and uses ~4 KB of
+   heap for the pointer table on a 1 MB cart.
+
+**What defragmenting actually buys you:**
+
+- **Lower CPU overhead during play.** Contiguous mmap skips the
+  per-byte cluster-pointer lookup that chained XIP does. On heavier
+  cores (NES MMC-mapped carts, dense SMS title loops) this is a
+  few percent of headroom you can spend on audio quality or a
+  lower overclock.
+- **Free contiguous space for big new uploads.** The real win.
+  Dropping a 2 MB ROM over USB requires 2 MB of **contiguous** free
+  clusters, not just 2 MB of free clusters total. A fragmented free
+  list can refuse a large write even with lots of room on disk.
+  Defragmenting compacts free space into one run at the end of
+  the volume so the next big ROM lands in one go.
+- **Cleaner cluster map.** Satisfying to look at.
+
+**What it doesn't do:** ROMs still load and play correctly whether
+the volume is defragmented or not. Chained XIP is the safety net —
+you can drop a ROM, play it immediately, and defragment later (or
+never) at your discretion.
+
+### The cluster-level defragmenter
+
+The defragmenter does an **in-place cluster-level cycle sort** over
+the entire FAT volume. This is the same strategy Norton SpeedDisk
+and ext4's `e4defrag` use: plan a target layout, then cycle each
+cluster into its destination using only two cluster-sized RAM
+buffers — regardless of how full the disk is. A file-level approach
+(copy-to-scratch + rename) can't operate on a near-full volume
+because it needs 2× the file size free at once; cluster-level doesn't.
+
+### Preview + confirm
+
+<p align="center">
+<img src="images/defrag-preview.png" width="360" alt="Defrag preview — cluster map before and after, frag/free/file stats, A=apply/B=cancel">
+</p>
+
+The preview screen shows the **current cluster layout** (top) and the
+**planned layout** (bottom), colour-coded per-file. The summary line
+tells you:
+
+- `frag: X → Y` — files currently fragmented vs files that would
+  remain unplaceable after the pass
+- `free: XK → YK` — largest contiguous free run before vs after
+- `N files  TOTAL_K  MOVES mv` — total file count, total bytes, and
+  number of cluster moves required
+
+**A** applies, **B** or **MENU** cancels. Nothing touches the FAT
+until you explicitly confirm, so you can look at the preview and
+back out if the numbers don't make sense.
+
+### Live execution view
+
+<p align="center">
+<img src="images/defrag-moving.png" width="360" alt="Defrag running — MOVING CLUSTERS overlay with live per-file colour map and progress counter">
+</p>
+
+During execution the cluster map redraws as clusters move, so you
+can watch files physically reorder. Cells are coloured per-file
+(a 15-hue palette, cycled mod-15 for big volumes). A **red "DO NOT
+POWER OFF" banner** across the top doubles as a hardware indicator
+(the front LED stays solid red for the same duration).
+
+Phase breakdown during a pass:
+
+1. **Cycle sort** — moves cluster data to match the target layout,
+   using two 1 KB buffers (carry + swap) without ever needing more
+   free clusters than the size of one cluster. Cluster moves are
+   serialised through the flash disk's write-back cache; USB MSC
+   stays alive via `tud_task()` between moves.
+2. **FAT rebuild** — writes a fresh FAT image with every placed
+   file getting a straight cluster chain (`n → n+1 → … → EOC`).
+   Unplaceable files (rare; only if the volume is over-committed
+   from a prior bad state) keep their existing chain via a
+   preservation pass.
+3. **Directory patch** — updates every moved file's SFN slot bytes
+   26/27 (first-cluster-low) in its parent directory, plus the
+   `.` and `..` entries inside each moved subdirectory.
+4. **Remount** — `f_unmount` + `f_mount` so FatFs drops every
+   cached FAT / dir-entry sector and re-reads fresh state.
+
+The pass is idempotent: running it on an already-clean volume is a
+no-op (preview shows `0 mv`, zero cluster writes).
+
+### How it's triggered
 
 - **Auto pre-flight** at every cold boot — walks `/`, checks each
-  non-system file > 64 KB with the same `chain_is_contiguous()` probe
-  the XIP mmap path uses, and if any are fragmented runs the rewrite
-  pass. The pre-flight shows a 3-line diagnostic for ~0.8 s on every
-  boot:
+  non-trivial file with `chain_is_contiguous()`, and if any are
+  fragmented runs the pass with a brief confirm.
+- **Pick "Defragment now"** in the picker menu — same pass, no
+  reboot required.
+- **Hold B at boot** — forces the pass to run even if the pre-flight
+  thinks nothing is fragmented.
+- **Per-ROM fallback** — when a runner tries to mmap a cart and the
+  contiguous path returns `-5` (fragmented), it first attempts
+  chained XIP. If the cart is small enough to fall back to a RAM
+  load it can also trigger a targeted rewrite of just that one
+  file.
 
-  ```
-  checking files
-  47 files / 23 big
-  0 need defrag        ← yellow if non-zero, green if all clear
-  ```
+### Safety belts
 
-- **Rewrite pass** for each victim:
-
-  ```
-  f_open(src, READ)
-  f_open(/.defrag.tmp, WRITE | CREATE_NEW)
-  f_expand(dst, size, 1)              -- pre-allocate contiguous chain
-  stream src -> dst, 4 KB at a time   -- with progress overlay
-  f_unlink(src)
-  f_rename(/.defrag.tmp, src)
-  nes_flash_disk_flush()
-  ```
-
-  A full-screen `DEFRAGMENTING / do not unplug / N/total / filename /
-  progress bar` overlay redraws every 64 KB so the user sees movement
-  on the bigger ROMs. tud_task() pumps between files so USB
-  enumeration stays alive. A previously interrupted defrag leaves
-  `/.defrag.tmp` behind; the per-file step `f_unlink`s any leftover
-  before allocating a new one.
-
-- **Manual triggers**:
-  - Hold **B at boot** — forces the pass to run even if the
-    pre-flight thinks no large file is fragmented.
-  - Pick **Defragment now** in the picker menu — same pass, no
-    reboot required.
-
-- **Skipped files**: anything < 64 KB and any system bookkeeping file
-  (`/.favs`, `/.picker_view`, `/.global`, `/.defrag.tmp`, sidecars).
+- **Preview is mandatory.** No cluster writes until you press A.
+- **Enumeration cap of 2000 files.** Covers worst-case MicroPython
+  game trees with many small asset files alongside ROMs + sidecars.
+  Dynamic heap only — 0 permanent SRAM cost.
+- **Orphan FAT scan.** Before building the target layout, the
+  analyser walks the raw FAT and pins any cluster the FAT says is
+  in-use but that the directory walk didn't account for. Even if
+  enumeration misses a file (corrupt parent dir, truncated path,
+  etc.) its cluster chain is preserved rather than zeroed in the
+  FAT rebuild. Defence in depth, not the main correctness story.
+- **Red LED + banner** while the FAT is mid-write so the user
+  doesn't power-cycle in the worst possible window.
 
 ---
 
@@ -824,7 +917,7 @@ ThumbyNES/
 
 | File | Purpose |
 |---|---|
-| `<rom>.nes` / `.sms` / `.gg` / `.gb` | The ROM image you dropped via USB. |
+| `<rom>.nes` / `.sms` / `.gg` / `.gb` / `.gbc` | The ROM image you dropped via USB. |
 | `<rom>.sav`     | Battery-backed cart RAM. Auto-saved every 30 s. |
 | `<rom>.cfg`     | Per-ROM BLEND / palette / FPS / region / **per-cart overclock** state (system-tagged magic). |
 | `<rom>.sta`     | Save state — full serialized core state (NES/SMS use the core's native format, GB uses a `'GBCS'`-tagged memcpy blob). |
@@ -843,7 +936,7 @@ ThumbyNES/
 |---|---|---|
 | [nofrendo](https://github.com/ducalex/retro-go) NES core | GPLv2 | retro-go @ commit `4ced120`, with the IRAM_ATTR + state-bridge patches |
 | [smsplus](https://github.com/ducalex/retro-go) SMS / GG core | GPLv2 | retro-go @ commit `4ced120`, with the LUT decomposition + state-bridge patches |
-| [Peanut-GB](https://github.com/deltabeard/Peanut-GB) DMG core | MIT | via TinyCircuits Tiny Game Engine `gbemu/`, no patches |
+| [Peanut-GB](https://github.com/deltabeard/Peanut-GB) DMG + CGB core | MIT | [fhoedemakers fork](https://github.com/fhoedemakers/Peanut-GB) with `PEANUT_FULL_GBC_SUPPORT`, vendored verbatim |
 | [minigb_apu](https://github.com/baines/MiniGBS) Game Boy APU | MIT | via TinyCircuits Tiny Game Engine `gbemu/`, no patches |
 | [FatFs](http://elm-chan.org/fsw/ff/) R0.15 | BSD-1-clause (ChaN) | from ThumbyP8 |
 | [Pemsa](https://github.com/egordorichev/pemsa) 3×5 font glyphs | MIT | transcribed |
@@ -865,8 +958,6 @@ Explicit scope cuts to protect the RAM/CPU budget:
 - **No NES 2.0 extended-header support.**
 - **No ColecoVision / SG-1000.** smsplus supports them but we don't expose them.
 - **No YM2413 FM (SMS Japanese carts).** smsplus has it; off for now.
-- **No Game Boy Color.** peanut_gb is DMG only — GBC-only carts will
-  fail to load with `load err -11` (cartridge type unsupported).
 - **No netplay / link cable.**
 - **No on-device cheats or Game Genie.**
 - **No PWM backlight dimming** (single-GPIO BL line on the Thumby Color).
@@ -874,6 +965,28 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.03
+
+- **Game Boy Color support.** Swapped the vendored peanut_gb for
+  fhoedemakers' CGB-capable fork (MIT). `.gbc` ROMs now load and
+  run with their native 15-bit palette converted to RGB565 at line
+  time. DMG carts still work with the six built-in shade palettes;
+  CGB carts use the cart's own palette and ignore that setting.
+- **Chained-XIP fallback for fragmented carts.** When a cart's
+  cluster chain isn't contiguous the runners fall back to a
+  per-cluster pointer table so the file still maps straight out of
+  flash — no RAM load, still full 60 fps. Drop a ROM, play it,
+  defragment whenever (or never). The contiguous mmap path is
+  still preferred when available.
+- **New cluster-level defragmenter** with live cluster-map
+  visualisation. Replaces the old file-level `f_expand` approach.
+  Works on near-full volumes (the file-level path couldn't — it
+  needed 2× the largest file free). Preview-then-confirm UX with
+  A = apply / B = cancel; moves render live per-file with a red
+  `DO NOT POWER OFF` banner + front LED while the FAT is
+  mid-write. See the [Defragmenter](#defragmenter) section for
+  why you might want (or not need) to run it.
 
 ### v1.02
 
