@@ -120,6 +120,7 @@ add_library(smsplus STATIC
 set(PEANUT_DIR ${NES_ROOT}/vendor/peanut_gb)
 add_library(peanut_gb STATIC ${PEANUT_DIR}/minigb_apu.c)
 target_include_directories(peanut_gb PUBLIC ${PEANUT_DIR})
+target_compile_definitions(peanut_gb PUBLIC PEANUT_FULL_GBC_SUPPORT=1)
 target_compile_options(peanut_gb PRIVATE
     -O3
     -Wno-implicit-fallthrough
@@ -210,6 +211,7 @@ set(NES_SRC_BASE
     nes_thumb.c
     nes_menu.c
     nes_battery.c
+    nes_led.c
     thumby_state_bridge.c
     nes_run.c
     sms_run.c

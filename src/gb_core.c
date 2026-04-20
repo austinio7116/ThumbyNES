@@ -56,12 +56,30 @@ uint8_t audio_read (uint16_t addr);
 
 /* --- module state --------------------------------------------------- */
 
-static struct gb_s            s_gb;
+/* The peanut_gb emulator state struct is ~49 KB with CGB enabled
+ * (32 KB WRAM + 16 KB VRAM + CGB palette RAM + fields). Holding that
+ * in BSS would tax every ThumbyNES session, including NES and SMS
+ * runs. Allocate on demand in gbc_init and free in gbc_shutdown, the
+ * same way s_vidbuf and s_cart_ram are handled. */
+static struct gb_s           *s_gb_ptr;
+#define s_gb (*s_gb_ptr)
+
 static struct minigb_apu_ctx  s_apu;
 
-static const uint8_t *s_rom;       /* borrowed pointer */
+static const uint8_t *s_rom;       /* borrowed contiguous pointer */
 static size_t         s_rom_len;
 static bool           s_loaded;
+
+/* Chained-ROM mode, used when the cart is fragmented on flash and we
+ * can't hand peanut_gb a single contiguous pointer. `s_rom` stays
+ * NULL in this mode; reads route through the cluster table. Same-
+ * cluster reads hit a tiny cache so the extra shift+compare is
+ * typically the only overhead per byte. */
+static const uint8_t *const *s_rom_clusters;  /* XIP ptr per cluster */
+static uint32_t              s_rom_cluster_shift;
+static uint32_t              s_rom_cluster_mask;
+static uint32_t              s_rom_last_ci;
+static const uint8_t        *s_rom_last_ptr;
 
 /* peanut_gb's max addressable cart RAM is 0x8000 (32 KB). Allocated
  * on demand so the GB core costs zero BSS when not running. */
@@ -70,12 +88,17 @@ static uint8_t *s_cart_ram;
 static size_t   s_cart_ram_size;
 
 /* Full source framebuffer assembled by the line callback. Heap-
- * allocated per session for the same reason. */
-static uint8_t *s_vidbuf;
+ * allocated per session for the same reason. RGB565 resolved per pixel
+ * by lcd_draw_line_cb — blitters just copy words, no palette lookup. */
+static uint16_t *s_vidbuf;
 
-/* RGB565 palette LUT (4 entries indexed by shade). */
+/* RGB565 palette LUT (4 entries indexed by shade) — used in DMG mode. */
 static uint16_t s_palette[4];
 static int      s_palette_idx;
+
+/* True when the loaded cart's CGB header flag is set; selects which
+ * palette path lcd_draw_line_cb uses. */
+static bool     s_cgb_mode;
 
 /* Per-frame stereo scratch (filled by minigb_apu_audio_callback) and
  * the mono mix the runner pulls from. */
@@ -109,6 +132,17 @@ static const char * const s_palette_names[GBC_PALETTE_COUNT] = {
 static uint8_t gb_rom_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
     (void)gb;
     if (addr >= s_rom_len) return 0xFF;
+    /* Hint to the compiler that the chained path is the cold case —
+     * the vast majority of sessions run contiguous XIP and we don't
+     * want the branch predictor biased the wrong way. */
+    if (__builtin_expect(s_rom_clusters != NULL, 0)) {
+        uint32_t ci = (uint32_t)(addr >> s_rom_cluster_shift);
+        if (ci != s_rom_last_ci) {
+            s_rom_last_ci  = ci;
+            s_rom_last_ptr = s_rom_clusters[ci];
+        }
+        return s_rom_last_ptr[addr & s_rom_cluster_mask];
+    }
     return s_rom[addr];
 }
 
@@ -128,12 +162,38 @@ static void gb_error_cb(struct gb_s *gb, const enum gb_error_e err, const uint16
 }
 
 static void lcd_draw_line_cb(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t line) {
-    (void)gb;
     if (line >= GBC_SCREEN_H) return;
-    /* peanut_gb encodes the shade in the low 2 bits and a palette
-     * select in higher bits — we only care about the shade. */
-    uint8_t *dst = &s_vidbuf[line * GBC_SCREEN_W];
-    for (int x = 0; x < GBC_SCREEN_W; x++) dst[x] = pixels[x] & 0x03;
+    uint16_t *dst = &s_vidbuf[line * GBC_SCREEN_W];
+#if PEANUT_FULL_GBC_SUPPORT
+    if (gb->cgb.cgbMode) {
+        /* CGB: pixel byte indexes into gb->cgb.fixPalette (BG 0..0x1F,
+         * OBJ 0x20..0x3F). The GBC palette RAM stores entries little-
+         * endian with R in the low 5 bits and B in bits 10..14. The
+         * "swap Red and Blue" step on BCPD/OCPD writes already flips
+         * that into standard RGB555 with R high / B low, so we read
+         * it in the natural order here:
+         *   bits [14..10] = R, [9..5] = G, [4..0] = B
+         * Then pack to RGB565 for the GC9107: duplicate G's MSB to
+         * widen 5 -> 6 bits so mid-greens don't shift cooler. */
+        for (int x = 0; x < GBC_SCREEN_W; x++) {
+            uint16_t c15 = gb->cgb.fixPalette[pixels[x]];
+            uint16_t r5 = (c15 >> 10) & 0x1F;
+            uint16_t g5 = (c15 >>  5) & 0x1F;
+            uint16_t b5 =  c15        & 0x1F;
+            uint16_t g6 = (g5 << 1) | (g5 >> 4);
+            dst[x] = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+        }
+        return;
+    }
+#else
+    (void)gb;
+#endif
+    /* DMG: low 2 bits = shade (0..3). Upper bits are palette source
+     * metadata (OBJ0/OBJ1/BG) which we don't use in our palette
+     * scheme — we apply a single 4-entry lookup. */
+    for (int x = 0; x < GBC_SCREEN_W; x++) {
+        dst[x] = s_palette[pixels[x] & 0x03];
+    }
 }
 
 /* peanut_gb expects these as global symbols when ENABLE_SOUND=1. */
@@ -151,25 +211,31 @@ int gbc_init(int sample_rate) {
     (void)sample_rate;   /* fixed in vendored minigb_apu wrapper */
     s_loaded   = false;
     s_mixcount = 0;
+    s_cgb_mode = false;
+    if (!s_gb_ptr) {
+        s_gb_ptr = (struct gb_s *)malloc(sizeof(struct gb_s));
+        if (!s_gb_ptr) return -3;
+    }
     if (!s_vidbuf) {
-        s_vidbuf = (uint8_t *)malloc(GBC_SCREEN_W * GBC_SCREEN_H);
+        s_vidbuf = (uint16_t *)malloc(GBC_SCREEN_W * GBC_SCREEN_H * sizeof(uint16_t));
         if (!s_vidbuf) return -1;
     }
     if (!s_cart_ram) {
         s_cart_ram = (uint8_t *)malloc(GBC_CART_RAM_MAX);
         if (!s_cart_ram) return -2;
     }
-    memset(s_vidbuf, 0, GBC_SCREEN_W * GBC_SCREEN_H);
+    memset(s_gb_ptr, 0, sizeof(struct gb_s));
+    memset(s_vidbuf, 0, GBC_SCREEN_W * GBC_SCREEN_H * sizeof(uint16_t));
     memset(s_cart_ram, 0, GBC_CART_RAM_MAX);
     gbc_set_palette(GBC_PALETTE_GREEN);
     return 0;
 }
 
-int gbc_load_rom(const uint8_t *data, size_t len) {
-    if (!data || len < 0x150) return -1;
-    s_rom     = data;
-    s_rom_len = len;
-
+/* Shared post-configure-rom tail: peanut_gb init, save-ram sizing,
+ * LCD + APU hookup. Called by both gbc_load_rom (contiguous) and
+ * gbc_load_rom_chain (chained) after the s_rom / s_rom_clusters
+ * pointers are set. */
+static int gbc_finish_load(void) {
     enum gb_init_error_e err = gb_init(&s_gb,
                                         gb_rom_read_cb,
                                         gb_cart_ram_read_cb,
@@ -178,17 +244,40 @@ int gbc_load_rom(const uint8_t *data, size_t len) {
                                         NULL);
     if (err != GB_INIT_NO_ERROR) return -(int)err - 1;
 
-    /* Ask peanut_gb how much cart RAM the loaded MBC actually uses
-     * and clamp to our scratch buffer. */
-    size_t want = 0;
-    gb_get_save_size_s(&s_gb, &want);
+    size_t want = (size_t)gb_get_save_size(&s_gb);
     if (want > GBC_CART_RAM_MAX) want = GBC_CART_RAM_MAX;
     s_cart_ram_size = want;
 
     gb_init_lcd(&s_gb, lcd_draw_line_cb);
     minigb_apu_audio_init(&s_apu);
+#if PEANUT_FULL_GBC_SUPPORT
+    s_cgb_mode = (s_gb.cgb.cgbMode != 0);
+#endif
     s_loaded = true;
     return 0;
+}
+
+int gbc_load_rom(const uint8_t *data, size_t len) {
+    if (!data || len < 0x150) return -1;
+    s_rom          = data;
+    s_rom_len      = len;
+    s_rom_clusters = NULL;   /* contiguous fast path */
+    return gbc_finish_load();
+}
+
+int gbc_load_rom_chain(const uint8_t * const *cluster_ptrs,
+                        uint32_t cluster_shift,
+                        uint32_t cluster_mask,
+                        size_t   len) {
+    if (!cluster_ptrs || len < 0x150) return -1;
+    s_rom                 = NULL;
+    s_rom_len             = len;
+    s_rom_clusters        = cluster_ptrs;
+    s_rom_cluster_shift   = cluster_shift;
+    s_rom_cluster_mask    = cluster_mask;
+    s_rom_last_ci         = 0xFFFFFFFFu;   /* force first lookup */
+    s_rom_last_ptr        = NULL;
+    return gbc_finish_load();
 }
 
 void gbc_run_frame(void) {
@@ -215,8 +304,9 @@ int gbc_refresh_rate(void) {
     return 60;
 }
 
-const uint8_t  *gbc_framebuffer(void)    { return s_vidbuf; }
+const uint16_t *gbc_framebuffer(void)    { return s_vidbuf; }
 const uint16_t *gbc_palette_rgb565(void) { return s_palette; }
+bool            gbc_is_cgb_cart(void)    { return s_cgb_mode; }
 
 void gbc_set_palette(int index) {
     if (index < 0 || index >= GBC_PALETTE_COUNT) index = 0;
@@ -339,6 +429,14 @@ void gbc_shutdown(void) {
     s_rom           = NULL;
     s_rom_len       = 0;
     s_cart_ram_size = 0;
+    /* The chain array itself is caller-owned (the runner allocates it
+     * via nes_picker_mmap_rom_chain and frees it after gbc_shutdown
+     * returns). Just clear our pointer so a subsequent gbc_load_rom
+     * goes back to the contiguous fast path. */
+    s_rom_clusters = NULL;
+    s_rom_last_ci  = 0xFFFFFFFFu;
+    s_rom_last_ptr = NULL;
     if (s_vidbuf)   { free(s_vidbuf);   s_vidbuf   = NULL; }
     if (s_cart_ram) { free(s_cart_ram); s_cart_ram = NULL; }
+    if (s_gb_ptr)   { free(s_gb_ptr);   s_gb_ptr   = NULL; }
 }

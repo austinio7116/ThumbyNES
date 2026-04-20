@@ -46,6 +46,18 @@ int  gbc_init(int sample_rate);
  * peanut_gb init failure (cast to gb_init_error_e). */
 int  gbc_load_rom(const uint8_t *data, size_t len);
 
+/* Chained-ROM variant — used when the cart file is fragmented on
+ * flash and can't be presented as a single contiguous XIP pointer.
+ * `cluster_ptrs[i]` is the XIP address of cluster i's first byte;
+ * `cluster_shift` and `cluster_mask` describe the cluster geometry
+ * (typical values 12 and 0xFFF for 4 KB FAT clusters). The array
+ * must remain valid for the whole session — peanut_gb reads through
+ * it on every ROM byte access. Returns 0 on success. */
+int  gbc_load_rom_chain(const uint8_t * const *cluster_ptrs,
+                         uint32_t cluster_shift,
+                         uint32_t cluster_mask,
+                         size_t   len);
+
 /* Run one emulated DMG frame (~17.5 ms wall time at native speed). */
 void gbc_run_frame(void);
 
@@ -53,12 +65,20 @@ void gbc_run_frame(void);
  * 59.7275 Hz; we round to 60 for pacing. */
 int  gbc_refresh_rate(void);
 
-/* Pointer to the most recently rendered frame as 2-bit GB shades
- * (values 0..3), one byte per pixel, stride = GBC_SCREEN_W. */
-const uint8_t  *gbc_framebuffer(void);
+/* Pointer to the most recently rendered frame as fully-resolved
+ * RGB565 pixels, one u16 per pixel, stride = GBC_SCREEN_W. The core
+ * converts both DMG (4-entry palette) and CGB (per-pixel CGB palette
+ * RAM) into RGB565 inside the line callback, so the runner's scaler
+ * is a pure word copy — no palette indirection at blit time. */
+const uint16_t *gbc_framebuffer(void);
+
+/* True when the most-recently-loaded cart has the CGB flag set in
+ * its cartridge header (byte 0x143 == 0x80 or 0xC0). DMG palette
+ * selection is a no-op on a CGB cart. */
+bool gbc_is_cgb_cart(void);
 
 /* RGB565 palette (4 entries — index by shade). Updated by
- * gbc_set_palette(). */
+ * gbc_set_palette(). Only meaningful for DMG carts. */
 const uint16_t *gbc_palette_rgb565(void);
 
 /* Switch to one of the built-in palettes (0..GBC_PALETTE_COUNT-1).

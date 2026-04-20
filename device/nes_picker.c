@@ -16,6 +16,7 @@
 #include "nes_thumb.h"
 #include "nes_menu.h"
 #include "nes_battery.h"
+#include "nes_led.h"
 
 #ifdef THUMBYONE_SLOT_MODE
 #  include "thumbyone_fs_stats.h"
@@ -227,6 +228,7 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         uint8_t sys = 0xFF;
         if      (strcasecmp(info.fname + L - 4, ".nes") == 0) sys = ROM_SYS_NES;
         else if (strcasecmp(info.fname + L - 4, ".sms") == 0) sys = ROM_SYS_SMS;
+        else if (strcasecmp(info.fname + L - 4, ".gbc") == 0) sys = ROM_SYS_GB;
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gb")  == 0) sys = ROM_SYS_GB;
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gg")  == 0) sys = ROM_SYS_GG;
         else continue;
@@ -360,34 +362,313 @@ static void fb_rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
 #define COL_TITLE  0xFD20   /* orange */
 #define COL_ERR    0xF800   /* red */
 
-#define DEFRAG_TMP   "/.defrag.tmp"
-#define DEFRAG_BUFSZ 4096
+#define DEFRAG_TMP     "/.defrag.tmp"
+#define DEFRAG_SCRATCH "/.defrag.scratch"
+#define DEFRAG_BUFSZ   4096
 
-static void defrag_progress(uint16_t *fb, const char *name, int done, int total) {
-    fb_clear(fb, COL_BG);
-    nes_font_draw(fb, "DEFRAGMENTING",     16, 24, COL_TITLE);
-    nes_font_draw(fb, "do not unplug",     22, 36, COL_DIM);
-    char line[40];
-    snprintf(line, sizeof(line), "%d / %d", done, total);
-    int w = nes_font_width(line);
-    nes_font_draw(fb, line, (FB_W - w) / 2, 56, COL_FG);
-    if (name) {
-        char nm[24];
-        strncpy(nm, name, sizeof(nm) - 1);
-        nm[sizeof(nm) - 1] = 0;
-        if (strlen(nm) > 22) nm[22] = 0;
-        int nw = nes_font_width(nm);
-        nes_font_draw(fb, nm, (FB_W - nw) / 2, 72, COL_FG);
+/* Live cluster map. Each cell in the 60×40 grid is ~1 cluster on the
+ * 9.6 MB volume. Colour per cell reflects cluster ownership so the
+ * user can see individual files as distinct coloured regions and
+ * watch them shift / consolidate as defrag progresses:
+ *   - dark slate     = free cluster
+ *   - rotating hue   = allocated, coloured by file index modulo 15
+ *     (different files get different hues; each file's cluster chain
+ *     shows up as blocks of one colour)
+ *
+ * Building the owner map requires walking every directory + every
+ * file's FAT chain once per redraw. On our 2400-cluster volume with
+ * ~134 files this touches ~10 FAT sectors + ~5 dir sectors, all
+ * cached by the flash-disk layer — measured at single-digit ms. */
+static void draw_cluster_map(uint16_t *fb, const char *active_file_tag) {
+    (void)active_file_tag;
+    enum {
+        MAP_X = 4, MAP_Y = 22,
+        CELL_W = 2, CELL_H = 2,
+        MAP_COLS = 60, MAP_ROWS = 40,
+        N_CELLS = MAP_COLS * MAP_ROWS,
+        MAX_CLUSTERS = 2600,       /* upper bound for 10 MB FAT16 vol */
+        MAX_DIRS = 32,
+        PATH_LEN_LOCAL = NES_PICKER_NAME_MAX,
+    };
+
+    /* Static buffers: ~6 KB permanent BSS. Only exercised during
+     * defrag so the cost is minor; the alternative (malloc+free per
+     * redraw) thrashes the heap ~60x/sec during active copies. */
+    static uint8_t cluster_owner[MAX_CLUSTERS];
+    static char    visdir_queue[MAX_DIRS][PATH_LEN_LOCAL];
+    static uint8_t fat_sec[512];
+
+    memset(cluster_owner, 0, sizeof(cluster_owner));
+
+    DWORD n_clust = g_fs.n_fatent - 2;
+    if (n_clust == 0) return;
+    if (n_clust > MAX_CLUSTERS) n_clust = MAX_CLUSTERS;
+
+    /* BFS over the volume directory tree, assigning an incrementing
+     * owner_id to each file and marking its cluster chain. */
+    int q_head = 0, q_tail = 0;
+    strncpy(visdir_queue[q_tail], "/", PATH_LEN_LOCAL - 1);
+    visdir_queue[q_tail][PATH_LEN_LOCAL - 1] = 0;
+    q_tail++;
+
+    LBA_t cached_lba = (LBA_t)-1;
+    int file_counter = 0;
+
+    while (q_head < q_tail) {
+        const char *dir_path = visdir_queue[q_head++];
+        DIR dir;
+        FILINFO info;
+        if (f_opendir(&dir, dir_path) != FR_OK) continue;
+        while (f_readdir(&dir, &info) == FR_OK) {
+            if (info.fname[0] == 0) break;
+            if (info.fname[0] == '.') continue;
+
+            char full[PATH_LEN_LOCAL];
+            if (dir_path[0] == '/' && dir_path[1] == 0)
+                snprintf(full, sizeof(full), "/%s", info.fname);
+            else
+                snprintf(full, sizeof(full), "%s/%s", dir_path, info.fname);
+
+            if (info.fattrib & AM_DIR) {
+                if (q_tail < MAX_DIRS) {
+                    strncpy(visdir_queue[q_tail], full, PATH_LEN_LOCAL - 1);
+                    visdir_queue[q_tail][PATH_LEN_LOCAL - 1] = 0;
+                    q_tail++;
+                }
+                continue;
+            }
+            if (info.fsize == 0) continue;
+
+            FIL f;
+            if (f_open(&f, full, FA_READ) != FR_OK) continue;
+            DWORD sc = f.obj.sclust;
+            f_close(&f);
+            if (sc < 2 || sc >= g_fs.n_fatent) continue;
+
+            file_counter++;
+            /* owner_id = 1..255 packed into a byte; 0 reserved for
+             * "free". Anything past 255 re-uses slots mod 255 so the
+             * palette still shows distinct files (at worst two files
+             * share a hue). */
+            uint8_t owner_id = 1 + ((file_counter - 1) & 0xFF);
+            if (owner_id == 0) owner_id = 1;
+
+            DWORD clst = sc;
+            int safety = MAX_CLUSTERS + 1;
+            while (clst >= 2 && clst < g_fs.n_fatent && safety-- > 0) {
+                if ((DWORD)(clst - 2) < n_clust) {
+                    cluster_owner[clst - 2] = owner_id;
+                }
+                DWORD eb = clst * 2;
+                DWORD es = eb / 512;
+                DWORD eo = eb % 512;
+                LBA_t lba = (LBA_t)g_fs.fatbase + es;
+                if (lba != cached_lba) {
+                    if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) break;
+                    cached_lba = lba;
+                }
+                uint16_t next = (uint16_t)fat_sec[eo]
+                              | ((uint16_t)fat_sec[eo + 1] << 8);
+                if (next == 0xFFFF || next < 2) break;
+                clst = next;
+            }
+        }
+        f_closedir(&dir);
     }
-    /* Progress bar. */
-    int bar_x = 12, bar_y = 92, bar_w = FB_W - 24, bar_h = 6;
-    fb_rect(fb, bar_x, bar_y, bar_w, bar_h, 0x18C3);
-    int fill = total > 0 ? (bar_w * done) / total : 0;
-    if (fill > bar_w) fill = bar_w;
-    fb_rect(fb, bar_x, bar_y, fill, bar_h, COL_HIGHLT);
+
+    /* Distinct-hue palette (15 colours + slate-for-free). Picked so
+     * adjacent files read as clearly different blocks. */
+    static const uint16_t file_palette[15] = {
+        0x07FF,  /* cyan */
+        0xFFE0,  /* yellow */
+        0x07E0,  /* green */
+        0xF81F,  /* magenta */
+        0xFD20,  /* orange */
+        0xAFE5,  /* mint */
+        0x87FF,  /* light blue */
+        0xFB56,  /* salmon */
+        0x5E7F,  /* sky */
+        0xFCE0,  /* gold */
+        0xA8F4,  /* lavender */
+        0x6E7D,  /* teal */
+        0xFA28,  /* coral */
+        0xBE5B,  /* pale green */
+        0xEF7E,  /* ivory */
+    };
+    const uint16_t FREE_COLOR = 0x10A2;    /* dark slate */
+
+    fb_rect(fb, MAP_X - 1, MAP_Y - 1,
+            MAP_COLS * CELL_W + 2, MAP_ROWS * CELL_H + 2, 0x4208);
+
+    for (int r = 0; r < MAP_ROWS; r++) {
+        for (int co = 0; co < MAP_COLS; co++) {
+            int cell_idx = r * MAP_COLS + co;
+            uint32_t first_cluster =
+                (uint32_t)(((uint64_t)cell_idx * n_clust) / N_CELLS);
+            uint16_t color;
+            if (first_cluster >= n_clust
+             || cluster_owner[first_cluster] == 0) {
+                color = FREE_COLOR;
+            } else {
+                uint8_t id = cluster_owner[first_cluster];
+                color = file_palette[(id - 1) % 15];
+            }
+            fb_rect(fb, MAP_X + co * CELL_W, MAP_Y + r * CELL_H,
+                    CELL_W, CELL_H, color);
+        }
+    }
+}
+
+/* Writing ~10 MB to the flash disk is uninterruptible — if power
+ * drops mid-rename the current file's data is lost. The overlay
+ * keeps a red "DO NOT POWER OFF" banner pinned to the top at all
+ * times and shows a live cluster map below it so the user can watch
+ * the compaction happen. The front indicator LED also flips to red
+ * for the duration of a compact pass. */
+static void defrag_progress_impl(uint16_t *fb, const char *title,
+                                  const char *name, int done, int total,
+                                  bool loud) {
+    fb_clear(fb, COL_BG);
+
+    if (loud) {
+        /* Red warning bar at the very top. */
+        fb_rect(fb, 0, 0, FB_W, 12, COL_ERR);
+        const char *warn = "DO NOT POWER OFF";
+        nes_font_draw(fb, warn, (FB_W - nes_font_width(warn)) / 2,
+                       3, COL_FG);
+    } else {
+        nes_font_draw(fb, "DEFRAGMENTING", 16, 2, COL_TITLE);
+    }
+    /* Operation sub-line. */
+    if (title) {
+        nes_font_draw(fb, title,
+                       (FB_W - nes_font_width(title)) / 2,
+                       13, loud ? COL_TITLE : COL_DIM);
+    }
+
+    /* Live cluster map — the star of the overlay. */
+    draw_cluster_map(fb, name);
+
+    /* Filename (trimmed to fit). Show the tail so the cart name shows
+     * rather than the dir prefix on deeply-nested paths. */
+    if (name) {
+        const char *tail = strrchr(name, '/');
+        tail = tail ? tail + 1 : name;
+        char nm[26];
+        strncpy(nm, tail, sizeof(nm) - 1);
+        nm[sizeof(nm) - 1] = 0;
+        int nw = nes_font_width(nm);
+        /* Truncate until it fits. */
+        while (nw > FB_W - 4 && strlen(nm) > 3) {
+            nm[strlen(nm) - 1] = 0;
+            nw = nes_font_width(nm);
+        }
+        nes_font_draw(fb, nm, (FB_W - nw) / 2, 106, COL_FG);
+    }
+
+    /* Progress count + thin bar at the bottom. */
+    char cnt[16];
+    snprintf(cnt, sizeof(cnt), "%d / %d", done, total);
+    nes_font_draw(fb, cnt, (FB_W - nes_font_width(cnt)) / 2,
+                   116, COL_DIM);
+
+    int bar_y = 124, bar_h = 2;
+    fb_rect(fb, 4, bar_y, FB_W - 8, bar_h, 0x2104);
+    int fill = total > 0 ? ((FB_W - 8) * done) / total : 0;
+    if (fill > FB_W - 8) fill = FB_W - 8;
+    fb_rect(fb, 4, bar_y, fill, bar_h, COL_HIGHLT);
+
     nes_lcd_wait_idle();
     nes_lcd_present(fb);
     tud_task();
+}
+
+static void defrag_progress(uint16_t *fb, const char *name, int done, int total) {
+    defrag_progress_impl(fb, "defragmenting", name, done, total, false);
+}
+
+/* Generic single-file compactor — takes an absolute path, so it
+ * works for files under /roms, /carts, /games/<name>/assets/... etc.
+ * Same temp-file f_expand dance as defrag_one_roms below; the temp
+ * lives at "/.defrag.tmp" regardless of the source directory because
+ * FatFs' f_rename moves files across directories on the same volume. */
+static int defrag_one_path(const char *src_path, uint16_t *fb,
+                            int done, int total) {
+    const char *tmp_path = DEFRAG_TMP;
+
+    FIL src;
+    if (f_open(&src, src_path, FA_READ) != FR_OK) return -1;
+    FSIZE_t sz = f_size(&src);
+
+    f_unlink(tmp_path);
+
+    FIL dst;
+    if (f_open(&dst, tmp_path, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        f_close(&src);
+        return -2;
+    }
+    if (f_expand(&dst, sz, 1) != FR_OK) {
+        f_close(&dst); f_close(&src); f_unlink(tmp_path);
+        return -3;
+    }
+
+    static uint8_t buf[DEFRAG_BUFSZ];
+    UINT br, bw;
+    FSIZE_t copied = 0;
+    while (copied < sz) {
+        UINT want = (sz - copied > DEFRAG_BUFSZ) ? DEFRAG_BUFSZ : (UINT)(sz - copied);
+        if (f_read(&src, buf, want, &br) != FR_OK || br != want) {
+            f_close(&dst); f_close(&src); f_unlink(tmp_path);
+            return -4;
+        }
+        if (f_write(&dst, buf, br, &bw) != FR_OK || bw != br) {
+            f_close(&dst); f_close(&src); f_unlink(tmp_path);
+            return -5;
+        }
+        copied += br;
+        if ((copied & 0xFFFF) == 0) {
+            /* Repaint the loud overlay so the progress bar moves on
+             * bigger files, and keep tud_task ticking for USB health. */
+            defrag_progress_impl(fb, "compacting disk",
+                                  src_path, done, total, true);
+        }
+    }
+    f_close(&dst);
+    f_close(&src);
+
+    if (f_unlink(src_path) != FR_OK) {
+        f_unlink(tmp_path);
+        return -6;
+    }
+    if (f_rename(tmp_path, src_path) != FR_OK) {
+        return -7;
+    }
+
+    nes_flash_disk_flush();
+
+    /* Verify the rewrite actually landed on a contiguous chain. If
+     * chain_is_contiguous still returns false here, either f_expand
+     * with opt=1 didn't deliver a contiguous chain (FatFs bug or
+     * cluster pressure we didn't expect) or the probe itself is
+     * misreading the FAT. Either way we want to fail loudly so
+     * debug output tells us which case. */
+    {
+        FIL verify;
+        if (f_open(&verify, src_path, FA_READ) == FR_OK) {
+            DWORD sc = verify.obj.sclust;
+            FSIZE_t vsz = f_size(&verify);
+            f_close(&verify);
+            if (vsz > 0 && sc >= 2) {
+                DWORD bpc = (DWORD)g_fs.csize * 512u;
+                DWORD nc  = ((DWORD)vsz + bpc - 1) / bpc;
+                if (!chain_is_contiguous(sc, nc)) {
+                    return -8;   /* rewrite succeeded by FatFs but
+                                  * the chain isn't contiguous */
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 /* Rewrite a single file via the f_expand temp-file dance. The
@@ -497,6 +778,1111 @@ int nes_picker_defrag(uint16_t *fb) {
     return rewritten;
 }
 
+int nes_picker_defrag_one(const char *name, uint16_t *fb) {
+    if (!name) return -1;
+    defrag_progress(fb, name, 0, 1);
+    int rc = defrag_one(name, fb, 0, 1);
+    defrag_progress(fb, "done", 1, 1);
+    nes_flash_disk_flush();
+    return rc;
+}
+
+/* Captures the return code of the first defrag_one_path call that
+ * didn't return 0 during the most recent nes_picker_defrag_compact
+ * run. Read it via nes_picker_defrag_last_error after the pass. */
+static int s_defrag_last_error = 0;
+
+int nes_picker_defrag_last_error(void) {
+    return s_defrag_last_error;
+}
+
+/* Scratch-based rewrite for files whose own clusters block their
+ * target allocation. Sequence:
+ *   1. Copy source -> /.defrag.scratch (FRAGMENTED allocation — we
+ *      just need to stash the data somewhere).
+ *   2. Unlink source. Its clusters become free and are now available
+ *      to the allocator.
+ *   3. Set fs->last_clst = 1 so f_expand searches from cluster 2.
+ *   4. Create source_path again with f_expand size, opt=1 (contig).
+ *   5. Copy /.defrag.scratch -> source_path.
+ *   6. Unlink /.defrag.scratch.
+ *
+ * Peak disk usage: 2x file size (source + scratch coexist in step 1).
+ * Required contig free for step 4: file size, but now satisfiable
+ * because the source's old fragments joined the free pool in step 2.
+ * Used for the stuck big file the donor-evacuation pattern alone
+ * can't help. Returns 0 on success, negative on error:
+ *   -1 f_open source, -2 f_open scratch, -3 read/write copy to scratch,
+ *   -4 unlink source, -5 f_open new file, -6 f_expand contig,
+ *   -7 read/write copy from scratch, -8 verify not contiguous */
+static int defrag_one_via_scratch(const char *src_path, uint16_t *fb,
+                                   int done, int total) {
+    FIL src;
+    if (f_open(&src, src_path, FA_READ) != FR_OK) return -1;
+    FSIZE_t sz = f_size(&src);
+
+    f_unlink(DEFRAG_SCRATCH);
+
+    FIL dst;
+    if (f_open(&dst, DEFRAG_SCRATCH, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        f_close(&src);
+        return -2;
+    }
+
+    static uint8_t buf[DEFRAG_BUFSZ];
+    UINT br, bw;
+    FSIZE_t copied = 0;
+    while (copied < sz) {
+        UINT want = (sz - copied > DEFRAG_BUFSZ) ? DEFRAG_BUFSZ : (UINT)(sz - copied);
+        if (f_read(&src, buf, want, &br) != FR_OK || br != want) {
+            f_close(&dst); f_close(&src); f_unlink(DEFRAG_SCRATCH);
+            return -3;
+        }
+        if (f_write(&dst, buf, br, &bw) != FR_OK || bw != br) {
+            f_close(&dst); f_close(&src); f_unlink(DEFRAG_SCRATCH);
+            return -3;
+        }
+        copied += br;
+        if ((copied & 0x3FFF) == 0) {
+            defrag_progress_impl(fb, "saving cart", src_path, done, total, true);
+        }
+    }
+    f_close(&dst);
+    f_close(&src);
+    nes_flash_disk_flush();
+
+    /* Free the original's clusters so they rejoin the free pool. */
+    if (f_unlink(src_path) != FR_OK) {
+        f_unlink(DEFRAG_SCRATCH);
+        return -4;
+    }
+    nes_flash_disk_flush();
+
+    /* Force the allocator to prefer cluster 2 so the rewrite lands
+     * at the front of the volume. */
+    g_fs.last_clst = 1;
+
+    FIL newf;
+    if (f_open(&newf, src_path, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        f_unlink(DEFRAG_SCRATCH);
+        return -5;
+    }
+    if (f_expand(&newf, sz, 1) != FR_OK) {
+        f_close(&newf);
+        f_unlink(src_path);      /* partial file left behind */
+        f_unlink(DEFRAG_SCRATCH);
+        return -6;
+    }
+
+    FIL scr;
+    if (f_open(&scr, DEFRAG_SCRATCH, FA_READ) != FR_OK) {
+        f_close(&newf); f_unlink(src_path); f_unlink(DEFRAG_SCRATCH);
+        return -7;
+    }
+    copied = 0;
+    while (copied < sz) {
+        UINT want = (sz - copied > DEFRAG_BUFSZ) ? DEFRAG_BUFSZ : (UINT)(sz - copied);
+        if (f_read(&scr, buf, want, &br) != FR_OK || br != want) {
+            f_close(&scr); f_close(&newf);
+            f_unlink(src_path); f_unlink(DEFRAG_SCRATCH);
+            return -7;
+        }
+        if (f_write(&newf, buf, br, &bw) != FR_OK || bw != br) {
+            f_close(&scr); f_close(&newf);
+            f_unlink(src_path); f_unlink(DEFRAG_SCRATCH);
+            return -7;
+        }
+        copied += br;
+        if ((copied & 0x3FFF) == 0) {
+            defrag_progress_impl(fb, "placing contig", src_path, done, total, true);
+        }
+    }
+    f_close(&scr);
+    f_close(&newf);
+    f_unlink(DEFRAG_SCRATCH);
+    nes_flash_disk_flush();
+
+    /* Verify. */
+    if (f_open(&src, src_path, FA_READ) == FR_OK) {
+        DWORD sc = src.obj.sclust;
+        FSIZE_t vsz = f_size(&src);
+        f_close(&src);
+        if (vsz > 0 && sc >= 2) {
+            DWORD bpc = (DWORD)g_fs.csize * 512u;
+            DWORD nc = ((DWORD)vsz + bpc - 1) / bpc;
+            if (!chain_is_contiguous(sc, nc)) return -8;
+        }
+    }
+    return 0;
+}
+
+/* ==========================================================================
+ * Cluster-level defragmenter (replaces file-level Norton+evacuate approach).
+ *
+ * The file-level approach failed on its own failure mode: a file whose
+ * scattered fragments occupy the only region where it could be placed
+ * contiguously. Rewriting via a scratch file needs 2x file-size free, which
+ * is unavailable on a near-full volume.
+ *
+ * This cluster-level approach works at physical cluster granularity, using
+ * an in-place cycle sort with a single 8 KB RAM pivot. It can compact a
+ * 99%-full volume as long as we have 2 clusters of free space anywhere
+ * (for the two pivot buffers in RAM + the cycle dynamics).
+ *
+ * Algorithm (from Norton SpeedDisk + e4defrag adapted to FAT16):
+ *
+ *   1. ANALYZE:
+ *      - BFS the directory tree. For each SUBDIRECTORY, mark its cluster
+ *        chain as PINNED (we don't move dir clusters because their `.`
+ *        and `..` entries would need fixup — out of scope).
+ *      - For each FILE, record path, current sclust, n_clusters, and the
+ *        (LBA, offset) of its short directory entry — captured from
+ *        DIR.sect / DIR.dir while FatFs has them positioned on the SFN.
+ *      - Sort files by cluster count DESC.
+ *      - Build current_owner[] map from each file's FAT chain.
+ *      - Compute target layout: for each file (in size-DESC order), find
+ *        the leftmost n_clusters consecutive non-pinned clusters. That's
+ *        the file's target sclust range. Build target_owner[] alongside.
+ *
+ *   2. PREVIEW: render "current" + "after" cluster maps stacked, plus a
+ *      move-count summary. Wait for A (apply) or B (cancel).
+ *
+ *   3. EXECUTE (only if user confirmed):
+ *      a. Cycle sort. For each cluster c where current_owner[c] !=
+ *         target_owner[c], start a cycle:
+ *           - read cluster c's data into buf_a
+ *           - follow permutation: data at c belongs at dest = target_of(c).
+ *             Read dest into buf_b, write buf_a there, swap buffers, repeat.
+ *           - Cycle closes when dest == start (write buf_a back) or when
+ *             dest was free (start becomes free).
+ *      b. FAT rebuild. Build in-RAM image: file clusters get contiguous
+ *         chain entries, free clusters get 0, pinned clusters keep their
+ *         original value. Write to all FAT copies.
+ *      c. Directory entry patches. For each moved file, rewrite the SFN's
+ *         first-cluster-lo field (bytes 26-27 of the 32-byte entry) to
+ *         point at its new target_sclust.
+ *      d. Remount FatFs (f_unmount + f_mount) so all caches are dropped.
+ *
+ * Risks (surface them to the user via the preview step):
+ *   - No journal. Crash mid-move corrupts one cluster. Crash mid-FAT-
+ *     rebuild gives inconsistent state. "DO NOT POWER OFF" is shown.
+ *   - Subdirectory clusters are pinned. Files can't be truly contiguous
+ *     if their target range crosses a pinned cluster — we skip those for
+ *     them (target placement advances past pinned). Chained-XIP mmap
+ *     still handles the residual.
+ *   - Only tested on 9.6 MB / FAT16 / 4 KB clusters / ~134 files.
+ */
+
+enum {
+    CLD_MAX_FILES        = 220,
+    CLD_MAX_DIRS         = 32,
+    /* Upper cap on cluster count so our heap allocations can't run
+     * away on a misidentified volume. 32k clusters × 4 bytes ×
+     * 2 owner maps = 256 KB — too much. Cap at 16k (128 KB for maps).
+     * Anything beyond that, the user can't realistically defrag with
+     * this code; we'd need the dir walk + buffers strategy. */
+    CLD_ABS_MAX_CLUSTERS = 16384,
+};
+
+typedef struct {
+    char     path[NES_PICKER_NAME_MAX];
+    DWORD    current_sclust;
+    DWORD    target_sclust;       /* 0 = couldn't place, leave alone */
+    uint32_t n_clusters;
+    /* Parent-relative address of this entry's 32-byte SFN slot.
+     *   parent_idx == -1  : entry lives in the root directory
+     *                       (byte_in_parent is an offset from g_fs.dirbase)
+     *   parent_idx >= 0   : entry lives inside files[parent_idx]
+     *                       (byte_in_parent is an offset from the parent's
+     *                       first data cluster; parent is contiguous
+     *                       post-defrag so cluster_idx = byte / bpc). */
+    int      parent_idx;
+    DWORD    byte_in_parent;
+    uint8_t  is_dir;              /* 1 = subdirectory, 0 = regular file */
+} cld_file_t;
+
+typedef struct {
+    cld_file_t *files;
+    int         n_files;
+    uint32_t   *current_owner;   /* (fidx+1) << 16 | offset; 0 = free */
+    uint32_t   *target_owner;    /* same encoding for target layout */
+    uint8_t    *pinned_bits;     /* bit set => cluster pinned (subdir) */
+    uint8_t    *done_bits;       /* bit set => cluster correctly placed */
+    uint8_t    *buf_a;
+    uint8_t    *buf_b;
+    DWORD       n_clust;
+    DWORD       bpc;
+} cld_ctx_t;
+
+#define CLD_BIT_GET(arr, i)  ((arr)[(i) >> 3] & (1u << ((i) & 7)))
+#define CLD_BIT_SET(arr, i)  ((arr)[(i) >> 3] |= (uint8_t)(1u << ((i) & 7)))
+
+/* Walk a FAT16 chain starting at `sclust`, invoking cb(cluster) for each
+ * cluster in the chain. Stops on EOF / bad entry / chain longer than the
+ * volume. `cb_arg` is an opaque passthrough. Returns # clusters walked. */
+static int cld_walk_fat(DWORD sclust,
+                         void (*cb)(DWORD clst, void *arg),
+                         void *cb_arg) {
+    if (sclust < 2 || sclust >= g_fs.n_fatent) return 0;
+    static uint8_t fat_sec[512];
+    LBA_t cached = (LBA_t)-1;
+    DWORD clst = sclust;
+    int n = 0;
+    while (clst >= 2 && clst < g_fs.n_fatent && n < CLD_ABS_MAX_CLUSTERS) {
+        cb(clst, cb_arg);
+        n++;
+        DWORD eb = clst * 2;
+        DWORD es = eb / 512;
+        DWORD eo = eb % 512;
+        LBA_t lba = (LBA_t)g_fs.fatbase + es;
+        if (lba != cached) {
+            if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) break;
+            cached = lba;
+        }
+        uint16_t next = (uint16_t)fat_sec[eo] | ((uint16_t)fat_sec[eo + 1] << 8);
+        if (next == 0xFFFF || next < 2) break;
+        clst = next;
+    }
+    return n;
+}
+
+static void cld_cb_pin(DWORD clst, void *arg) {
+    cld_ctx_t *ctx = (cld_ctx_t *)arg;
+    DWORD ci = clst - 2;
+    if (ci < ctx->n_clust) CLD_BIT_SET(ctx->pinned_bits, ci);
+}
+
+typedef struct {
+    cld_ctx_t *ctx;
+    int        fidx;
+    uint32_t   off;
+} cld_owner_arg_t;
+
+static void cld_cb_set_owner(DWORD clst, void *arg) {
+    cld_owner_arg_t *oa = (cld_owner_arg_t *)arg;
+    DWORD ci = clst - 2;
+    if (ci < oa->ctx->n_clust) {
+        oa->ctx->current_owner[ci] = ((uint32_t)(oa->fidx + 1) << 16) | (oa->off & 0xFFFF);
+    }
+    oa->off++;
+}
+
+/* ANALYZE — returns 0 on success, negative on error. The caller has
+ * NOT yet allocated the per-cluster maps; this is the function that
+ * actually does the right-sized heap allocation once g_fs.n_fatent
+ * is known. */
+static int cld_analyze(cld_ctx_t *ctx) {
+    ctx->n_clust = (g_fs.n_fatent >= 2) ? (g_fs.n_fatent - 2) : 0;
+    if (ctx->n_clust == 0) return -1;
+    if (ctx->n_clust > CLD_ABS_MAX_CLUSTERS) return -4;
+    ctx->bpc = (DWORD)g_fs.csize * 512u;
+
+    /* Size the per-cluster maps to the actual cluster count. */
+    ctx->current_owner =
+        (uint32_t *)malloc((size_t)ctx->n_clust * sizeof(uint32_t));
+    ctx->target_owner =
+        (uint32_t *)malloc((size_t)ctx->n_clust * sizeof(uint32_t));
+    ctx->pinned_bits = (uint8_t *)calloc((ctx->n_clust + 7) / 8, 1);
+    ctx->done_bits   = (uint8_t *)calloc((ctx->n_clust + 7) / 8, 1);
+    if (!ctx->current_owner || !ctx->target_owner
+        || !ctx->pinned_bits || !ctx->done_bits) {
+        return -5;
+    }
+
+    /* The BFS queue has to remember each pending dir's INDEX in
+     * files[] so children we enumerate inside it can set parent_idx.
+     * Root-level dirs use parent_idx = -1. */
+    typedef struct { char path[NES_PICKER_NAME_MAX]; int parent_idx; } queue_ent_t;
+    queue_ent_t *dir_q = (queue_ent_t *)malloc((size_t)CLD_MAX_DIRS * sizeof(queue_ent_t));
+    if (!dir_q) return -6;
+
+    int q_head = 0, q_tail = 0;
+    strncpy(dir_q[0].path, "/", NES_PICKER_NAME_MAX - 1);
+    dir_q[0].path[NES_PICKER_NAME_MAX - 1] = 0;
+    dir_q[0].parent_idx = -1;
+    q_tail = 1;
+
+    int n_files = 0;
+    while (q_head < q_tail && n_files < CLD_MAX_FILES) {
+        char        cur_dir_path[NES_PICKER_NAME_MAX];
+        int         cur_parent_idx;
+        strncpy(cur_dir_path, dir_q[q_head].path, NES_PICKER_NAME_MAX - 1);
+        cur_dir_path[NES_PICKER_NAME_MAX - 1] = 0;
+        cur_parent_idx = dir_q[q_head].parent_idx;
+        q_head++;
+
+        DIR dir;
+        FILINFO info;
+        if (f_opendir(&dir, cur_dir_path) != FR_OK) continue;
+        while (n_files < CLD_MAX_FILES && f_readdir(&dir, &info) == FR_OK) {
+            if (info.fname[0] == 0) break;
+            /* Skip only "." and ".." (FatFs shouldn't surface them
+             * but be safe). DO NOT skip dotfiles like /.volume or
+             * /.global — they occupy real clusters. */
+            if (info.fname[0] == '.'
+                && (info.fname[1] == 0
+                    || (info.fname[1] == '.' && info.fname[2] == 0))) {
+                continue;
+            }
+
+            /* DIR.dptr is the SFN's byte offset within the parent's
+             * directory stream — BUT FatFs's f_readdir calls
+             * dir_next(dp, 0) as its last step, which advances dptr
+             * past the SFN we just returned. So after f_readdir,
+             * dptr == SFN_offset + 32 (SZDIRE). Subtract the slot
+             * size to recover the actual SFN offset.
+             *
+             * Without this subtraction every subdir entry's
+             * byte_in_parent was 32 too high, and phase 3c patched
+             * the attribute/reserved bytes of the NEXT entry instead
+             * of updating this child's sclust — corrupting the
+             * volume and leaving children pointing at their old
+             * (now-freed) cluster positions. */
+            DWORD e_byte_in_parent = (dir.dptr >= 32) ? (dir.dptr - 32) : 0;
+
+            char full[NES_PICKER_NAME_MAX];
+            if (cur_dir_path[0] == '/' && cur_dir_path[1] == 0)
+                snprintf(full, sizeof(full), "/%s", info.fname);
+            else
+                snprintf(full, sizeof(full), "%s/%s", cur_dir_path, info.fname);
+
+            DWORD entry_sclust = 0;
+            uint8_t is_dir     = (info.fattrib & AM_DIR) ? 1 : 0;
+            uint32_t nc        = 0;
+
+            if (is_dir) {
+                DIR subd;
+                if (f_opendir(&subd, full) != FR_OK) continue;
+                entry_sclust = subd.obj.sclust;
+                f_closedir(&subd);
+                /* Subdirectory size in clusters: walk FAT until EOC.
+                 * Most subdirs fit in 1 cluster but a folder with
+                 * many entries takes more. */
+                nc = 0;
+                {
+                    DWORD clst = entry_sclust;
+                    static uint8_t fs[512];
+                    LBA_t cached_fat = (LBA_t)-1;
+                    int safety = 64;  /* subdir chains don't get long */
+                    while (clst >= 2 && clst < g_fs.n_fatent && safety-- > 0) {
+                        nc++;
+                        DWORD eb = clst * 2;
+                        DWORD es = eb / 512;
+                        DWORD eo = eb % 512;
+                        LBA_t lba = (LBA_t)g_fs.fatbase + es;
+                        if (lba != cached_fat) {
+                            if (nes_flash_disk_read(fs, (uint32_t)lba, 1) != 0) break;
+                            cached_fat = lba;
+                        }
+                        uint16_t next = (uint16_t)fs[eo] | ((uint16_t)fs[eo + 1] << 8);
+                        if (next == 0xFFFF || next < 2) break;
+                        clst = next;
+                    }
+                }
+            } else {
+                FIL probe;
+                if (f_open(&probe, full, FA_READ) != FR_OK) continue;
+                entry_sclust = probe.obj.sclust;
+                FSIZE_t sz   = f_size(&probe);
+                f_close(&probe);
+                if (sz == 0) continue;
+                nc = (uint32_t)(((DWORD)sz + ctx->bpc - 1) / ctx->bpc);
+            }
+
+            int my_idx = n_files;
+            strncpy(ctx->files[my_idx].path, full, NES_PICKER_NAME_MAX - 1);
+            ctx->files[my_idx].path[NES_PICKER_NAME_MAX - 1] = 0;
+            ctx->files[my_idx].current_sclust = entry_sclust;
+            ctx->files[my_idx].n_clusters     = nc;
+            ctx->files[my_idx].parent_idx     = cur_parent_idx;
+            ctx->files[my_idx].byte_in_parent = e_byte_in_parent;
+            ctx->files[my_idx].is_dir         = is_dir;
+            ctx->files[my_idx].target_sclust  = 0;
+            n_files++;
+
+            /* Enqueue subdir for later walking. */
+            if (is_dir && q_tail < CLD_MAX_DIRS) {
+                strncpy(dir_q[q_tail].path, full, NES_PICKER_NAME_MAX - 1);
+                dir_q[q_tail].path[NES_PICKER_NAME_MAX - 1] = 0;
+                dir_q[q_tail].parent_idx = my_idx;
+                q_tail++;
+            }
+        }
+        f_closedir(&dir);
+    }
+    free(dir_q);
+    ctx->n_files = n_files;
+    if (n_files == 0) return 0;
+
+    /* Sort an INDEX array by n_clusters DESC. We can't reorder
+     * files[] in place because parent_idx stored inside each entry
+     * refers to its parent's position in the BFS order; reordering
+     * would invalidate those references and corrupt dir-entry
+     * patching in the execute phase. Target placement iterates in
+     * sorted order via this array. */
+    int *sorted_idx = (int *)malloc((size_t)n_files * sizeof(int));
+    if (!sorted_idx) return -8;
+    for (int i = 0; i < n_files; i++) sorted_idx[i] = i;
+    for (int i = 1; i < n_files; i++) {
+        int key = sorted_idx[i];
+        uint32_t key_nc = ctx->files[key].n_clusters;
+        int j = i - 1;
+        while (j >= 0 && ctx->files[sorted_idx[j]].n_clusters < key_nc) {
+            sorted_idx[j + 1] = sorted_idx[j];
+            j--;
+        }
+        sorted_idx[j + 1] = key;
+    }
+
+    /* Build current_owner by walking each entry's FAT chain via the
+     * raw FAT16 walker (cld_walk_fat). Works for both files AND
+     * subdirectories uniformly. We previously used f_open + f_lseek
+     * but that doesn't handle subdirectories (f_open rejects them),
+     * which left subdir clusters unmarked in current_owner even
+     * though they're counted in target. */
+    memset(ctx->current_owner, 0, ctx->n_clust * sizeof(uint32_t));
+    for (int f = 0; f < n_files; f++) {
+        cld_owner_arg_t oa = { .ctx = ctx, .fidx = f, .off = 0 };
+        cld_walk_fat(ctx->files[f].current_sclust, cld_cb_set_owner, &oa);
+    }
+
+    /* Compute target layout with a first-fit free-run list.
+     *
+     * Earlier approach walked a monotonically-advancing `cursor` and
+     * skipped past pinned clusters without ever looking back. That
+     * wasted the (cursor..next-pinned) gap on each skip and pushed
+     * the cursor well past the end, causing many small files to end
+     * up stuck (see Apr 2026 user report: p=26 but 85 stuck).
+     *
+     * Now: precompute a list of free cluster runs (between pinned
+     * clusters). For each file in size-DESC order, take the first
+     * run that fits and shrink that run by the file's size. Always
+     * keep each run's leftmost position — packs files as far left
+     * as possible without waste. */
+    enum { MAX_FREE_RUNS = 64 };
+    struct { DWORD start, length; } runs[MAX_FREE_RUNS];
+    int n_runs = 0;
+
+    DWORD c = 0;
+    while (c < ctx->n_clust && n_runs < MAX_FREE_RUNS) {
+        while (c < ctx->n_clust && CLD_BIT_GET(ctx->pinned_bits, c)) c++;
+        if (c >= ctx->n_clust) break;
+        DWORD start = c;
+        while (c < ctx->n_clust && !CLD_BIT_GET(ctx->pinned_bits, c)) c++;
+        runs[n_runs].start  = start;
+        runs[n_runs].length = c - start;
+        n_runs++;
+    }
+
+    memset(ctx->target_owner, 0, ctx->n_clust * sizeof(uint32_t));
+    for (int s = 0; s < n_files; s++) {
+        int f = sorted_idx[s];
+        uint32_t nc = ctx->files[f].n_clusters;
+        if (nc == 0 || nc > ctx->n_clust) continue;
+
+        /* First-fit: earliest run large enough for this file. */
+        int pick = -1;
+        for (int r = 0; r < n_runs; r++) {
+            if (runs[r].length >= nc) { pick = r; break; }
+        }
+        if (pick < 0) {
+            ctx->files[f].target_sclust = 0;
+            continue;
+        }
+        DWORD base = runs[pick].start;
+        ctx->files[f].target_sclust = base + 2;  /* FAT cluster # */
+        for (uint32_t j = 0; j < nc; j++) {
+            ctx->target_owner[base + j] =
+                ((uint32_t)(f + 1) << 16) | (j & 0xFFFF);
+        }
+        runs[pick].start  += nc;
+        runs[pick].length -= nc;
+    }
+    free(sorted_idx);
+    return 0;
+}
+
+/* Execute-phase overlay. Renders the live cluster state from
+ * ctx->current_owner (which cycle sort keeps up to date) instead of
+ * walking FatFs — during moves the on-disk FAT is still the OLD FAT
+ * so FatFs would return bogus chains pointing at already-shuffled
+ * clusters. We also render the FULL volume (n_clust, not a 2600 cap)
+ * so the picture matches the preview.
+ *
+ * Layout: top red DO NOT POWER OFF bar, operation label, full-height
+ * cluster map, "N / M" counter + thin progress bar at the bottom. */
+static void cld_draw_execute_overlay(uint16_t *fb, const cld_ctx_t *ctx,
+                                      const char *title,
+                                      int moves, int moves_planned) {
+    enum {
+        MAP_X = 4, MAP_Y = 22,
+        CELL_W = 2, CELL_H = 2,
+        MAP_COLS = 60, MAP_ROWS = 40,
+        N_CELLS = MAP_COLS * MAP_ROWS,
+    };
+    static const uint16_t palette[15] = {
+        0x07FF, 0xFFE0, 0x07E0, 0xF81F, 0xFD20,
+        0xAFE5, 0x87FF, 0xFB56, 0x5E7F, 0xFCE0,
+        0xA8F4, 0x6E7D, 0xFA28, 0xBE5B, 0xEF7E,
+    };
+    const uint16_t FREE_COLOR = 0x10A2;
+
+    fb_clear(fb, COL_BG);
+    fb_rect(fb, 0, 0, FB_W, 12, COL_ERR);
+    const char *warn = "DO NOT POWER OFF";
+    nes_font_draw(fb, warn, (FB_W - nes_font_width(warn)) / 2, 3, COL_FG);
+    if (title) {
+        nes_font_draw(fb, title,
+                       (FB_W - nes_font_width(title)) / 2, 13, COL_TITLE);
+    }
+
+    fb_rect(fb, MAP_X - 1, MAP_Y - 1,
+            MAP_COLS * CELL_W + 2, MAP_ROWS * CELL_H + 2, 0x4208);
+
+    DWORD n_clust = ctx->n_clust;
+    for (int r = 0; r < MAP_ROWS; r++) {
+        for (int co = 0; co < MAP_COLS; co++) {
+            uint32_t cell_idx = (uint32_t)(r * MAP_COLS + co);
+            uint32_t ci_start =
+                (uint32_t)(((uint64_t)cell_idx * n_clust) / N_CELLS);
+            uint32_t ci_end =
+                (uint32_t)(((uint64_t)(cell_idx + 1) * n_clust) / N_CELLS);
+            if (ci_end <= ci_start) ci_end = ci_start + 1;
+            if (ci_end > n_clust)   ci_end = n_clust;
+
+            int fidx = -1;
+            for (uint32_t ci = ci_start; ci < ci_end; ci++) {
+                if (ctx->current_owner[ci] != 0) {
+                    fidx = (int)((ctx->current_owner[ci] >> 16) - 1);
+                    break;
+                }
+            }
+            uint16_t color = (fidx >= 0) ? palette[fidx % 15] : FREE_COLOR;
+            fb_rect(fb, MAP_X + co * CELL_W, MAP_Y + r * CELL_H,
+                    CELL_W, CELL_H, color);
+        }
+    }
+
+    /* Counter + bar at bottom. */
+    char cnt[24];
+    int denom = moves_planned > 0 ? moves_planned : 1;
+    int num   = moves > denom ? denom : moves;
+    snprintf(cnt, sizeof(cnt), "%d / %d", num, denom);
+    nes_font_draw(fb, cnt, (FB_W - nes_font_width(cnt)) / 2, 116, COL_DIM);
+
+    int bar_y = 124, bar_h = 2;
+    fb_rect(fb, 4, bar_y, FB_W - 8, bar_h, 0x2104);
+    int fill = denom > 0 ? ((FB_W - 8) * num) / denom : 0;
+    if (fill > FB_W - 8) fill = FB_W - 8;
+    fb_rect(fb, 4, bar_y, fill, bar_h, COL_HIGHLT);
+
+    nes_lcd_wait_idle();
+    nes_lcd_present(fb);
+    tud_task();
+}
+
+/* Render one cluster map as a 60×20 grid (small preview version).
+ * Each cell spans (n_clust / N_CELLS) consecutive clusters; we scan
+ * the whole span and pick a representative colour so fragmented data
+ * that doesn't happen to fall on cell boundaries still shows up. */
+static void cld_draw_map_small(uint16_t *fb, const uint32_t *owner_map,
+                                const uint8_t *pinned_bits,
+                                DWORD n_clust, int y_top) {
+    /* Map size trimmed to 18 rows to make room for an extra diagnostic
+     * line (FS type + cluster count) below the bottom map. Each cell
+     * now covers n_clust / 1080 clusters (~9 on a 9845-cluster vol). */
+    enum { COLS = 60, ROWS = 18, CELL = 2, X0 = 4, N_CELLS = COLS * ROWS };
+    static const uint16_t palette[15] = {
+        0x07FF, 0xFFE0, 0x07E0, 0xF81F, 0xFD20,
+        0xAFE5, 0x87FF, 0xFB56, 0x5E7F, 0xFCE0,
+        0xA8F4, 0x6E7D, 0xFA28, 0xBE5B, 0xEF7E,
+    };
+    /* Border */
+    fb_rect(fb, X0 - 1, y_top - 1, COLS * CELL + 2, ROWS * CELL + 2, 0x4208);
+    for (int r = 0; r < ROWS; r++) {
+        for (int co = 0; co < COLS; co++) {
+            uint32_t cell_idx = (uint32_t)(r * COLS + co);
+            uint32_t ci_start =
+                (uint32_t)(((uint64_t)cell_idx * n_clust) / N_CELLS);
+            uint32_t ci_end =
+                (uint32_t)(((uint64_t)(cell_idx + 1) * n_clust) / N_CELLS);
+            if (ci_end <= ci_start) ci_end = ci_start + 1;
+            if (ci_end > n_clust)   ci_end = n_clust;
+
+            /* Priority: pick the FIRST non-free cluster in the span
+             * so any colour within the cell wins over free. That's
+             * the visually useful thing — seeing that the cell is
+             * "occupied" even if only one of N clusters in it is
+             * allocated. */
+            int  fidx    = -1;
+            bool pinned  = false;
+            for (uint32_t ci = ci_start; ci < ci_end; ci++) {
+                if (CLD_BIT_GET(pinned_bits, ci)) pinned = true;
+                if (owner_map[ci] != 0) {
+                    fidx = (int)((owner_map[ci] >> 16) - 1);
+                    break;
+                }
+            }
+            uint16_t color;
+            if (fidx >= 0)      color = palette[fidx % 15];
+            else if (pinned)    color = 0x632C;   /* pinned subdir */
+            else                color = 0x10A2;   /* free */
+            fb_rect(fb, X0 + co * CELL, y_top + r * CELL, CELL, CELL, color);
+        }
+    }
+}
+
+static void cld_show_preview(const cld_ctx_t *ctx, uint16_t *fb,
+                              int moves_planned, int unplaceable) {
+    fb_clear(fb, COL_BG);
+
+    const char *title = "DEFRAG PREVIEW";
+    nes_font_draw(fb, title,
+                   (FB_W - nes_font_width(title)) / 2, 2, COL_TITLE);
+
+    nes_font_draw(fb, "before", 4, 12, COL_DIM);
+    cld_draw_map_small(fb, ctx->current_owner, ctx->pinned_bits,
+                        ctx->n_clust, 20);
+
+    nes_font_draw(fb, "after", 4, 60, COL_DIM);
+    cld_draw_map_small(fb, ctx->target_owner, ctx->pinned_bits,
+                        ctx->n_clust, 68);
+
+    /* Count current-used vs target-used cluster totals. These SHOULD
+     * match — same files occupying the same total cluster count. If
+     * they differ, we know the current_owner walk missed entries
+     * (probably a chain-walk bug). Shown in red when mismatched. */
+    int used_now = 0, used_tgt = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (ctx->current_owner[c] != 0) used_now++;
+        if (ctx->target_owner[c]  != 0) used_tgt++;
+    }
+    char stat[40];
+    if (unplaceable > 0) {
+        snprintf(stat, sizeof(stat), "%d/%d used  %d mv  %d stuck",
+                 used_now, used_tgt, moves_planned, unplaceable);
+    } else {
+        snprintf(stat, sizeof(stat), "%d/%d used  %d moves",
+                 used_now, used_tgt, moves_planned);
+    }
+    nes_font_draw(fb, stat,
+                   (FB_W - nes_font_width(stat)) / 2, 106,
+                   (used_now == used_tgt) ? COL_FG : COL_ERR);
+
+    /* FS diagnostic line: fs_type (1=FAT12, 2=FAT16, 3=FAT32),
+     * cluster size in sectors, total cluster count. If fs_type isn't
+     * 2 then my FAT-chain math is wrong and that explains why
+     * current_owner is under-populated. */
+    const char *ft_name = (g_fs.fs_type == 1) ? "FAT12"
+                        : (g_fs.fs_type == 2) ? "FAT16"
+                        : (g_fs.fs_type == 3) ? "FAT32"
+                                              : "????";
+    /* Diagnostic line: FS type, cluster size, cluster count, file
+     * count, total file KB, pinned cluster count. If pinned is huge
+     * (e.g. hundreds), the subdir chain walk is over-counting and
+     * that's why so many files are ending up "stuck" (target runs
+     * blocked by bogus-pinned ranges). */
+    DWORD total_bytes = 0;
+    for (int f = 0; f < ctx->n_files; f++) {
+        total_bytes += ctx->files[f].n_clusters * ctx->bpc;
+    }
+    int pinned_count = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) pinned_count++;
+    }
+    char fs_line[64];
+    snprintf(fs_line, sizeof(fs_line), "n=%lu f=%d %luk p=%d",
+             (unsigned long)ctx->n_clust, ctx->n_files,
+             (unsigned long)(total_bytes / 1024), pinned_count);
+    nes_font_draw(fb, fs_line,
+                   (FB_W - nes_font_width(fs_line)) / 2, 114, COL_DIM);
+
+    const char *prompt = "A=apply  B=cancel";
+    nes_font_draw(fb, prompt,
+                   (FB_W - nes_font_width(prompt)) / 2, 122, COL_HIGHLT);
+
+    nes_lcd_wait_idle();
+    nes_lcd_present(fb);
+}
+
+/* Wait for a button edge. Returns 1 if user pressed A (apply), 0 for B
+ * or MENU (cancel). Any other button is ignored. */
+static int cld_wait_confirm(void) {
+    /* Drain any currently-held buttons first. */
+    while (nes_buttons_read() != 0 || nes_buttons_menu_pressed()) {
+        tud_task();
+        sleep_ms(10);
+    }
+    while (1) {
+        tud_task();
+        sleep_ms(10);
+        uint8_t b = nes_buttons_read();
+        if (b & 0x20) return 1;                    /* A (PICO-8 X bit) */
+        if (b & 0x10) return 0;                    /* B (PICO-8 O bit) */
+        if (nes_buttons_menu_pressed()) return 0;  /* MENU = cancel too */
+    }
+}
+
+/* EXECUTE — returns move count on success, negative on error. */
+static int cld_execute(cld_ctx_t *ctx, uint16_t *fb, int moves_planned) {
+    DWORD n_clust = ctx->n_clust;
+    memset(ctx->done_bits, 0, (n_clust + 7) / 8);
+
+    int moves = 0;
+    int progress_tick = 0;
+
+    /* --- Phase 3a: cycle sort over file clusters --- */
+    for (DWORD c = 0; c < n_clust; c++) {
+        if (CLD_BIT_GET(ctx->done_bits, c))   continue;
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) continue;
+        if (ctx->current_owner[c] == ctx->target_owner[c]) {
+            CLD_BIT_SET(ctx->done_bits, c);
+            continue;
+        }
+
+        /* Start cycle at c. */
+        DWORD    pos = c;
+        uint32_t carried_id = ctx->current_owner[c];
+
+        LBA_t start_lba = (LBA_t)g_fs.database + (LBA_t)c * g_fs.csize;
+        if (nes_flash_disk_read(ctx->buf_a, (uint32_t)start_lba, g_fs.csize) != 0)
+            return -10;
+
+        int cycle_safety = (int)n_clust + 4;
+        while (cycle_safety-- > 0) {
+            DWORD dest;
+            if (carried_id == 0) {
+                /* Nothing carried — the start cluster is now free. */
+                ctx->current_owner[c] = 0;
+                CLD_BIT_SET(ctx->done_bits, c);
+                break;
+            }
+            int fidx = (int)((carried_id >> 16) - 1);
+            int off  = (int)(carried_id & 0xFFFF);
+            if (fidx < 0 || fidx >= ctx->n_files
+                || ctx->files[fidx].target_sclust == 0) {
+                /* File wasn't placed; write carried back to pos and stop. */
+                LBA_t cur_lba =
+                    (LBA_t)g_fs.database + (LBA_t)pos * g_fs.csize;
+                nes_flash_disk_write(ctx->buf_a, (uint32_t)cur_lba, g_fs.csize);
+                CLD_BIT_SET(ctx->done_bits, pos);
+                break;
+            }
+            dest = (ctx->files[fidx].target_sclust - 2) + (DWORD)off;
+
+            if (dest == c) {
+                /* Cycle closes at the start. */
+                if (nes_flash_disk_write(ctx->buf_a, (uint32_t)start_lba, g_fs.csize) != 0)
+                    return -11;
+                ctx->current_owner[c] = carried_id;
+                CLD_BIT_SET(ctx->done_bits, c);
+                moves++;
+                break;
+            }
+
+            LBA_t dest_lba =
+                (LBA_t)g_fs.database + (LBA_t)dest * g_fs.csize;
+            if (nes_flash_disk_read(ctx->buf_b, (uint32_t)dest_lba, g_fs.csize) != 0)
+                return -12;
+            uint32_t dest_id = ctx->current_owner[dest];
+            if (nes_flash_disk_write(ctx->buf_a, (uint32_t)dest_lba, g_fs.csize) != 0)
+                return -13;
+            ctx->current_owner[dest] = carried_id;
+            CLD_BIT_SET(ctx->done_bits, dest);
+            moves++;
+
+            carried_id = dest_id;
+            { uint8_t *tmp = ctx->buf_a; ctx->buf_a = ctx->buf_b; ctx->buf_b = tmp; }
+            pos = dest;
+
+            /* Periodic progress + flush. Renders the live cluster
+             * state from ctx->current_owner (which cycle sort keeps
+             * current) rather than walking FatFs, since FatFs's
+             * chains still point at old cluster positions that now
+             * hold shuffled data. */
+            if ((++progress_tick & 0xF) == 0) {
+                nes_flash_disk_flush();
+                cld_draw_execute_overlay(fb, ctx, "moving clusters",
+                                          moves, moves_planned);
+            }
+        }
+    }
+    nes_flash_disk_flush();
+
+    /* --- Phase 3b: rebuild FAT --- */
+    defrag_progress_impl(fb, "rewriting FAT", "", ctx->n_files, ctx->n_files + 1, true);
+
+    uint16_t *new_fat = (uint16_t *)malloc(n_clust * sizeof(uint16_t));
+    if (!new_fat) return -20;
+    memset(new_fat, 0, n_clust * sizeof(uint16_t));
+
+    /* Preserve pinned clusters' existing FAT entries. */
+    {
+        static uint8_t fat_sec[512];
+        LBA_t cached = (LBA_t)-1;
+        for (DWORD ci = 0; ci < n_clust; ci++) {
+            if (!CLD_BIT_GET(ctx->pinned_bits, ci)) continue;
+            DWORD c = ci + 2;
+            DWORD eb = c * 2;
+            DWORD es = eb / 512;
+            DWORD eo = eb % 512;
+            LBA_t lba = (LBA_t)g_fs.fatbase + es;
+            if (lba != cached) {
+                if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) {
+                    free(new_fat);
+                    return -21;
+                }
+                cached = lba;
+            }
+            new_fat[ci] = (uint16_t)fat_sec[eo] | ((uint16_t)fat_sec[eo + 1] << 8);
+        }
+    }
+
+    /* Write contiguous chain for each placed file. For files that
+     * couldn't be placed (target_sclust == 0), preserve the original
+     * chain by copying from existing FAT. */
+    for (int f = 0; f < ctx->n_files; f++) {
+        if (ctx->files[f].target_sclust == 0) {
+            /* Copy existing chain over — it's still valid. */
+            static uint8_t fat_sec[512];
+            LBA_t cached = (LBA_t)-1;
+            DWORD clst = ctx->files[f].current_sclust;
+            int safety = (int)n_clust + 1;
+            while (clst >= 2 && clst < g_fs.n_fatent && safety-- > 0) {
+                DWORD ci = clst - 2;
+                DWORD eb = clst * 2;
+                DWORD es = eb / 512;
+                DWORD eo = eb % 512;
+                LBA_t lba = (LBA_t)g_fs.fatbase + es;
+                if (lba != cached) {
+                    if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) break;
+                    cached = lba;
+                }
+                uint16_t next = (uint16_t)fat_sec[eo]
+                              | ((uint16_t)fat_sec[eo + 1] << 8);
+                if (ci < n_clust) new_fat[ci] = next;
+                if (next == 0xFFFF || next < 2) break;
+                clst = next;
+            }
+            continue;
+        }
+        DWORD    tstart = ctx->files[f].target_sclust;
+        uint32_t nc     = ctx->files[f].n_clusters;
+        for (uint32_t i = 0; i < nc; i++) {
+            DWORD ci = tstart + i - 2;
+            if (ci >= n_clust) break;
+            new_fat[ci] = (i == nc - 1)
+                            ? 0xFFFF
+                            : (uint16_t)(tstart + i + 1);
+        }
+    }
+
+    /* Flush new_fat to every FAT copy, preserving bytes we don't own
+     * (e.g. reserved entries at cluster 0/1). */
+    for (int fatno = 0; fatno < g_fs.n_fats; fatno++) {
+        LBA_t fat_start = (LBA_t)g_fs.fatbase + (LBA_t)fatno * g_fs.fsize;
+        uint8_t fat_sec[512];
+        DWORD total_sectors = g_fs.fsize;
+        for (DWORD sec = 0; sec < total_sectors; sec++) {
+            if (nes_flash_disk_read(fat_sec, (uint32_t)(fat_start + sec), 1) != 0) {
+                free(new_fat);
+                return -22;
+            }
+            DWORD first_c = sec * 256;      /* 256 FAT16 entries per sector */
+            for (DWORD i = 0; i < 256; i++) {
+                DWORD c = first_c + i;
+                if (c < 2 || c >= g_fs.n_fatent) continue;
+                DWORD ci = c - 2;
+                if (ci >= n_clust) continue;
+                uint16_t v = new_fat[ci];
+                fat_sec[i * 2]     = (uint8_t)(v & 0xFF);
+                fat_sec[i * 2 + 1] = (uint8_t)((v >> 8) & 0xFF);
+            }
+            if (nes_flash_disk_write(fat_sec, (uint32_t)(fat_start + sec), 1) != 0) {
+                free(new_fat);
+                return -23;
+            }
+        }
+    }
+    free(new_fat);
+    nes_flash_disk_flush();
+
+    /* --- Phase 3c: patch directory entries.
+     *
+     * Two distinct updates per moved entry:
+     *   (i)  Parent's SFN slot for this child: bytes 26/27 = new sclust.
+     *        Located at parent's new data stream + byte_in_parent.
+     *   (ii) For SUBDIRECTORIES: their own first data cluster contains
+     *        the `.` entry (bytes 0-31) whose sclust must point at the
+     *        subdir's new location, and the `..` entry (bytes 32-63)
+     *        whose sclust must point at the parent's new location
+     *        (or 0 if parent is root).
+     *
+     * Parent-relative addressing: for a child of parent_idx != -1,
+     * the parent is contiguous post-move starting at parent.target_sclust
+     * (which we set to current_sclust if the parent itself wasn't
+     * moved — handled in the effective_sclust helper below).
+     * For parent_idx == -1 (root-level), bytes are offset from
+     * g_fs.dirbase (fixed root-dir region on FAT16). */
+
+    /* Helper: effective (post-move) sclust for an entry — either its
+     * target or (if unmoved or couldn't be placed) its current. */
+#define CLD_EFFECTIVE_SCLUST(file) \
+    ((file).target_sclust != 0 ? (file).target_sclust : (file).current_sclust)
+
+    for (int f = 0; f < ctx->n_files; f++) {
+        cld_file_t *ent = &ctx->files[f];
+        DWORD new_sc = CLD_EFFECTIVE_SCLUST(*ent);
+        if (new_sc == ent->current_sclust) {
+            /* Not moved; nothing to patch for THIS entry's SFN slot.
+             * But if we're a subdir whose parent moved, we still need
+             * to fix `..` (handled below). */
+        } else {
+            /* Step (i): patch parent's SFN slot for this child. */
+            LBA_t sfn_lba;
+            uint32_t sfn_off;
+            if (ent->parent_idx == -1) {
+                /* Root-level: entry is in the fixed root-dir region. */
+                LBA_t root_base = (LBA_t)g_fs.dirbase;
+                sfn_lba = root_base + ent->byte_in_parent / 512;
+                sfn_off = ent->byte_in_parent % 512;
+            } else {
+                cld_file_t *par = &ctx->files[ent->parent_idx];
+                DWORD par_sclust = CLD_EFFECTIVE_SCLUST(*par);
+                DWORD b = ent->byte_in_parent;
+                DWORD in_cluster = b / ctx->bpc;
+                DWORD in_byte    = b % ctx->bpc;
+                DWORD clst       = par_sclust + in_cluster;
+                sfn_lba = (LBA_t)g_fs.database + (LBA_t)(clst - 2) * g_fs.csize
+                          + in_byte / 512;
+                sfn_off = in_byte % 512;
+            }
+            uint8_t sec[512];
+            if (nes_flash_disk_read(sec, (uint32_t)sfn_lba, 1) != 0) return -30;
+            sec[sfn_off + 26] = (uint8_t)(new_sc & 0xFF);
+            sec[sfn_off + 27] = (uint8_t)((new_sc >> 8) & 0xFF);
+            if (nes_flash_disk_write(sec, (uint32_t)sfn_lba, 1) != 0) return -31;
+        }
+    }
+    nes_flash_disk_flush();
+
+    /* Step (ii): subdirectory self-patches (`.` and `..`).
+     * Done AFTER all parents' SFN updates so parent.target_sclust
+     * is committed. For each subdir, read its new first sector,
+     * fix `.` sclust and `..` sclust, write back. */
+    for (int f = 0; f < ctx->n_files; f++) {
+        cld_file_t *ent = &ctx->files[f];
+        if (!ent->is_dir) continue;
+        DWORD my_sc = CLD_EFFECTIVE_SCLUST(*ent);
+        DWORD parent_sc = 0;
+        if (ent->parent_idx >= 0) {
+            parent_sc = CLD_EFFECTIVE_SCLUST(ctx->files[ent->parent_idx]);
+        }
+        /* First sector of the subdir's first data cluster holds
+         * both `.` (offset 0) and `..` (offset 32) 32-byte entries. */
+        LBA_t first_lba = (LBA_t)g_fs.database + (LBA_t)(my_sc - 2) * g_fs.csize;
+        uint8_t sec[512];
+        if (nes_flash_disk_read(sec, (uint32_t)first_lba, 1) != 0) return -32;
+        /* `.` at offset 26/27 */
+        sec[26] = (uint8_t)(my_sc & 0xFF);
+        sec[27] = (uint8_t)((my_sc >> 8) & 0xFF);
+        /* `..` at offset 32+26, 32+27 */
+        sec[32 + 26] = (uint8_t)(parent_sc & 0xFF);
+        sec[32 + 27] = (uint8_t)((parent_sc >> 8) & 0xFF);
+        if (nes_flash_disk_write(sec, (uint32_t)first_lba, 1) != 0) return -33;
+    }
+    nes_flash_disk_flush();
+#undef CLD_EFFECTIVE_SCLUST
+
+    /* --- Phase 3d: remount so every FatFs cache is rebuilt fresh --- */
+    f_unmount("");
+    if (f_mount(&g_fs, "", 1) != FR_OK) return -40;
+
+    return moves;
+}
+
+int nes_picker_defrag_compact(uint16_t *fb) {
+    cld_ctx_t ctx = {0};
+
+    /* Only allocate things we know the size of up front. The per-
+     * cluster maps are allocated inside cld_analyze once n_fatent is
+     * known so we don't oversize. */
+    ctx.files = (cld_file_t *)malloc(CLD_MAX_FILES * sizeof(cld_file_t));
+    ctx.buf_a = (uint8_t *)malloc((size_t)g_fs.csize * 512);
+    ctx.buf_b = (uint8_t *)malloc((size_t)g_fs.csize * 512);
+
+    int rc = 0;
+    if (!ctx.files || !ctx.buf_a || !ctx.buf_b) {
+        rc = -2;
+        goto cleanup;
+    }
+
+    s_defrag_last_error = 0;
+
+    /* Analysis. Encode any failure point so the error splash tells us
+     * WHY it failed rather than just "-3":
+     *   -1  n_fatent said 0 clusters (volume not mounted?)
+     *   -4  cluster count > CLD_ABS_MAX_CLUSTERS (volume too big)
+     *   -5  per-cluster map malloc failed (heap exhausted)
+     *   -6  dir-walk queue malloc failed
+     * The n_clust value is encoded too: returned as -1000 - n_clust
+     * when the -4 path fires, so the user sees something like -3400
+     * which tells us the volume has 2400 clusters. */
+    int ar = cld_analyze(&ctx);
+    if (ar != 0) {
+        if (ar == -4) {
+            rc = -1000 - (int)ctx.n_clust;   /* too-big, shows actual count */
+        } else {
+            rc = ar * 10;                      /* -10 / -40 / -50 / -60 */
+        }
+        goto cleanup;
+    }
+
+    if (ctx.n_files == 0) {
+        /* Nothing to defrag — show an empty summary quickly and return. */
+        rc = 0;
+        goto cleanup;
+    }
+
+    /* Count how many cluster cells need moving vs stuck. */
+    int moves_planned = 0, unplaceable = 0;
+    for (int f = 0; f < ctx.n_files; f++) {
+        if (ctx.files[f].target_sclust == 0) unplaceable++;
+    }
+    for (DWORD c = 0; c < ctx.n_clust; c++) {
+        if (CLD_BIT_GET(ctx.pinned_bits, c)) continue;
+        if (ctx.current_owner[c] != ctx.target_owner[c]) moves_planned++;
+    }
+
+    /* Preview + confirm. */
+    cld_show_preview(&ctx, fb, moves_planned, unplaceable);
+    int apply = cld_wait_confirm();
+    if (!apply) {
+        rc = 0;
+        goto cleanup;
+    }
+
+    nes_led_red();
+    int moves = cld_execute(&ctx, fb, moves_planned);
+    nes_led_off();
+    if (moves < 0) {
+        s_defrag_last_error = moves;
+        rc = moves;
+    } else {
+        rc = moves;
+    }
+
+cleanup:
+    free(ctx.files);
+    free(ctx.current_owner);
+    free(ctx.target_owner);
+    free(ctx.pinned_bits);
+    free(ctx.done_bits);
+    free(ctx.buf_a);
+    free(ctx.buf_b);
+    return rc;
+}
+
 int nes_picker_mmap_rom(const char *name,
                           const uint8_t **out_data, size_t *out_len) {
     if (!out_data || !out_len) return -1;
@@ -533,6 +1919,162 @@ int nes_picker_mmap_rom(const char *name,
     return 0;
 }
 
+/* Small helper: log2 of a known power-of-two in [1, 1<<20]. */
+static uint32_t ilog2_pow2(uint32_t v) {
+    uint32_t n = 0;
+    while ((v >>= 1) != 0) n++;
+    return n;
+}
+
+int nes_picker_mmap_rom_chain(const char *name, nes_picker_rom_chain_t *out) {
+    if (!out) return -1;
+    out->cluster_ptrs = NULL;
+    out->size = 0;
+    out->n_clusters = 0;
+
+    nes_flash_disk_flush();
+
+    char path[NES_PICKER_PATH_MAX];
+    snprintf(path, sizeof(path), ROMS_DIR_SLASH "%s", name);
+
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return -2;
+    FSIZE_t sz = f_size(&f);
+    if (sz < 16 || sz > 8 * 1024 * 1024) { f_close(&f); return -3; }
+
+    DWORD start_cluster = f.obj.sclust;
+    f_close(&f);
+    if (start_cluster < 2) return -4;
+
+    DWORD bytes_per_cluster = (DWORD)g_fs.csize * 512u;
+    DWORD n_clusters = ((DWORD)sz + bytes_per_cluster - 1) / bytes_per_cluster;
+
+    const uint8_t **ptrs = (const uint8_t **)malloc((size_t)n_clusters * sizeof(const uint8_t *));
+    if (!ptrs) return -6;
+
+    /* Walk the FAT16 chain, recording each cluster's XIP pointer.
+     * Mirrors the sector-level FAT read used by chain_is_contiguous;
+     * we need the LBA of every cluster, contiguous or not. */
+    DWORD clst = start_cluster;
+    DWORD sector_buf_lba = (DWORD)-1;
+    static uint8_t fat_sec[512];
+
+    for (DWORD i = 0; i < n_clusters; i++) {
+        LBA_t lba = cluster_to_lba(clst);
+        uintptr_t xip = (uintptr_t)XIP_BASE + (uintptr_t)FLASH_DISK_OFFSET
+                      + (uintptr_t)lba * 512u;
+        ptrs[i] = (const uint8_t *)xip;
+
+        if (i == n_clusters - 1) break;
+
+        DWORD entry_byte = clst * 2;   /* FAT16 */
+        DWORD entry_sec  = entry_byte / 512;
+        DWORD entry_off  = entry_byte % 512;
+        LBA_t fat_lba = (LBA_t)g_fs.fatbase + entry_sec;
+        if (fat_lba != sector_buf_lba) {
+            if (nes_flash_disk_read(fat_sec, (uint32_t)fat_lba, 1) != 0) {
+                free(ptrs);
+                return -7;
+            }
+            sector_buf_lba = fat_lba;
+        }
+        DWORD next = (DWORD)fat_sec[entry_off]
+                   | ((DWORD)fat_sec[entry_off + 1] << 8);
+        if (next == 0xFFFF || next < 2) {
+            /* Chain ended earlier than expected. Treat the short
+             * tail as readable (file_size header might have lied). */
+            out->n_clusters = i + 1;
+            out->cluster_ptrs  = ptrs;
+            out->cluster_shift = ilog2_pow2(bytes_per_cluster);
+            out->cluster_mask  = bytes_per_cluster - 1u;
+            out->size          = (size_t)sz;
+            return 0;
+        }
+        clst = next;
+    }
+
+    out->n_clusters    = n_clusters;
+    out->cluster_ptrs  = ptrs;
+    out->cluster_shift = ilog2_pow2(bytes_per_cluster);
+    out->cluster_mask  = bytes_per_cluster - 1u;
+    out->size          = (size_t)sz;
+    return 0;
+}
+
+void nes_picker_mmap_rom_chain_free(nes_picker_rom_chain_t *chain) {
+    if (!chain) return;
+    free((void *)chain->cluster_ptrs);
+    chain->cluster_ptrs = NULL;
+    chain->n_clusters   = 0;
+    chain->size         = 0;
+}
+
+/* Helper for diagnostics: walks the volume iteratively (same BFS as
+ * nes_picker_defrag_compact) and counts files where the cluster chain
+ * is non-contiguous. Skips dotfiles and sub-cluster files. Returns the
+ * count, or negative on error. */
+int nes_picker_count_fragmented_named(char *out_first_name, size_t out_sz) {
+    if (out_first_name && out_sz > 0) out_first_name[0] = 0;
+    enum { PATH_LEN = NES_PICKER_NAME_MAX, MAX_DIRS = 32 };
+    char (*queue)[PATH_LEN] = (char(*)[PATH_LEN])malloc((size_t)MAX_DIRS * PATH_LEN);
+    if (!queue) return -1;
+
+    int q_head = 0, q_tail = 0, frag = 0;
+    strncpy(queue[q_tail], "/", PATH_LEN - 1);
+    queue[q_tail][PATH_LEN - 1] = 0;
+    q_tail++;
+
+    while (q_head < q_tail) {
+        const char *dir_path = queue[q_head++];
+        DIR dir;
+        FILINFO info;
+        if (f_opendir(&dir, dir_path) != FR_OK) continue;
+        while (f_readdir(&dir, &info) == FR_OK) {
+            if (info.fname[0] == 0) break;
+            if (info.fname[0] == '.') continue;
+            char full[PATH_LEN];
+            if (dir_path[0] == '/' && dir_path[1] == 0)
+                snprintf(full, sizeof(full), "/%s", info.fname);
+            else
+                snprintf(full, sizeof(full), "%s/%s", dir_path, info.fname);
+
+            if (info.fattrib & AM_DIR) {
+                if (q_tail < MAX_DIRS) {
+                    strncpy(queue[q_tail], full, PATH_LEN - 1);
+                    queue[q_tail][PATH_LEN - 1] = 0;
+                    q_tail++;
+                }
+                continue;
+            }
+            if (info.fsize < 4096) continue;
+
+            FIL f;
+            if (f_open(&f, full, FA_READ) != FR_OK) continue;
+            DWORD sc = f.obj.sclust;
+            FSIZE_t sz = f_size(&f);
+            f_close(&f);
+            if (sz == 0 || sc < 2) continue;
+            DWORD bpc = (DWORD)g_fs.csize * 512u;
+            DWORD nc  = ((DWORD)sz + bpc - 1) / bpc;
+            if (!chain_is_contiguous(sc, nc)) {
+                if (frag == 0 && out_first_name && out_sz > 0) {
+                    strncpy(out_first_name, full, out_sz - 1);
+                    out_first_name[out_sz - 1] = 0;
+                }
+                frag++;
+            }
+        }
+        f_closedir(&dir);
+    }
+
+    free(queue);
+    return frag;
+}
+
+int nes_picker_count_fragmented(void) {
+    return nes_picker_count_fragmented_named(NULL, 0);
+}
+
 /* --- drawing helpers ----------------------------------------------- */
 
 /* --- splash screens ------------------------------------------------ */
@@ -554,7 +2096,8 @@ static void name_no_ext(char *dst, size_t dstsz, const char *src) {
     dst[dstsz - 1] = 0;
     size_t L = strlen(dst);
     if (L >= 4 && (strcasecmp(dst + L - 4, ".nes") == 0
-                || strcasecmp(dst + L - 4, ".sms") == 0)) {
+                || strcasecmp(dst + L - 4, ".sms") == 0
+                || strcasecmp(dst + L - 4, ".gbc") == 0)) {
         dst[L - 4] = 0;
     } else if (L >= 3 && (strcasecmp(dst + L - 3, ".gg") == 0
                        || strcasecmp(dst + L - 3, ".gb") == 0)) {
@@ -1352,7 +2895,7 @@ int nes_picker_run(uint16_t *fb,
              * menu_item enum stays stable otherwise so the picker
              * state machine below doesn't care about conditional
              * item ordering. */
-            enum { ACT_NONE, ACT_LOBBY };
+            enum { ACT_NONE, ACT_DEFRAG, ACT_LOBBY };
 
             nes_menu_item_t items[] = {
                 { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
@@ -1381,6 +2924,8 @@ int nes_picker_run(uint16_t *fb,
                   .value_ptr = &v_storage_used_kb, .min = 0,
                   .max = v_storage_total_kb > 0 ? v_storage_total_kb : 1,
                   .enabled = true },
+                { .kind = NES_MENU_KIND_ACTION, .label = "Defragment now",
+                  .enabled = true, .action_id = ACT_DEFRAG },
                 { .kind = NES_MENU_KIND_INFO, .label = "About",
                   .info_text = about_text, .enabled = true },
 #ifdef THUMBYONE_SLOT_MODE
@@ -1424,6 +2969,82 @@ int nes_picker_run(uint16_t *fb,
                 n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
                 sel = reseat_sel(view, n_view, prev_real);
                 top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+            }
+
+            if (r.kind == NES_MENU_ACTION && r.action_id == ACT_DEFRAG) {
+                /* Manual whole-volume compact. Reports both the
+                 * number of files rewritten and how many are still
+                 * fragmented after. If the latter > 0 despite a
+                 * successful pass, either the compact algorithm or
+                 * chain_is_contiguous has a bug.
+                 *
+                 * Show a dedicated summary splash the user dismisses
+                 * with any button — a brief OSD gets missed on long
+                 * runs where the eye is tracking the red overlay. */
+                char stuck[NES_PICKER_NAME_MAX] = {0};
+                int before = nes_picker_count_fragmented_named(NULL, 0);
+                int rc     = nes_picker_defrag_compact(fb);
+                int after  = nes_picker_count_fragmented_named(stuck, sizeof(stuck));
+                int last_err = nes_picker_defrag_last_error();
+
+                fb_clear(fb, COL_BG);
+                nes_font_draw(fb, "DEFRAG DONE", 28, 22, COL_TITLE);
+                char l1[32], l2[32], l3[32], l4[40];
+                if (rc >= 0) {
+                    snprintf(l1, sizeof(l1), "%d rewrote", rc);
+                    snprintf(l2, sizeof(l2), "frag: %d -> %d", before, after);
+                    const char *verdict =
+                        (after == 0)        ? "all contiguous"
+                      : (after < before)    ? "partial progress"
+                      : (before == 0)       ? "nothing to do"
+                                            : "algo stuck!";
+                    snprintf(l3, sizeof(l3), "%s", verdict);
+                    if (after > 0) {
+                        snprintf(l4, sizeof(l4), "err code: %d", last_err);
+                    } else {
+                        l4[0] = 0;
+                    }
+                } else {
+                    snprintf(l1, sizeof(l1), "error %d", rc);
+                    snprintf(l2, sizeof(l2), "pass aborted");
+                    snprintf(l3, sizeof(l3), " ");
+                    l4[0] = 0;
+                }
+                nes_font_draw(fb, l1, (FB_W - nes_font_width(l1)) / 2, 40, COL_FG);
+                nes_font_draw(fb, l2, (FB_W - nes_font_width(l2)) / 2, 52, COL_FG);
+                nes_font_draw(fb, l3, (FB_W - nes_font_width(l3)) / 2, 64,
+                              (after == 0) ? COL_HIGHLT : COL_ERR);
+                if (l4[0]) {
+                    nes_font_draw(fb, l4,
+                                   (FB_W - nes_font_width(l4)) / 2, 80,
+                                   COL_ERR);
+                }
+                nes_font_draw(fb, "press any button",
+                              (FB_W - nes_font_width("press any button")) / 2,
+                              108, COL_DIM);
+                nes_lcd_wait_idle();
+                nes_lcd_present(fb);
+
+                /* Drain current button state so "Resume"'s A doesn't
+                 * immediately satisfy the wait. nes_buttons_read covers
+                 * dpad + A + B; nes_buttons_menu_pressed covers MENU;
+                 * shoulders via direct GPIO. */
+                while (nes_buttons_read() != 0
+                       || nes_buttons_menu_pressed()
+                       || !gpio_get(BTN_LB_GP)
+                       || !gpio_get(BTN_RB_GP)) {
+                    tud_task();
+                    sleep_ms(10);
+                }
+                /* Now wait for a fresh press. */
+                while (nes_buttons_read() == 0
+                       && !nes_buttons_menu_pressed()
+                       && gpio_get(BTN_LB_GP)
+                       && gpio_get(BTN_RB_GP)) {
+                    tud_task();
+                    sleep_ms(10);
+                }
+                prev = nes_buttons_read();   /* so we don't treat it as a picker press */
             }
 
 #ifdef THUMBYONE_SLOT_MODE

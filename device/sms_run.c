@@ -366,6 +366,8 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
     if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
+        /* -35 = fragmented; user runs picker MENU -> Defragment now
+         * to compact the FAT. */
         if (!rom_alloc) return -30 + mmap_rc;
         rom_const = rom_alloc;
     }

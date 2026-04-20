@@ -97,16 +97,15 @@ int main(int argc, char **argv)
         gbc_set_buttons(poll_buttons());
         gbc_run_frame();
 
-        const uint8_t  *fb  = gbc_framebuffer();
-        const uint16_t *pal = gbc_palette_rgb565();
+        const uint16_t *fb = gbc_framebuffer();
         if (fb) {
             void *px;
             int   tex_pitch;
             SDL_LockTexture(tex, NULL, &px, &tex_pitch);
             for (int y = 0; y < GBC_SCREEN_H; y++) {
-                const uint8_t *src = fb + y * GBC_SCREEN_W;
+                const uint16_t *src = fb + y * GBC_SCREEN_W;
                 uint16_t *dst = (uint16_t *)((uint8_t *)px + y * tex_pitch);
-                for (int x = 0; x < GBC_SCREEN_W; x++) dst[x] = pal[src[x]];
+                memcpy(dst, src, GBC_SCREEN_W * sizeof(uint16_t));
             }
             SDL_UnlockTexture(tex);
         }

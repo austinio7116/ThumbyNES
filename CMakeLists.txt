@@ -85,6 +85,7 @@ target_compile_definitions(smsplus PRIVATE)
 set(PEANUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/peanut_gb)
 add_library(peanut_gb STATIC ${PEANUT_DIR}/minigb_apu.c)
 target_include_directories(peanut_gb PUBLIC ${PEANUT_DIR})
+target_compile_definitions(peanut_gb PUBLIC PEANUT_FULL_GBC_SUPPORT=1)
 target_compile_options(peanut_gb PRIVATE -Wno-implicit-fallthrough -Wno-unused-function -Wno-unused-variable)
 
 # ----------------------------------------------------------------------

@@ -318,7 +318,8 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         rom_alloc = nes_picker_load_rom(name, &sz);
         /* Encode the mmap return code so the splash tells us exactly
          * why the load failed: -32 = f_open, -33 = size out of range,
-         * -34 = bad start cluster, -35 = chain not contiguous. */
+         * -34 = bad start cluster, -35 = chain not contiguous (user
+         * can run picker MENU -> Defragment now to compact the FAT). */
         if (!rom_alloc) return -30 + mmap_rc;
         rom_const = rom_alloc;
     }

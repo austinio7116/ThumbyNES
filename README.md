@@ -1,5 +1,9 @@
 # ThumbyNES
 
+> 🎮 **ThumbyNES is now part of [ThumbyOne](https://github.com/austinio7116/ThumbyOne)** — a unified multi-boot firmware that ships ThumbyNES, ThumbyP8 (PICO-8), ThumbyDOOM, and MicroPython + Tiny Game Engine in a single UF2 with one shared USB drive for ROMs, carts, and Python games. Most users should flash ThumbyOne instead of the standalone ThumbyNES firmware below.
+>
+> This repo remains the standalone build of ThumbyNES and the source of truth for the emulator itself — the code here is what ThumbyOne's NES slot compiles. Use this repo if you specifically want NES-only firmware, or to hack on the emulator code.
+
 A bare-metal **NES + Sega Master System + Game Gear + Game Boy (DMG)**
 emulator firmware for the **TinyCircuits Thumby Color** (RP2350,
 128×128 RGB565 LCD, PWM audio, 520 KB SRAM, 16 MB flash).

@@ -112,31 +112,30 @@ static uint8_t read_gb_buttons(void) {
  *   horizontal:  src_x = dst_x * 5 / 4   (160 / 128 = 1.25)
  *   vertical:    src_y = dst_y * 9 / 8   (144 / 128 = 1.125)
  * Same trick as the GG fit blitter — fills the whole screen with
- * minimal warping. */
-static void blit_fit_gb(uint16_t *fb, const uint8_t *src,
-                         const uint16_t *pal) {
+ * minimal warping. Source is RGB565 pre-resolved by gb_core. */
+static void blit_fit_gb(uint16_t *fb, const uint16_t *src) {
     for (int dy = 0; dy < 128; dy++) {
         int sy = (dy * 9) / 8;
-        const uint8_t *srow = src + sy * GBC_SCREEN_W;
-        uint16_t      *drow = fb + dy * 128;
+        const uint16_t *srow = src + sy * GBC_SCREEN_W;
+        uint16_t       *drow = fb + dy * 128;
         for (int dx = 0; dx < 128; dx++) {
             int sx = (dx * 5) / 4;
-            drow[dx] = pal[srow[sx]];
+            drow[dx] = srow[sx];
         }
     }
 }
 
 /* GB 1:1 native crop into a 128x128 window. pan in source coords. */
-static void blit_crop_gb(uint16_t *fb, const uint8_t *src,
-                          const uint16_t *pal, int pan_x, int pan_y) {
+static void blit_crop_gb(uint16_t *fb, const uint16_t *src,
+                          int pan_x, int pan_y) {
     if (pan_x < 0)  pan_x = 0;
     if (pan_x > 32) pan_x = 32;     /* 160 - 128 */
     if (pan_y < 0)  pan_y = 0;
     if (pan_y > 16) pan_y = 16;     /* 144 - 128 */
     for (int dy = 0; dy < 128; dy++) {
-        const uint8_t *srow = src + (pan_y + dy) * GBC_SCREEN_W + pan_x;
-        uint16_t      *drow = fb + dy * 128;
-        for (int dx = 0; dx < 128; dx++) drow[dx] = pal[srow[dx]];
+        const uint16_t *srow = src + (pan_y + dy) * GBC_SCREEN_W + pan_x;
+        uint16_t       *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) drow[dx] = srow[dx];
     }
 }
 
@@ -243,17 +242,39 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     const uint8_t *rom_const = NULL;
     uint8_t       *rom_alloc = NULL;
     size_t         sz        = 0;
-    int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
+    /* -5 (chain not contiguous) routes to chained-XIP, which reads
+     * the fragmented file straight out of flash via a per-cluster
+     * LBA table. Any other mmap failure falls through to the RAM
+     * load fallback. */
+    nes_picker_rom_chain_t chain = {0};
+    bool use_chain = false;
+    int  mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
+    if (mmap_rc == -5) {
+        if (nes_picker_mmap_rom_chain(name, &chain) == 0) {
+            sz        = chain.size;
+            use_chain = true;
+            mmap_rc   = 0;
+        }
+    }
     if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
         if (!rom_alloc) return -30 + mmap_rc;   /* -32 .. -35 */
         rom_const = rom_alloc;
     }
 
-    if (gbc_init(22050) != 0)              { free(rom_alloc); return -20; }
-    int load_rc = gbc_load_rom(rom_const, sz);
+    if (gbc_init(22050) != 0) {
+        free(rom_alloc);
+        nes_picker_mmap_rom_chain_free(&chain);
+        return -20;
+    }
+    int load_rc = use_chain
+        ? gbc_load_rom_chain(chain.cluster_ptrs,
+                              chain.cluster_shift,
+                              chain.cluster_mask, sz)
+        : gbc_load_rom(rom_const, sz);
     if (load_rc != 0) {
         free(rom_alloc);
+        nes_picker_mmap_rom_chain_free(&chain);
         /* Translate the wrapper code to a device-side label so the
          * user can tell why the cart was rejected:
          *   -1 -> -10 "bad header / too small"
@@ -289,7 +310,9 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     uint64_t       last_input_us = (uint64_t)time_us_64();
     bool           sleeping = false;
 
-    const uint16_t *pal = gbc_palette_rgb565();
+    /* Palette lookup is baked into the core's framebuffer now — the
+     * blitters do a pure word copy. gbc_set_palette still updates the
+     * DMG-mode palette used by gb_core internally. */
 
     int  menu_press_ms = 0;
     int  menu_was_down = 0;
@@ -420,36 +443,51 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             bool sta_exists = (f_open(&_f, sta_path, FA_READ) == FR_OK);
             if (sta_exists) f_close(&_f);
 
-            nes_menu_item_t items[] = {
-                { .kind = NES_MENU_KIND_ACTION, .label = "Resume",
-                  .enabled = true, .action_id = ACT_NONE },
-                { .kind = NES_MENU_KIND_ACTION, .label = "Save state",
-                  .enabled = true,       .action_id = ACT_SAVE_STATE },
-                { .kind = NES_MENU_KIND_ACTION, .label = "Load state",
-                  .enabled = sta_exists, .action_id = ACT_LOAD_STATE },
-                { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
-                  .value_ptr = &v_scale, .choices = display_choices, .num_choices = 2,
-                  .enabled = true },
-                { .kind = NES_MENU_KIND_SLIDER, .label = "Volume",
-                  .value_ptr = &v_vol, .min = VOL_MIN, .max = VOL_MAX,
-                  .enabled = true },
+            /* Build the items list imperatively so the optional
+             * "fragmented" info row — only shown when the current
+             * session is running the chained-XIP fallback — can slot
+             * in without a surprise noise row on healthy carts. */
+            nes_menu_item_t items[16];
+            int n_items = 0;
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_ACTION,
+                  .label = "Resume", .enabled = true, .action_id = ACT_NONE };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_ACTION,
+                  .label = "Save state", .enabled = true, .action_id = ACT_SAVE_STATE };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_ACTION,
+                  .label = "Load state", .enabled = sta_exists, .action_id = ACT_LOAD_STATE };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_CHOICE,
+                  .label = "Display", .value_ptr = &v_scale,
+                  .choices = display_choices, .num_choices = 2, .enabled = true };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_SLIDER,
+                  .label = "Volume", .value_ptr = &v_vol,
+                  .min = VOL_MIN, .max = VOL_MAX, .enabled = true };
 #ifdef THUMBYONE_SLOT_MODE
-                { .kind = NES_MENU_KIND_SLIDER, .label = "Brightness",
-                  .value_ptr = &v_bri, .min = 0, .max = 255, .enabled = true },
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_SLIDER,
+                  .label = "Brightness", .value_ptr = &v_bri,
+                  .min = 0, .max = 255, .enabled = true };
 #endif
-                { .kind = NES_MENU_KIND_TOGGLE, .label = "Fast-fwd",
-                  .value_ptr = &v_ff, .enabled = true },
-                { .kind = NES_MENU_KIND_TOGGLE, .label = "Show FPS",
-                  .value_ptr = &v_fps, .enabled = true },
-                { .kind = NES_MENU_KIND_CHOICE, .label = "Palette",
-                  .value_ptr = &v_pal, .choices = palette_names_arr,
-                  .num_choices = GBC_PALETTE_COUNT, .enabled = true },
-                { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
-                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
-                  .enabled = true, .suffix = "next launch" },
-                { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
-                  .enabled = true, .action_id = ACT_QUIT },
-            };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_TOGGLE,
+                  .label = "Fast-fwd", .value_ptr = &v_ff, .enabled = true };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_TOGGLE,
+                  .label = "Show FPS", .value_ptr = &v_fps, .enabled = true };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_CHOICE,
+                  .label = "Palette", .value_ptr = &v_pal,
+                  .choices = palette_names_arr,
+                  .num_choices = GBC_PALETTE_COUNT, .enabled = true };
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_CHOICE,
+                  .label = "Overclock", .value_ptr = &v_clock,
+                  .choices = clock_choices, .num_choices = 5,
+                  .enabled = true, .suffix = "next launch" };
+            if (use_chain) {
+                /* Running from the chained-XIP fallback — ROM file is
+                 * fragmented on flash. Tell the user a defragment
+                 * might recover the contiguous fast path. */
+                items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_INFO,
+                      .label = "Storage", .info_text = "fragmented",
+                      .enabled = true };
+            }
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_ACTION,
+                  .label = "Quit to picker", .enabled = true, .action_id = ACT_QUIT };
 
             char sub[28];
             strncpy(sub, name, sizeof(sub) - 1);
@@ -457,8 +495,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             char *dot = strrchr(sub, '.');
             if (dot) *dot = 0;
 
-            nes_menu_result_t r = nes_menu_run(fb, "PAUSED", sub,
-                                                items, sizeof(items) / sizeof(items[0]));
+            nes_menu_result_t r = nes_menu_run(fb, "PAUSED", sub, items, n_items);
 
             if (v_scale != (int)scale_mode) {
                 scale_mode = (scale_mode_t)v_scale;
@@ -535,11 +572,11 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             unsaved_play_frames += frame_runs;
         }
 
-        const uint8_t *frame = gbc_framebuffer();
+        const uint16_t *frame = gbc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
-            if (scale_mode == SCALE_CROP) blit_crop_gb(fb, frame, pal, pan_x, pan_y);
-            else                          blit_fit_gb (fb, frame, pal);
+            if (scale_mode == SCALE_CROP) blit_crop_gb(fb, frame, pan_x, pan_y);
+            else                          blit_fit_gb (fb, frame);
             if (show_fps) {
                 char ftxt[12];
                 snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
@@ -587,6 +624,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     nes_lcd_backlight(1);
     gbc_shutdown();
     free(rom_alloc);
+    nes_picker_mmap_rom_chain_free(&chain);
     while (!gpio_get(BTN_MENU_GP)) sleep_ms(10);
     return 0;
 }
