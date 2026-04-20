@@ -129,7 +129,7 @@ system-wide settings, current device status, and one-shot actions:
 |---|---|---|
 | Resume | Action | close the overlay |
 | Volume | Slider 0..30 | global master volume — see [Audio](#audio) below |
-| Overclock | Choice | global system clock: 125 / 150 / 200 / 250 MHz, takes effect on next launch |
+| Overclock | Choice | global system clock: 125 / 150 / 200 / 250 / 300 MHz, takes effect on next launch |
 | Display | Choice HERO / LIST | swaps the picker layout |
 | Sort | Choice ALPHA / FAVS / SIZE | favs-first puts your starred carts on top, size sorts descending |
 | Battery | Info row | live percent + voltage; flips to `CHRG` when external power is detected; bar strip shows level |
@@ -250,7 +250,7 @@ is shared:
 | BLEND | NES, SMS | toggle 2×2 box-average smoothing |
 | Palette | NES (6 choices), GB (6 choices) | per-cart |
 | Region | NES | NTSC ↔ PAL — takes effect on the next launch |
-| Overclock | all | per-cart override: `global` or 125/150/200/250 MHz, takes effect on the next launch |
+| Overclock | all | per-cart override: `global` or 125/150/200/250/300 MHz, takes effect on the next launch |
 | Quit to picker | all | exit the cart |
 
 The menu controls (inside the overlay):
@@ -295,14 +295,15 @@ range; back the slider off if you hear distortion.
 
 ## Overclock
 
-The system clock is configurable across four values:
+The system clock is configurable across five values:
 
 | Value | Notes |
 |---|---|
 | **125 MHz** | Lowest power; may struggle to hit 60 fps on heavier NES / SMS carts |
 | **150 MHz** | RP2350 stock-ish |
 | **200 MHz** | |
-| **250 MHz** | Default; the original fixed clock |
+| **250 MHz** | Default; matches the v1.0–1.03 fixed clock |
+| **300 MHz** | Extra headroom for the v1.04 GB / GBC / GG coverage-blend scaler on dense carts. Uses the default core voltage — if a specific cart shows instability at 300, step down to 250. |
 
 Two scopes:
 
@@ -310,7 +311,7 @@ Two scopes:
   applies to any cart that doesn't have a per-cart override.
 - **Per-cart** (in-game menu → Overclock) — written to the cart's
   `.cfg` as a `clock_mhz` field. The first choice is `global` which
-  clears the override; the others (125/150/200/250) pin that
+  clears the override; the others (125/150/200/250/300) pin that
   specific cart to that exact clock.
 
 Resolution order at launch time: **per-cart override → global →
@@ -409,12 +410,28 @@ The entire native frame is downscaled to fit the 128×128 display.
 |---|---|---|---|
 | **NES** | 256×240 | 128×120 | 4 px black bars top + bottom |
 | **SMS** | 256×192 | 128×96  | 16 px black bars top + bottom |
-| **Game Gear** | 160×144 | 128×128 | asymmetric 5:4 / 9:8 nearest, **fills the whole screen** |
-| **Game Boy** | 160×144 | 128×128 | asymmetric 5:4 / 9:8 nearest, **fills the whole screen** |
+| **Game Gear** | 160×144 | 128×128 | asymmetric 5:4 × 9:8, **fills the whole screen** |
+| **Game Boy** | 160×144 | 128×128 | asymmetric 5:4 × 9:8, **fills the whole screen** |
 
-With **BLEND** on (the NES/SMS default) each output pixel is a
-2×2 box average of four source pixels — softer image, no
-nearest-neighbor shimmer. Toggle BLEND from the in-game menu.
+With **BLEND** on (the default on every system) each output pixel
+blends the source pixels that cover its footprint — softer image,
+no nearest-neighbour shimmer, readable text in dialogue and menus.
+Specifics per system:
+
+- **NES / SMS** — 2×2 box average of four source pixels (integer
+  2:1 scaling downstairs).
+- **Game Gear / Game Boy (CGB)** — coverage-weighted 2×2 blend in
+  RGB565 using the packed-lerp trick, matching the exact 1.25 ×
+  1.125 source footprint of each output pixel. No columns or rows
+  get dropped.
+- **Game Boy (DMG)** — palette-aware blend: fractional shade index
+  (0..3) from the four source pixels, then linear interpolation
+  between the two bracketing palette entries. Keeps output on the
+  chosen DMG palette's own gradient so the classic Nintendo greens
+  don't acquire a teal tint in intermediate blends.
+
+Toggle BLEND from the in-game menu — the row is enabled in FIT
+mode and greyed in CROP / SMS FILL where it has no meaning.
 
 ### FILL (SMS only)
 
@@ -699,7 +716,7 @@ no-op (preview shows `0 mv`, zero cluster writes).
 
 | | |
 |---|---|
-| **MCU** | RP2350 dual-core Cortex-M33 @ 125 / 150 / 200 / 250 MHz |
+| **MCU** | RP2350 dual-core Cortex-M33 @ 125 / 150 / 200 / 250 / 300 MHz |
 | **Display** | 128×128 RGB565, GC9107 LCD over SPI + DMA |
 | **Audio** | 9-bit PWM on GP23 @ 22050 Hz sample rate, hardware IRQ-driven ring buffer |
 | **Storage** | 12 MB FAT16 volume on internal QSPI flash, exposed as USB MSC |
@@ -772,14 +789,26 @@ The Thumby Color is 128×128. Each runner has its own scaler set:
 - **`blit_fit_sms`** — 256×192 → 128×96 nearest, 16 px letterbox.
 - **`blit_blend_sms`** — 256×192 → 128×96 with 2×2 box average.
 - **`blit_crop_sms`** — 1:1 native crop with pan (SMS only).
-- **`blit_fit_gg`** — 160×144 → 128×128 with asymmetric 5:4 / 9:8
-  nearest. Fills the whole screen with no letterbox.
+- **`blit_fit_gg_nearest`** — 160×144 → 128×128 with asymmetric
+  5:4 × 9:8 nearest. Fills the whole screen with no letterbox.
+  Used when BLEND is off.
+- **`blit_fit_gg_blend`** — same framing, coverage-weighted 2×2
+  blend via the packed-RGB565 lerp (one 32-bit multiply per lerp).
+  Default on GG.
 - **`blit_crop_gg`** — 1:1 native crop into a 128×128 window of the
   160×144 viewport with live pan.
 
 **Game Boy** (`gb_run.c`)
-- **`blit_fit_gb`** — 160×144 → 128×128 with asymmetric 5:4 / 9:8
-  nearest. Same trick as the GG fit blitter.
+- **`blit_fit_gb_nearest`** — 160×144 → 128×128 with asymmetric
+  5:4 × 9:8 nearest. Used when BLEND is off.
+- **`blit_fit_gb_cgb_blend`** — coverage-weighted 2×2 blend in
+  RGB565 (packed lerp). Default on CGB carts.
+- **`blit_fit_gb_dmg_blend`** — palette-index-space blend. Consumes
+  the DMG shade-index buffer that `gb_core` populates alongside the
+  RGB565 framebuffer, blends shade indices with coverage weights,
+  then lerps between bracketing palette entries. Default on DMG
+  carts; preserves palette gradient (no hue shift on classic
+  Nintendo green).
 - **`blit_crop_gb`** — 1:1 native crop with live pan.
 
 ### Audio pipeline
@@ -978,6 +1007,32 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.04
+
+- **Better Game Boy / Game Gear / Game Boy Color FIT scaling.** The
+  old asymmetric 5:4 × 9:8 nearest dropped every 5th source column
+  and every 9th row — thin text strokes vanished in menus,
+  dialogue, HUDs. The FIT path now has a **coverage-weighted
+  blend**: every source pixel contributes to the output proportional
+  to its exact 1.25 × 1.125 footprint, nothing drops. Selected
+  per-cart via a new **BLEND toggle** in the in-game menu (default
+  on for GB / GBC / GG); flip it off to go back to the pure
+  nearest look on pixel-art carts.
+- **Palette-aware DMG blend.** On DMG carts the blend runs in
+  palette-index space and then interpolates between bracketing
+  palette entries — preserves hue on the classic 4-shade Nintendo
+  greens (where a naive RGB565 blend was introducing a visible teal
+  shift between the lighter and darker greens).
+- **Packed-RGB565 lerp** for the fast path. One 32-bit multiply per
+  pixel-lerp (all three channels in parallel via the `0x07E0F81F`
+  mask trick) instead of four channel-separated multiplies. ~3×
+  less arithmetic per output pixel; full 128×128 blend stays well
+  under 1 ms at 250 MHz when placed in SRAM.
+- **New 300 MHz overclock option** alongside the existing
+  125/150/200/250 MHz choices. Both the global Overclock row in the
+  picker menu and the per-cart Overclock in each in-game menu now
+  offer it. Default stays at 250 MHz.
 
 ### v1.03
 

@@ -226,15 +226,25 @@ static void blit_crop_sms(uint16_t *fb, const uint8_t *src,
     }
 }
 
-/* GG 160x144 → fills the 128x128 screen with asymmetric scaling.
+/* GG 160x144 → fills the 128x128 screen with asymmetric 5:4 × 9:8
+ * scaling. Two variants selected by the per-cart BLEND toggle:
  *
- *   160 → 128 horizontal: 5:4 reduction.  src_x = dst_x * 5 / 4
- *   144 → 128 vertical:   9:8 reduction.  src_y = dst_y * 9 / 8
+ *   blit_fit_gg_nearest — pixel-perfect nearest; drops every 5th
+ *                         source column and every 9th source row.
+ *                         Used when BLEND is OFF.
+ *   blit_fit_gg_blend   — area-weighted coverage blend in RGB565
+ *                         via the packed-lerp trick (one 32-bit
+ *                         multiply per lerp, all three channels in
+ *                         parallel). Used when BLEND is ON.
+ *
+ * GG uses the full SMS 64-entry palette so RGB565 blending works
+ * well enough — unlike DMG which has only 4 shades on a non-linear
+ * gradient and needs palette-space interpolation to avoid hue shift.
  *
  * The viewport (vx, vy) is where smsplus rendered the GG sub-rect
  * inside the 256x192 SMS bitmap, so we add it as a fixed offset. */
-static void blit_fit_gg(uint16_t *fb, const uint8_t *src, const uint16_t *pal,
-                         int vx, int vy) {
+static void blit_fit_gg_nearest(uint16_t *fb, const uint8_t *src, const uint16_t *pal,
+                                 int vx, int vy) {
     for (int dy = 0; dy < 128; dy++) {
         int sy = vy + (dy * 9) / 8;
         const uint8_t *srow = src + sy * 256 + vx;
@@ -242,6 +252,49 @@ static void blit_fit_gg(uint16_t *fb, const uint8_t *src, const uint16_t *pal,
         for (int dx = 0; dx < 128; dx++) {
             int sx = (dx * 5) / 4;
             drow[dx] = pal[srow[sx]];
+        }
+    }
+}
+
+/* Packed-RGB565 lerp helpers — same form as the GB runner uses. See
+ * gb_run.c's blit_fit_gb_cgb_blend for the explanation. */
+static inline uint32_t gg_exp565(uint16_t p) {
+    uint32_t x = p;
+    return (x | (x << 16)) & 0x07E0F81Fu;
+}
+static inline uint32_t gg_lerp565p(uint32_t A, uint32_t B, uint32_t w) {
+    return (A + (((B - A) * w) >> 5)) & 0x07E0F81Fu;
+}
+static inline uint16_t gg_pak565(uint32_t c) {
+    return (uint16_t)((c | (c >> 16)) & 0xFFFFu);
+}
+
+static const uint8_t gg_fit_hw[4] = { 6, 13, 19, 26 };
+static const uint8_t gg_fit_vw[8] = { 4, 7, 11, 14, 18, 21, 25, 28 };
+
+static void __not_in_flash_func(blit_fit_gg_blend)(uint16_t *fb, const uint8_t *src,
+                                                    const uint16_t *pal,
+                                                    int vx, int vy) {
+    for (int dy = 0; dy < 128; dy++) {
+        int sy = vy + (dy * 9) / 8;
+        uint32_t wy = gg_fit_vw[dy & 7];
+        const uint8_t *r0 = src + sy * 256 + vx;
+        const uint8_t *r1 = src + (sy + 1) * 256 + vx;
+        uint16_t *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx = (dx * 5) / 4;
+            uint32_t wx = gg_fit_hw[dx & 3];
+
+            uint32_t a = gg_exp565(pal[r0[sx]]);
+            uint32_t b = gg_exp565(pal[r0[sx + 1]]);
+            uint32_t c = gg_exp565(pal[r1[sx]]);
+            uint32_t d = gg_exp565(pal[r1[sx + 1]]);
+
+            uint32_t top = gg_lerp565p(a, b, wx);
+            uint32_t bot = gg_lerp565p(c, d, wx);
+            uint32_t out = gg_lerp565p(top, bot, wy);
+
+            drow[dx] = gg_pak565(out);
         }
     }
 }
@@ -545,9 +598,10 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (cart_clock_mhz == 150) v_clock = 2;
             if (cart_clock_mhz == 200) v_clock = 3;
             if (cart_clock_mhz == 250) v_clock = 4;
+            if (cart_clock_mhz == 300) v_clock = 5;
 
-            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
-            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
+            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz","300MHz" };
+            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250,     300 };
 
             enum { ACT_NONE, ACT_SAVE_STATE, ACT_LOAD_STATE, ACT_QUIT };
 
@@ -578,10 +632,15 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .value_ptr = &v_ff, .enabled = true },
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "Show FPS",
                   .value_ptr = &v_fps, .enabled = true },
+                /* BLEND toggles FIT between nearest and coverage-
+                 * weighted blend. On SMS FILL the blend is fixed, on
+                 * CROP it has no meaning — disable in both. Now works
+                 * on GG (was previously greyed for GG even though the
+                 * toggle meant something for SMS's 2:1 FIT). */
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "BLEND",
-                  .value_ptr = &v_blend, .enabled = !gg },
+                  .value_ptr = &v_blend, .enabled = (scale_mode == SCALE_FIT) },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
-                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 6,
                   .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
                   .enabled = true, .action_id = ACT_QUIT },
@@ -699,8 +758,10 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (gg) {
                 if (scale_mode == SCALE_CROP)
                     blit_crop_gg(fb, frame, pal, vx, vy, pan_x, pan_y);
+                else if (blend)
+                    blit_fit_gg_blend  (fb, frame, pal, vx, vy);
                 else
-                    blit_fit_gg (fb, frame, pal, vx, vy);
+                    blit_fit_gg_nearest(fb, frame, pal, vx, vy);
             } else if (scale_mode == SCALE_CROP) {
                 blit_crop_sms(fb, frame, pal, pan_x, pan_y);
             } else if (scale_mode == SCALE_FILL) {

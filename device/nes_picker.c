@@ -2244,7 +2244,7 @@ static int g_volume_cached = -1;
 static int g_clock_cached  = -1;
 
 static int valid_clock_mhz(int m) {
-    return m == 125 || m == 150 || m == 200 || m == 250;
+    return m == 125 || m == 150 || m == 200 || m == 250 || m == 300;
 }
 
 static void global_load(void) {
@@ -2920,7 +2920,9 @@ int nes_picker_run(uint16_t *fb,
             int v_clock_mhz = nes_picker_global_clock_mhz();
             int v_clock = (v_clock_mhz == 125) ? 0
                         : (v_clock_mhz == 150) ? 1
-                        : (v_clock_mhz == 200) ? 2 : 3;
+                        : (v_clock_mhz == 200) ? 2
+                        : (v_clock_mhz == 250) ? 3
+                        : (v_clock_mhz == 300) ? 4 : 3;
 
             /* Storage info — read once when the menu opens. Under
              * ThumbyOne slot mode, format via the shared helper so
@@ -2987,12 +2989,12 @@ int nes_picker_run(uint16_t *fb,
 #endif
 
             char about_text[24];
-            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.03");
+            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.04");
 
             static const char * const view_choices[]  = { "HERO", "LIST" };
             static const char * const sort_choices[]  = { "ALPHA", "FAVS", "SIZE" };
-            static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz" };
-            static const int          clock_mhz[]     = {  125,      150,      200,      250 };
+            static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz", "300MHz" };
+            static const int          clock_mhz[]     = {  125,      150,      200,      250,      300 };
 
             /* ACT_LOBBY is only offered when compiled into ThumbyOne
              * (standalone NES has nothing to fall back to). The
@@ -3011,7 +3013,7 @@ int nes_picker_run(uint16_t *fb,
                   .value_ptr = &v_bri, .min = 0, .max = 255, .enabled = true },
 #endif
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
-                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 4,
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
                   .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
                   .value_ptr = &v_view, .choices = view_choices, .num_choices = 2,

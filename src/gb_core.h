@@ -77,6 +77,18 @@ const uint16_t *gbc_framebuffer(void);
  * selection is a no-op on a CGB cart. */
 bool gbc_is_cgb_cart(void);
 
+/* DMG-only: pointer to a per-pixel shade-index buffer (0..3 values,
+ * one u8 per pixel, stride = GBC_SCREEN_W). Populated alongside the
+ * RGB565 framebuffer for DMG carts so the scaler can blend in
+ * palette-index space rather than blending resolved RGB565 colours
+ * — the latter interpolates between non-collinear palette entries
+ * and shifts hue (classic Nintendo-green shade 0 and shade 2 differ
+ * enough in their blue component that a linear RGB blend reads as
+ * teal-shifted). Returns NULL on CGB carts, where per-pixel CGB
+ * palette resolution happens per-pixel in the line callback and
+ * there is no meaningful shade index to expose. */
+const uint8_t *gbc_shade_buffer(void);
+
 /* RGB565 palette (4 entries — index by shade). Updated by
  * gbc_set_palette(). Only meaningful for DMG carts. */
 const uint16_t *gbc_palette_rgb565(void);

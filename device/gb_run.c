@@ -7,17 +7,18 @@
  * scaler set and the controller bit layout.
  *
  * The Game Boy is 160x144 native; the Thumby Color LCD is 128x128.
- * Three scale modes:
+ * Two scale modes:
  *
- *   FIT  — asymmetric 5:4 / 9:8 nearest scaling, fills the whole
- *          screen (same trick we use for Game Gear). 160 -> 128
- *          horizontally and 144 -> 128 vertically.
+ *   FIT  — asymmetric 5:4 × 9:8 scaling, fills the whole screen
+ *          (same trick we use for Game Gear). 160 → 128 horizontally
+ *          and 144 → 128 vertically. The BLEND toggle selects between
+ *          pure nearest (sharp, but drops 1 in 5 source columns) and
+ *          a coverage-weighted blend (palette-aware on DMG; packed
+ *          RGB565 lerp on CGB). Default: BLEND on.
  *   CROP — 1:1 native 128x128 viewport into the 160x144 frame,
- *          pannable with the D-pad while paused. The full picture
- *          has a 32 px horizontal slack and 16 px vertical.
- *
- * BLEND has no meaningful effect on a 4-shade DMG image so we omit
- * it from the cfg byte and the OSD chord.
+ *          pannable with MENU + D-pad while the cart keeps running.
+ *          The full picture has 32 px horizontal slack and 16 px
+ *          vertical.
  */
 #include "gb_run.h"
 #include "gb_core.h"
@@ -108,12 +109,42 @@ static uint8_t read_gb_buttons(void) {
 
 /* --- scalers ------------------------------------------------------- */
 
-/* GB 160x144 -> 128x128 with asymmetric nearest scaling.
- *   horizontal:  src_x = dst_x * 5 / 4   (160 / 128 = 1.25)
- *   vertical:    src_y = dst_y * 9 / 8   (144 / 128 = 1.125)
- * Same trick as the GG fit blitter — fills the whole screen with
- * minimal warping. Source is RGB565 pre-resolved by gb_core. */
-static void blit_fit_gb(uint16_t *fb, const uint16_t *src) {
+/* --- FIT scalers ---------------------------------------------------
+ *
+ * Three FIT variants, selected by the in-game BLEND toggle and the
+ * DMG-vs-CGB cart flag:
+ *
+ *   blit_fit_gb_nearest     — asymmetric 5:4 × 9:8 nearest; pixel-
+ *                             perfect but drops every 5th source
+ *                             column and every 9th row. Used when
+ *                             BLEND is OFF.
+ *   blit_fit_gb_cgb_blend   — area-weighted coverage blend in RGB565
+ *                             via the packed-lerp trick. Used for
+ *                             CGB carts when BLEND is ON.
+ *   blit_fit_gb_dmg_blend   — palette-index-space blend for DMG
+ *                             carts: resolve 4 shade indices from
+ *                             the core's shade buffer, blend in
+ *                             0..3 fixed-point, then interpolate
+ *                             between the two bracketing palette
+ *                             entries in RGB565. Preserves the
+ *                             chosen DMG palette's hue because the
+ *                             gradient is walked monotonically
+ *                             rather than linearly-blended in
+ *                             channel space (the classic Nintendo
+ *                             green's shade 0 and shade 2 differ
+ *                             enough in their blue component that
+ *                             a raw RGB565 blend reads as
+ *                             teal-shifted).
+ *
+ * Coverage weights: horizontal pattern repeats every 4 output pixels
+ * over 5 source pixels → {0.80/0.20, 0.60/0.40, 0.40/0.60, 0.20/0.80};
+ * vertical repeats every 8 output pixels over 9 source → {0.111, 0.222,
+ * …, 0.889}. Both expressed in /32 for a shift-by-5 after the lerp.
+ */
+
+/* Nearest, kept for users who toggle BLEND off (sharper pixel art
+ * at the cost of dropped strokes). */
+static void blit_fit_gb_nearest(uint16_t *fb, const uint16_t *src) {
     for (int dy = 0; dy < 128; dy++) {
         int sy = (dy * 9) / 8;
         const uint16_t *srow = src + sy * GBC_SCREEN_W;
@@ -121,6 +152,111 @@ static void blit_fit_gb(uint16_t *fb, const uint16_t *src) {
         for (int dx = 0; dx < 128; dx++) {
             int sx = (dx * 5) / 4;
             drow[dx] = srow[sx];
+        }
+    }
+}
+
+/* Packed-RGB565 linear interpolate — ONE multiply per lerp (all three
+ * channels in parallel). Expand `p | (p << 16)` masked with
+ * 0x07E0F81F places R at bits 11..15, B at 0..4 (low 16) and G at
+ * 21..26 (high 16) with gap bits between. `A + ((B - A) * w >> 5) &
+ * mask` survives unsigned underflow because the mask drops borrow
+ * bits that propagate into those gaps during the subtract. w is in
+ * /32 (5-bit fraction). */
+static inline uint32_t exp565(uint16_t p) {
+    uint32_t x = p;
+    return (x | (x << 16)) & 0x07E0F81Fu;
+}
+static inline uint32_t lerp565p(uint32_t A, uint32_t B, uint32_t w) {
+    return (A + (((B - A) * w) >> 5)) & 0x07E0F81Fu;
+}
+static inline uint16_t pak565(uint32_t c) {
+    return (uint16_t)((c | (c >> 16)) & 0xFFFFu);
+}
+
+/* Shared coverage-weight tables — 4 × horizontal (dx & 3) and
+ * 8 × vertical (dy & 7), weight on the "far" source pixel in /32. */
+static const uint8_t gb_fit_hw[4] = { 6, 13, 19, 26 };
+static const uint8_t gb_fit_vw[8] = { 4, 7, 11, 14, 18, 21, 25, 28 };
+
+/* CGB — RGB565 coverage blend via packed lerp.
+ * 3 multiplies per output pixel (top horizontal, bottom horizontal,
+ * vertical). Runs from SRAM. */
+static void __not_in_flash_func(blit_fit_gb_cgb_blend)(uint16_t *fb,
+                                                        const uint16_t *src) {
+    for (int dy = 0; dy < 128; dy++) {
+        int sy = (dy * 9) / 8;
+        uint32_t wy = gb_fit_vw[dy & 7];
+        const uint16_t *r0 = src + sy * GBC_SCREEN_W;
+        const uint16_t *r1 = src + (sy + 1) * GBC_SCREEN_W;
+        uint16_t *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx = (dx * 5) / 4;
+            uint32_t wx = gb_fit_hw[dx & 3];
+
+            uint32_t a = exp565(r0[sx]);
+            uint32_t b = exp565(r0[sx + 1]);
+            uint32_t c = exp565(r1[sx]);
+            uint32_t d = exp565(r1[sx + 1]);
+
+            uint32_t top = lerp565p(a, b, wx);
+            uint32_t bot = lerp565p(c, d, wx);
+            uint32_t out = lerp565p(top, bot, wy);
+
+            drow[dx] = pak565(out);
+        }
+    }
+}
+
+/* DMG — palette-aware blend.
+ *
+ * `shade` is 160×144 bytes, one shade index (0..3) per pixel. `pal`
+ * is the 4-entry DMG palette in RGB565.
+ *
+ * Blend two source shades in /32 fixed-point, giving a scalar in
+ * 0..(3*32) = 0..96 covering the full palette range. The integer
+ * part selects bracketing palette entries; the fractional part is
+ * the lerp weight between them. This keeps output on the palette's
+ * own gradient, so a blend never introduces a colour that doesn't
+ * lie between two neighbouring palette entries — which is exactly
+ * what the user experiences as "green with more blue" on a naive
+ * RGB565 blend. */
+static void __not_in_flash_func(blit_fit_gb_dmg_blend)(uint16_t *fb,
+                                                        const uint8_t *shade,
+                                                        const uint16_t *pal) {
+    for (int dy = 0; dy < 128; dy++) {
+        int sy = (dy * 9) / 8;
+        uint32_t wy = gb_fit_vw[dy & 7];
+        uint32_t wyi = 32u - wy;
+        const uint8_t *r0 = shade + sy * GBC_SCREEN_W;
+        const uint8_t *r1 = shade + (sy + 1) * GBC_SCREEN_W;
+        uint16_t *drow = fb + dy * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx = (dx * 5) / 4;
+            uint32_t wx = gb_fit_hw[dx & 3];
+            uint32_t wxi = 32u - wx;
+
+            /* Horizontal blend in shade-space: (a*wxi + b*wx) gives a
+             * fixed-point value in 0..(3*32) = 0..96. */
+            uint32_t top = (uint32_t)r0[sx] * wxi + (uint32_t)r0[sx + 1] * wx;
+            uint32_t bot = (uint32_t)r1[sx] * wxi + (uint32_t)r1[sx + 1] * wx;
+            /* Vertical blend — now in /32 * /32 = /1024 fixed-point
+             * over a 0..3 shade range, so max (3*32)*(32) = 3072. */
+            uint32_t f = top * wyi + bot * wy;
+            /* Collapse: total weight is 32*32 = 1024 per unit shade,
+             * so f / 1024 is the integer shade and (f / 32) mod 32 is
+             * the 5-bit fractional weight between shade_lo and shade_hi. */
+            uint32_t shade_fp = f >> 5;          /* 0..(3*32) */
+            uint32_t shade_lo = shade_fp >> 5;   /* 0..3 */
+            uint32_t frac     = shade_fp & 31u;  /* /32 */
+            uint32_t shade_hi = shade_lo + 1;
+            if (shade_hi > 3) shade_hi = 3;
+
+            uint32_t A = exp565(pal[shade_lo]);
+            uint32_t B = exp565(pal[shade_hi]);
+            uint32_t out = lerp565p(A, B, frac);
+
+            drow[dx] = pak565(out);
         }
     }
 }
@@ -150,19 +286,26 @@ static void blit_crop_gb(uint16_t *fb, const uint16_t *src,
 
 typedef enum { SCALE_FIT = 0, SCALE_CROP = 1, SCALE_COUNT } scale_mode_t;
 
+/* Magic flag value that means "blend byte has never been written to
+ * this cfg". Distinct from 0 (toggled OFF by user) so we can default
+ * new carts to ON while still honouring an explicit user OFF. */
+#define BLEND_UNSET  0xFFu
+
 typedef struct {
     uint32_t magic;
     uint8_t  scale_mode;
     uint8_t  show_fps;
     uint8_t  volume;
     uint8_t  palette;
-    uint8_t  reserved[4];
+    uint8_t  blend;           /* 0 = off, 1 = on, 0xFF = never written */
+    uint8_t  reserved[3];
     uint16_t clock_mhz;       /* 0 = use global; otherwise per-cart override */
     uint16_t _pad2;
 } gb_cfg_t;
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
-                      bool *show_fps, int *volume, int *palette, int *clock_mhz) {
+                      bool *show_fps, int *volume, int *palette,
+                      int *blend, int *clock_mhz) {
     (void)scale;
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
@@ -176,6 +319,15 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
             *show_fps = c.show_fps != 0;
             if (c.volume <= VOL_MAX)           *volume = c.volume;
             if (c.palette < GBC_PALETTE_COUNT) *palette = c.palette;
+            /* Blend byte is a late addition — pre-1.04 cfgs have a
+             * zero in this slot (used to be reserved[0]). Treat 0xFF
+             * as "never written" (→ caller's default stays). We write
+             * 1 (on) on subsequent saves so the first save after
+             * launching the cart normalises old cfgs to the new
+             * default. */
+            if (blend && c.blend != BLEND_UNSET) {
+                *blend = c.blend ? 1 : 0;
+            }
         }
         if (clock_mhz && br >= sizeof(c)) {
             *clock_mhz = c.clock_mhz;
@@ -185,7 +337,8 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
 }
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
-                      bool show_fps, int volume, int palette, int clock_mhz) {
+                      bool show_fps, int volume, int palette,
+                      int blend, int clock_mhz) {
     (void)scale;
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
@@ -194,7 +347,9 @@ static void cfg_save(const char *rom_name, scale_mode_t scale,
     gb_cfg_t c = {
         .magic = CFG_MAGIC, .scale_mode = (uint8_t)SCALE_FIT,
         .show_fps = show_fps ? 1 : 0, .volume = (uint8_t)volume,
-        .palette = (uint8_t)palette, .reserved = {0,0,0,0},
+        .palette = (uint8_t)palette,
+        .blend = (uint8_t)(blend ? 1 : 0),
+        .reserved = {0,0,0},
         .clock_mhz = (uint16_t)clock_mhz, ._pad2 = 0,
     };
     UINT bw = 0;
@@ -293,7 +448,14 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     bool         fast_forward = false;
     scale_mode_t scale_mode   = SCALE_FIT;
     int  cart_clock_mhz = 0;
-    cfg_load(name, &scale_mode, &show_fps, &volume, &palette, &cart_clock_mhz);
+    /* BLEND default: ON for both DMG and CGB. Nearest is jarring at
+     * the 5:4 × 9:8 ratio (columns drop) so we want coverage blend by
+     * default, with the per-cart BLEND toggle for users who prefer
+     * the old sharper look on specific carts. cfg_load leaves this
+     * alone for pre-BLEND cfgs (0xFF sentinel), so old carts land on
+     * the default until the user touches the menu. */
+    int  blend = 1;
+    cfg_load(name, &scale_mode, &show_fps, &volume, &palette, &blend, &cart_clock_mhz);
     /* Volume is global across all carts now — pull it from /.global. */
     volume = nes_picker_global_volume();
     gbc_set_palette(palette);
@@ -422,15 +584,17 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             int v_ff    = fast_forward ? 1 : 0;
             int v_fps   = show_fps ? 1 : 0;
             int v_pal   = palette;
+            int v_blend = blend ? 1 : 0;
             int v_clock = 0;
             if (cart_clock_mhz == 125) v_clock = 1;
             if (cart_clock_mhz == 150) v_clock = 2;
             if (cart_clock_mhz == 200) v_clock = 3;
             if (cart_clock_mhz == 250) v_clock = 4;
+            if (cart_clock_mhz == 300) v_clock = 5;
 
             static const char * const display_choices[] = { "FIT", "CROP" };
-            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
-            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
+            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz","300MHz" };
+            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250,     300 };
             static const char * const palette_names_arr[] = {
                 "GREEN", "GREY", "POCKET", "CREAM", "BLUE", "RED",
             };
@@ -474,9 +638,15 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .label = "Palette", .value_ptr = &v_pal,
                   .choices = palette_names_arr,
                   .num_choices = GBC_PALETTE_COUNT, .enabled = true };
+            /* BLEND — toggles FIT between asymmetric 5:4 × 9:8 nearest
+             * and a coverage-weighted blend (palette-aware on DMG,
+             * RGB565 packed-lerp on CGB). Not applicable in CROP. */
+            items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_TOGGLE,
+                  .label = "Blend", .value_ptr = &v_blend,
+                  .enabled = (scale_mode == SCALE_FIT) };
             items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_CHOICE,
                   .label = "Overclock", .value_ptr = &v_clock,
-                  .choices = clock_choices, .num_choices = 5,
+                  .choices = clock_choices, .num_choices = 6,
                   .enabled = true, .suffix = "next launch" };
             if (use_chain) {
                 /* Running from the chained-XIP fallback — ROM file is
@@ -520,6 +690,10 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (v_pal != palette) {
                 palette = v_pal;
                 gbc_set_palette(palette);
+                cfg_dirty = true;
+            }
+            if (v_blend != blend) {
+                blend = v_blend;
                 cfg_dirty = true;
             }
             int new_mhz = clock_mhz_arr[v_clock];
@@ -575,8 +749,21 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         const uint16_t *frame = gbc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
-            if (scale_mode == SCALE_CROP) blit_crop_gb(fb, frame, pan_x, pan_y);
-            else                          blit_fit_gb (fb, frame);
+            if (scale_mode == SCALE_CROP) {
+                blit_crop_gb(fb, frame, pan_x, pan_y);
+            } else if (!blend) {
+                blit_fit_gb_nearest(fb, frame);
+            } else if (gbc_is_cgb_cart()) {
+                blit_fit_gb_cgb_blend(fb, frame);
+            } else {
+                /* DMG path needs the shade buffer; fall back to
+                 * RGB565 blend if it wasn't allocated (OOM at
+                 * load time — graceful degrade). */
+                const uint8_t *shade = gbc_shade_buffer();
+                const uint16_t *pal = gbc_palette_rgb565();
+                if (shade && pal) blit_fit_gb_dmg_blend(fb, shade, pal);
+                else              blit_fit_gb_cgb_blend(fb, frame);
+            }
             if (show_fps) {
                 char ftxt[12];
                 snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
@@ -620,7 +807,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
 
     battery_save(name);
-    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, palette, cart_clock_mhz);
+    if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, palette, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     gbc_shutdown();
     free(rom_alloc);

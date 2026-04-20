@@ -92,6 +92,12 @@ static size_t   s_cart_ram_size;
  * by lcd_draw_line_cb — blitters just copy words, no palette lookup. */
 static uint16_t *s_vidbuf;
 
+/* DMG-only parallel buffer holding the raw shade index (0..3) per
+ * pixel. Allocated alongside s_vidbuf for DMG carts and consumed by
+ * the runner's palette-aware blend scaler; CGB sessions leave it
+ * NULL. ~23 KB (160 × 144 bytes). */
+static uint8_t *s_shade_buf;
+
 /* RGB565 palette LUT (4 entries indexed by shade) — used in DMG mode. */
 static uint16_t s_palette[4];
 static int      s_palette_idx;
@@ -190,9 +196,13 @@ static void lcd_draw_line_cb(struct gb_s *gb, const uint8_t *pixels, const uint_
 #endif
     /* DMG: low 2 bits = shade (0..3). Upper bits are palette source
      * metadata (OBJ0/OBJ1/BG) which we don't use in our palette
-     * scheme — we apply a single 4-entry lookup. */
+     * scheme — we apply a single 4-entry lookup. Shade index also
+     * copied into s_shade_buf for the palette-aware scaler. */
+    uint8_t *sdst = s_shade_buf ? &s_shade_buf[line * GBC_SCREEN_W] : NULL;
     for (int x = 0; x < GBC_SCREEN_W; x++) {
-        dst[x] = s_palette[pixels[x] & 0x03];
+        uint8_t sh = pixels[x] & 0x03;
+        dst[x] = s_palette[sh];
+        if (sdst) sdst[x] = sh;
     }
 }
 
@@ -253,6 +263,22 @@ static int gbc_finish_load(void) {
 #if PEANUT_FULL_GBC_SUPPORT
     s_cgb_mode = (s_gb.cgb.cgbMode != 0);
 #endif
+    /* DMG carts get a shade-index buffer so the runner's scaler can
+     * blend in palette-index space. CGB has per-pixel CGB palette
+     * resolution, there is no meaningful global "shade" to index. */
+    if (!s_cgb_mode) {
+        if (!s_shade_buf) {
+            s_shade_buf = (uint8_t *)malloc(GBC_SCREEN_W * GBC_SCREEN_H);
+            /* Failure is non-fatal — runner falls back to RGB565
+             * blend on this cart (with the mild teal shift). */
+        }
+        if (s_shade_buf) memset(s_shade_buf, 0, GBC_SCREEN_W * GBC_SCREEN_H);
+    } else if (s_shade_buf) {
+        /* Previous session was DMG; reclaim the buffer so CGB carts
+         * don't carry the extra 23 KB. */
+        free(s_shade_buf);
+        s_shade_buf = NULL;
+    }
     s_loaded = true;
     return 0;
 }
@@ -307,6 +333,7 @@ int gbc_refresh_rate(void) {
 const uint16_t *gbc_framebuffer(void)    { return s_vidbuf; }
 const uint16_t *gbc_palette_rgb565(void) { return s_palette; }
 bool            gbc_is_cgb_cart(void)    { return s_cgb_mode; }
+const uint8_t  *gbc_shade_buffer(void)   { return s_shade_buf; }
 
 void gbc_set_palette(int index) {
     if (index < 0 || index >= GBC_PALETTE_COUNT) index = 0;
@@ -436,7 +463,8 @@ void gbc_shutdown(void) {
     s_rom_clusters = NULL;
     s_rom_last_ci  = 0xFFFFFFFFu;
     s_rom_last_ptr = NULL;
-    if (s_vidbuf)   { free(s_vidbuf);   s_vidbuf   = NULL; }
-    if (s_cart_ram) { free(s_cart_ram); s_cart_ram = NULL; }
-    if (s_gb_ptr)   { free(s_gb_ptr);   s_gb_ptr   = NULL; }
+    if (s_vidbuf)    { free(s_vidbuf);    s_vidbuf    = NULL; }
+    if (s_shade_buf) { free(s_shade_buf); s_shade_buf = NULL; }
+    if (s_cart_ram)  { free(s_cart_ram);  s_cart_ram  = NULL; }
+    if (s_gb_ptr)    { free(s_gb_ptr);    s_gb_ptr    = NULL; }
 }
