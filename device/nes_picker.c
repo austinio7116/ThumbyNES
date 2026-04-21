@@ -24,6 +24,7 @@
 #  include "thumbyone_backlight.h"
 #endif
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1094,6 +1095,557 @@ static void cld_cb_set_owner(DWORD clst, void *arg) {
     oa->off++;
 }
 
+/* --- target-layout planner: block-subset search --------------------
+ *
+ * Files on the volume partition naturally into "blocks" (maximal runs
+ * of contiguous files with no gaps between them). Each block has a
+ * binary choice in the target layout: STAY at its current position,
+ * or SHIFT left into the growing "packed" region.
+ *
+ * For N blocks, 2^N configurations. For each we can compute
+ * (moves, max_free_run) exactly, then score by a cost function that
+ * trades writes against free-space consolidation. We enumerate all
+ * subsets up to 2^16 = 65536; above that we fall back to a greedy
+ * hill-climb that evaluates ~N² candidate shifts.
+ *
+ * Fragmented files (non-contiguous current chains) MUST move and are
+ * placed by best-fit-decreasing into the resulting free runs. Pinned
+ * clusters (orphan FAT entries, subdirectory clusters ThumbyOne
+ * preserves, etc.) are immovable obstacles that shifted blocks must
+ * route around.
+ *
+ * Scoring function:
+ *     score = moves − K × max(0, plan_free − current_max_free)
+ *                   + P × max(0, current_max_free − plan_free)
+ * with K=5 (a cluster of consolidated free worth 5 writes) and
+ * P = a very large penalty so plans that regress the current
+ * max-free-run lose to any non-regressing plan with reasonable moves.
+ *
+ * This planner replaces the earlier sweep of heuristics (Plan A /
+ * Plan B / smart-surgical at multiple thresholds). Those heuristics
+ * each corresponded to a fixed subset choice; the search here visits
+ * every possible subset in one pass. */
+
+#define CLD_SCORE_REGRESS_P    1000000
+#define CLD_BLOCK_EXHAUSTIVE   16     /* 2^16 = 65k subsets; any more falls back to greedy */
+
+/* K weights (writes per cluster of contiguous-free gained). User
+ * adjusts with LEFT/RIGHT on the preview screen to bias the plan
+ * toward fewer writes (low K) or more free-space consolidation
+ * (high K). Log-ish scale so a single step makes a visible
+ * difference across the spectrum. Default starts mid-range. */
+static const int s_plan_k_values[] = { 0, 1, 2, 3, 5, 8, 13, 25, 50, 100, 200, 500 };
+#define CLD_PLAN_K_COUNT ((int)(sizeof(s_plan_k_values) / sizeof(s_plan_k_values[0])))
+#define CLD_PLAN_K_DEFAULT_IDX 4   /* K=5 */
+static int s_plan_k_idx = CLD_PLAN_K_DEFAULT_IDX;
+
+
+typedef struct {
+    DWORD    start;        /* current cluster position (0-based) */
+    uint32_t size;         /* total clusters in block */
+    int      first_file;   /* offset into block_files[] for this block's files */
+    int      n_files;      /* count */
+} cld_block_t;
+
+typedef struct {
+    cld_block_t *blocks;
+    int         *block_files;   /* flat array of file indices, grouped per block */
+    int          n_blocks;
+    int         *fragments;     /* file indices whose chain is fragmented */
+    int          n_fragments;
+    DWORD       *pinned_list;   /* sorted pinned cluster positions */
+    int          n_pinned;
+    uint32_t     current_max_free;
+} cld_layout_t;
+
+static int cld_cmp_file_by_sclust(cld_ctx_t *ctx, int a, int b) {
+    DWORD sa = ctx->files[a].current_sclust;
+    DWORD sb = ctx->files[b].current_sclust;
+    return (sa < sb) ? -1 : (sa > sb ? 1 : 0);
+}
+
+/* Partition ctx->files[] into contiguous blocks + fragments. */
+static int cld_layout_build(cld_ctx_t *ctx, cld_layout_t *out) {
+    int n_files = ctx->n_files;
+
+    int *contig = (int *)malloc((size_t)n_files * sizeof(int));
+    int *frag   = (int *)malloc((size_t)n_files * sizeof(int));
+    if (!contig || !frag) {
+        free(contig); free(frag);
+        return -1;
+    }
+    int n_contig = 0, n_frag = 0;
+    for (int f = 0; f < n_files; f++) {
+        uint32_t nc = ctx->files[f].n_clusters;
+        if (nc == 0) continue;
+        if (chain_is_contiguous(ctx->files[f].current_sclust, nc)) {
+            contig[n_contig++] = f;
+        } else {
+            frag[n_frag++] = f;
+        }
+    }
+
+    /* Sort contig by current start position. */
+    for (int i = 1; i < n_contig; i++) {
+        int key = contig[i];
+        DWORD key_s = ctx->files[key].current_sclust;
+        int j = i - 1;
+        while (j >= 0 && ctx->files[contig[j]].current_sclust > key_s) {
+            contig[j + 1] = contig[j];
+            j--;
+        }
+        contig[j + 1] = key;
+    }
+
+    /* Merge back-to-back contiguous files into blocks. */
+    cld_block_t *blocks = (cld_block_t *)malloc((size_t)(n_contig + 1) * sizeof(cld_block_t));
+    if (!blocks) { free(contig); free(frag); return -1; }
+    int n_blocks = 0;
+    int i = 0;
+    while (i < n_contig) {
+        DWORD bs = ctx->files[contig[i]].current_sclust - 2;
+        uint32_t bsize = ctx->files[contig[i]].n_clusters;
+        int j = i + 1;
+        while (j < n_contig) {
+            DWORD next_s = ctx->files[contig[j]].current_sclust - 2;
+            if (next_s == bs + bsize) {
+                bsize += ctx->files[contig[j]].n_clusters;
+                j++;
+            } else break;
+        }
+        blocks[n_blocks].start      = bs;
+        blocks[n_blocks].size       = bsize;
+        blocks[n_blocks].first_file = i;
+        blocks[n_blocks].n_files    = j - i;
+        n_blocks++;
+        i = j;
+    }
+
+    /* Pinned-cluster list. */
+    DWORD *pinned = (DWORD *)malloc(((size_t)ctx->n_clust + 1) * sizeof(DWORD));
+    if (!pinned) { free(contig); free(frag); free(blocks); return -1; }
+    int n_pinned = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) pinned[n_pinned++] = c;
+    }
+
+    /* Current max-free-run (for scoring). */
+    uint32_t cur_free = 0, max_free = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        int pin = CLD_BIT_GET(ctx->pinned_bits, c) ? 1 : 0;
+        if (!pin && ctx->current_owner[c] == 0) {
+            cur_free++;
+            if (cur_free > max_free) max_free = cur_free;
+        } else cur_free = 0;
+    }
+
+    out->blocks           = blocks;
+    out->block_files      = contig;
+    out->n_blocks         = n_blocks;
+    out->fragments        = frag;
+    out->n_fragments      = n_frag;
+    out->pinned_list      = pinned;
+    out->n_pinned         = n_pinned;
+    out->current_max_free = max_free;
+    return 0;
+}
+
+static void cld_layout_free(cld_layout_t *layout) {
+    free(layout->blocks);       layout->blocks = NULL;
+    free(layout->block_files);  layout->block_files = NULL;
+    free(layout->fragments);    layout->fragments = NULL;
+    free(layout->pinned_list);  layout->pinned_list = NULL;
+}
+
+/* Find smallest P >= cursor such that [P, P + size) contains no
+ * pinned cluster and P + size <= n_clust. Returns n_clust on fail. */
+static DWORD cld_find_clear_range(const cld_layout_t *layout, DWORD n_clust,
+                                    DWORD cursor, uint32_t size) {
+    while (cursor + size <= n_clust) {
+        int p = 0;
+        while (p < layout->n_pinned && layout->pinned_list[p] < cursor) p++;
+        if (p >= layout->n_pinned || layout->pinned_list[p] >= cursor + size) {
+            return cursor;
+        }
+        cursor = layout->pinned_list[p] + 1;
+    }
+    return n_clust;
+}
+
+/* Evaluate one subset mask — writes out block/fragment targets,
+ * moves, and max_free_run. Returns 0 on valid config, -1 otherwise. */
+typedef struct {
+    DWORD    start;
+    uint32_t length;
+} cld_run_t;
+
+static int cld_sim_subset(cld_ctx_t *ctx, const cld_layout_t *layout,
+                           uint32_t mask,
+                           DWORD *block_targets,     /* size n_blocks */
+                           DWORD *fragment_targets,  /* size n_fragments */
+                           int *out_moves,
+                           uint32_t *out_max_free) {
+    int moves = 0;
+    DWORD cursor = 0;
+    for (int i = 0; i < layout->n_blocks; i++) {
+        const cld_block_t *b = &layout->blocks[i];
+        bool shift = (mask >> i) & 1u;
+        if (shift) {
+            DWORD t = cld_find_clear_range(layout, ctx->n_clust, cursor, b->size);
+            if (t >= ctx->n_clust) return -1;
+            block_targets[i] = t;
+            if (t != b->start) moves += (int)b->size;
+            cursor = t + b->size;
+        } else {
+            if (b->start < cursor) return -1;
+            block_targets[i] = b->start;
+            cursor = b->start + b->size;
+        }
+    }
+
+    /* Compute free runs of the block-placed layout. */
+    /* Occupied intervals: each block [target, target+size) + each pinned cluster. */
+    int max_runs = layout->n_blocks + layout->n_pinned + 2;
+    cld_run_t *runs = (cld_run_t *)malloc((size_t)max_runs * sizeof(cld_run_t));
+    if (!runs) return -1;
+
+    /* Build sorted occupied-interval list. Blocks are NOT sorted by
+     * target (they're sorted by current position); sort into position
+     * order for run computation. */
+    typedef struct { DWORD s, e; } cld_iv_t;
+    cld_iv_t *iv = (cld_iv_t *)malloc((size_t)(layout->n_blocks + layout->n_pinned) * sizeof(cld_iv_t));
+    if (!iv) { free(runs); return -1; }
+    int n_iv = 0;
+    for (int i = 0; i < layout->n_blocks; i++) {
+        iv[n_iv].s = block_targets[i];
+        iv[n_iv].e = block_targets[i] + layout->blocks[i].size;
+        n_iv++;
+    }
+    for (int p = 0; p < layout->n_pinned; p++) {
+        iv[n_iv].s = layout->pinned_list[p];
+        iv[n_iv].e = layout->pinned_list[p] + 1;
+        n_iv++;
+    }
+    /* Insertion sort by start. */
+    for (int i = 1; i < n_iv; i++) {
+        cld_iv_t key = iv[i];
+        int j = i - 1;
+        while (j >= 0 && iv[j].s > key.s) { iv[j+1] = iv[j]; j--; }
+        iv[j+1] = key;
+    }
+    /* Walk, emit free runs. */
+    int n_runs = 0;
+    DWORD pos = 0;
+    for (int i = 0; i < n_iv; i++) {
+        if (iv[i].s > pos && n_runs < max_runs) {
+            runs[n_runs].start  = pos;
+            runs[n_runs].length = iv[i].s - pos;
+            n_runs++;
+        }
+        if (iv[i].e > pos) pos = iv[i].e;
+    }
+    if (pos < ctx->n_clust && n_runs < max_runs) {
+        runs[n_runs].start  = pos;
+        runs[n_runs].length = ctx->n_clust - pos;
+        n_runs++;
+    }
+    free(iv);
+
+    /* Fragments sorted by size DESC, BFD-place into runs. */
+    int *frag_sorted = (int *)malloc((size_t)layout->n_fragments * sizeof(int));
+    if (!frag_sorted && layout->n_fragments > 0) { free(runs); return -1; }
+    for (int i = 0; i < layout->n_fragments; i++) frag_sorted[i] = layout->fragments[i];
+    for (int i = 1; i < layout->n_fragments; i++) {
+        int key = frag_sorted[i];
+        uint32_t key_sz = ctx->files[key].n_clusters;
+        int j = i - 1;
+        while (j >= 0 && ctx->files[frag_sorted[j]].n_clusters < key_sz) {
+            frag_sorted[j+1] = frag_sorted[j]; j--;
+        }
+        frag_sorted[j+1] = key;
+    }
+    int i_frag_target = 0;
+    for (int i = 0; i < layout->n_fragments; i++) {
+        int f = frag_sorted[i];
+        uint32_t sz = ctx->files[f].n_clusters;
+        /* Best-fit: smallest run >= sz. */
+        int best = -1;
+        for (int r = 0; r < n_runs; r++) {
+            if (runs[r].length >= sz) {
+                if (best < 0 || runs[r].length < runs[best].length) best = r;
+            }
+        }
+        if (best < 0) { free(frag_sorted); free(runs); return -1; }
+        /* Map back to the original fragments[] index so caller can
+         * reconstruct. fragments[] order mirrors layout->fragments. */
+        int orig_idx = -1;
+        for (int k = 0; k < layout->n_fragments; k++) {
+            if (layout->fragments[k] == f) { orig_idx = k; break; }
+        }
+        if (orig_idx >= 0) fragment_targets[orig_idx] = runs[best].start;
+        runs[best].start  += sz;
+        runs[best].length -= sz;
+        moves += (int)sz;
+        i_frag_target++;
+    }
+    free(frag_sorted);
+
+    /* max_free = largest remaining run length. */
+    uint32_t max_free = 0;
+    for (int r = 0; r < n_runs; r++) {
+        if (runs[r].length > max_free) max_free = runs[r].length;
+    }
+    free(runs);
+
+    *out_moves    = moves;
+    *out_max_free = max_free;
+    return 0;
+}
+
+/* Weighted score — lower is better. K is read from the module-level
+ * s_plan_k_idx so the preview's LEFT/RIGHT buttons can re-plan
+ * without re-plumbing the parameter through every call site. */
+static int cld_score_weighted(int moves, uint32_t plan_free, uint32_t current_max_free) {
+    if (plan_free < current_max_free) {
+        return moves + CLD_SCORE_REGRESS_P * (int)(current_max_free - plan_free);
+    }
+    int k = s_plan_k_values[s_plan_k_idx];
+    return moves - k * (int)(plan_free - current_max_free);
+}
+
+/* Apply a winning (mask, targets) to ctx->target_owner and
+ * ctx->files[].target_sclust. */
+static void cld_apply_mask(cld_ctx_t *ctx, const cld_layout_t *layout,
+                            const DWORD *block_targets,
+                            const DWORD *fragment_targets) {
+    memset(ctx->target_owner, 0, ctx->n_clust * sizeof(uint32_t));
+    for (int f = 0; f < ctx->n_files; f++) ctx->files[f].target_sclust = 0;
+
+    /* Blocks: walk each block's files in order, placing contiguously
+     * starting at block_targets[b]. */
+    for (int b = 0; b < layout->n_blocks; b++) {
+        DWORD base = block_targets[b];
+        DWORD off  = 0;
+        for (int k = 0; k < layout->blocks[b].n_files; k++) {
+            int f = layout->block_files[layout->blocks[b].first_file + k];
+            ctx->files[f].target_sclust = base + off + 2;
+            uint32_t sz = ctx->files[f].n_clusters;
+            for (uint32_t j = 0; j < sz; j++) {
+                ctx->target_owner[base + off + j] =
+                    ((uint32_t)(f + 1) << 16) | (j & 0xFFFF);
+            }
+            off += sz;
+        }
+    }
+
+    /* Fragments. */
+    for (int i = 0; i < layout->n_fragments; i++) {
+        int f = layout->fragments[i];
+        DWORD base = fragment_targets[i];
+        uint32_t sz = ctx->files[f].n_clusters;
+        ctx->files[f].target_sclust = base + 2;
+        for (uint32_t j = 0; j < sz; j++) {
+            ctx->target_owner[base + j] =
+                ((uint32_t)(f + 1) << 16) | (j & 0xFFFF);
+        }
+    }
+}
+
+/* Main block-search planner. */
+static int cld_plan_block_search(cld_ctx_t *ctx) {
+    cld_layout_t layout = {0};
+    if (cld_layout_build(ctx, &layout) != 0) return -1;
+
+    int n_blocks = layout.n_blocks;
+
+    /* Scratch buffers for the current candidate and the best-so-far. */
+    DWORD *bt_cur  = (DWORD *)malloc((size_t)(n_blocks + 1) * sizeof(DWORD));
+    DWORD *ft_cur  = (DWORD *)malloc((size_t)(layout.n_fragments + 1) * sizeof(DWORD));
+    DWORD *bt_best = (DWORD *)malloc((size_t)(n_blocks + 1) * sizeof(DWORD));
+    DWORD *ft_best = (DWORD *)malloc((size_t)(layout.n_fragments + 1) * sizeof(DWORD));
+    if ((n_blocks > 0 && (!bt_cur || !bt_best)) ||
+        (layout.n_fragments > 0 && (!ft_cur || !ft_best))) {
+        free(bt_cur); free(ft_cur); free(bt_best); free(ft_best);
+        cld_layout_free(&layout);
+        return -1;
+    }
+
+    int       best_score = INT_MAX;
+    int       best_moves = INT_MAX;
+    uint32_t  best_free  = 0;
+    bool      have_best  = false;
+    uint32_t  best_mask  = 0;
+
+    int trials_tried = 0, trials_valid = 0;
+    int initial_score = 0;
+
+    if (n_blocks <= CLD_BLOCK_EXHAUSTIVE) {
+        /* Exhaustive enumeration of every block-shift subset. */
+        uint32_t limit = (n_blocks == 0) ? 1u : (1u << n_blocks);
+        for (uint32_t mask = 0; mask < limit; mask++) {
+            int moves;
+            uint32_t max_free;
+            trials_tried++;
+            if (cld_sim_subset(ctx, &layout, mask, bt_cur, ft_cur,
+                                &moves, &max_free) != 0) continue;
+            trials_valid++;
+            int score = cld_score_weighted(moves, max_free, layout.current_max_free);
+            if (mask == 0) initial_score = score;
+            if (score < best_score) {
+                best_score = score; best_moves = moves; best_free = max_free;
+                best_mask = mask; have_best = true;
+                for (int i = 0; i < n_blocks; i++) bt_best[i] = bt_cur[i];
+                for (int i = 0; i < layout.n_fragments; i++) ft_best[i] = ft_cur[i];
+            }
+        }
+    } else {
+        /* Multi-seed bit-flip hill-climb. Forward-only greedy (add
+         * one shift at a time starting from mask=0) gets stuck when
+         * the mask=0 config is invalid — e.g. a fragmented file too
+         * large for any free run at current layout, so NO single
+         * shift creates a big enough run either. From that start,
+         * every trial returns -1 and greedy exits with no plan.
+         *
+         * Bit-flip hill-climb from multiple seed masks escapes this.
+         * Seeds cover the corners of the search space: all-stay,
+         * all-shift, and two half-splits. From each seed we flip any
+         * bit that improves the score and loop until no flip helps.
+         * Tracks global best across seeds. */
+        uint32_t all_mask = (n_blocks >= 32) ? ~0u : ((1u << n_blocks) - 1);
+        uint32_t seeds[4];
+        int n_seeds = 0;
+        seeds[n_seeds++] = 0;
+        seeds[n_seeds++] = all_mask;
+        if (n_blocks >= 2) {
+            int half = n_blocks / 2;
+            uint32_t first_half = ((1u << half) - 1);
+            seeds[n_seeds++] = first_half;
+            seeds[n_seeds++] = all_mask & ~first_half;
+        }
+
+        for (int s = 0; s < n_seeds; s++) {
+            uint32_t mask = seeds[s];
+            int      cur_moves = 0;
+            uint32_t cur_free  = 0;
+            int      cur_score = INT_MAX;
+            bool     cur_valid = false;
+
+            trials_tried++;
+            if (cld_sim_subset(ctx, &layout, mask, bt_cur, ft_cur,
+                                &cur_moves, &cur_free) == 0) {
+                trials_valid++;
+                cur_valid = true;
+                cur_score = cld_score_weighted(cur_moves, cur_free,
+                                                 layout.current_max_free);
+                if (mask == 0) initial_score = cur_score;
+            }
+
+            /* Hill-climb: try flipping each bit; accept best strict
+             * improvement each round. Cap rounds at 2*n_blocks so we
+             * can't loop forever on degenerate layouts. */
+            for (int round = 0; round < 2 * n_blocks; round++) {
+                int      best_flip = -1;
+                int      best_flip_score = cur_valid ? cur_score : INT_MAX;
+                int      flip_moves = 0;
+                uint32_t flip_free  = 0;
+
+                for (int b = 0; b < n_blocks; b++) {
+                    uint32_t trial = mask ^ (1u << b);
+                    int      tm;
+                    uint32_t tf;
+                    trials_tried++;
+                    if (cld_sim_subset(ctx, &layout, trial, bt_cur, ft_cur,
+                                        &tm, &tf) != 0) continue;
+                    trials_valid++;
+                    int ts = cld_score_weighted(tm, tf,
+                                                  layout.current_max_free);
+                    if (ts < best_flip_score) {
+                        best_flip = b;
+                        best_flip_score = ts;
+                        flip_moves = tm;
+                        flip_free = tf;
+                    }
+                }
+                if (best_flip < 0) break;
+                mask ^= (1u << best_flip);
+                cur_score = best_flip_score;
+                cur_moves = flip_moves;
+                cur_free  = flip_free;
+                cur_valid = true;
+            }
+
+            if (cur_valid && cur_score < best_score) {
+                best_score = cur_score;
+                best_moves = cur_moves;
+                best_free  = cur_free;
+                best_mask  = mask;
+                /* Re-run sim to populate bt_best / ft_best with the
+                 * winning layout's actual targets. */
+                if (cld_sim_subset(ctx, &layout, mask, bt_best, ft_best,
+                                    &best_moves, &best_free) == 0) {
+                    have_best = true;
+                }
+            }
+        }
+    }
+
+
+    if (have_best) {
+        cld_apply_mask(ctx, &layout, bt_best, ft_best);
+    } else {
+        /* Degenerate: no valid config. Treat all as unplaceable. */
+        memset(ctx->target_owner, 0, ctx->n_clust * sizeof(uint32_t));
+        for (int f = 0; f < ctx->n_files; f++) ctx->files[f].target_sclust = 0;
+    }
+
+    (void)best_moves; (void)best_free; (void)best_mask; (void)best_score;
+    (void)initial_score; (void)trials_tried; (void)trials_valid;
+    free(bt_cur); free(ft_cur); free(bt_best); free(ft_best);
+    cld_layout_free(&layout);
+    return 0;
+}
+
+/* Score the current plan: (unplaceable files, cluster writes,
+ * largest contiguous free run in the planned target layout).
+ *
+ * Writes = non-pinned clusters where target_owner is non-zero and
+ * differs from current_owner. These are the destination slots phase
+ * 3a actually writes new data into. Clusters where target is 0 but
+ * current is non-zero (vacated sources) are NOT writes — cycle-sort
+ * drops those in-place. Previously we double-counted both directions,
+ * which distorted plan comparison in favour of plans that wasted
+ * writes.
+ *
+ * max_free_run = the longest run of non-pinned clusters in the target
+ * layout where target_owner == 0. This is what the host's FAT driver
+ * sees when allocating a new file, so maximising it is the practical
+ * post-defrag win we care about. */
+static void cld_plan_score(const cld_ctx_t *ctx,
+                            int *out_unplaceable, int *out_moves,
+                            uint32_t *out_max_free_run) {
+    int u = 0;
+    for (int f = 0; f < ctx->n_files; f++) {
+        uint32_t nc = ctx->files[f].n_clusters;
+        if (nc == 0) continue;
+        if (ctx->files[f].target_sclust == 0) u++;
+    }
+    int m = 0;
+    uint32_t cur_free = 0, max_free = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        int pinned = CLD_BIT_GET(ctx->pinned_bits, c) ? 1 : 0;
+        if (!pinned && ctx->target_owner[c] != 0
+            && ctx->target_owner[c] != ctx->current_owner[c]) m++;
+        if (!pinned && ctx->target_owner[c] == 0) {
+            cur_free++;
+            if (cur_free > max_free) max_free = cur_free;
+        } else cur_free = 0;
+    }
+    *out_unplaceable   = u;
+    *out_moves         = m;
+    *out_max_free_run  = max_free;
+}
+
+
 /* ANALYZE — returns 0 on success, negative on error. The caller has
  * NOT yet allocated the per-cluster maps; this is the function that
  * actually does the right-sized heap allocation once g_fs.n_fatent
@@ -1239,26 +1791,6 @@ static int cld_analyze(cld_ctx_t *ctx) {
     ctx->n_files = n_files;
     if (n_files == 0) return 0;
 
-    /* Sort an INDEX array by n_clusters DESC. We can't reorder
-     * files[] in place because parent_idx stored inside each entry
-     * refers to its parent's position in the BFS order; reordering
-     * would invalidate those references and corrupt dir-entry
-     * patching in the execute phase. Target placement iterates in
-     * sorted order via this array. */
-    int *sorted_idx = (int *)malloc((size_t)n_files * sizeof(int));
-    if (!sorted_idx) return -8;
-    for (int i = 0; i < n_files; i++) sorted_idx[i] = i;
-    for (int i = 1; i < n_files; i++) {
-        int key = sorted_idx[i];
-        uint32_t key_nc = ctx->files[key].n_clusters;
-        int j = i - 1;
-        while (j >= 0 && ctx->files[sorted_idx[j]].n_clusters < key_nc) {
-            sorted_idx[j + 1] = sorted_idx[j];
-            j--;
-        }
-        sorted_idx[j + 1] = key;
-    }
-
     /* Build current_owner by walking each entry's FAT chain via the
      * raw FAT16 walker (cld_walk_fat). Works for both files AND
      * subdirectories uniformly. We previously used f_open + f_lseek
@@ -1311,60 +1843,12 @@ static int cld_analyze(cld_ctx_t *ctx) {
         }
     }
 
-    /* Compute target layout with a first-fit free-run list.
-     *
-     * Earlier approach walked a monotonically-advancing `cursor` and
-     * skipped past pinned clusters without ever looking back. That
-     * wasted the (cursor..next-pinned) gap on each skip and pushed
-     * the cursor well past the end, causing many small files to end
-     * up stuck (see Apr 2026 user report: p=26 but 85 stuck).
-     *
-     * Now: precompute a list of free cluster runs (between pinned
-     * clusters). For each file in size-DESC order, take the first
-     * run that fits and shrink that run by the file's size. Always
-     * keep each run's leftmost position — packs files as far left
-     * as possible without waste. */
-    enum { MAX_FREE_RUNS = 64 };
-    struct { DWORD start, length; } runs[MAX_FREE_RUNS];
-    int n_runs = 0;
-
-    DWORD c = 0;
-    while (c < ctx->n_clust && n_runs < MAX_FREE_RUNS) {
-        while (c < ctx->n_clust && CLD_BIT_GET(ctx->pinned_bits, c)) c++;
-        if (c >= ctx->n_clust) break;
-        DWORD start = c;
-        while (c < ctx->n_clust && !CLD_BIT_GET(ctx->pinned_bits, c)) c++;
-        runs[n_runs].start  = start;
-        runs[n_runs].length = c - start;
-        n_runs++;
-    }
-
-    memset(ctx->target_owner, 0, ctx->n_clust * sizeof(uint32_t));
-    for (int s = 0; s < n_files; s++) {
-        int f = sorted_idx[s];
-        uint32_t nc = ctx->files[f].n_clusters;
-        if (nc == 0 || nc > ctx->n_clust) continue;
-
-        /* First-fit: earliest run large enough for this file. */
-        int pick = -1;
-        for (int r = 0; r < n_runs; r++) {
-            if (runs[r].length >= nc) { pick = r; break; }
-        }
-        if (pick < 0) {
-            ctx->files[f].target_sclust = 0;
-            continue;
-        }
-        DWORD base = runs[pick].start;
-        ctx->files[f].target_sclust = base + 2;  /* FAT cluster # */
-        for (uint32_t j = 0; j < nc; j++) {
-            ctx->target_owner[base + j] =
-                ((uint32_t)(f + 1) << 16) | (j & 0xFFFF);
-        }
-        runs[pick].start  += nc;
-        runs[pick].length -= nc;
-    }
-    free(sorted_idx);
-    return 0;
+    /* Block-subset search planner: enumerate every block-shift
+     * configuration (up to 2^16 subsets, greedy hill-climb above
+     * that), score each by (moves − K × free_gain + P × regression),
+     * pick the winner. Writes ctx->target_owner and
+     * ctx->files[].target_sclust directly. */
+    return cld_plan_block_search(ctx);
 }
 
 /* Execute-phase overlay. Renders the live cluster state from
@@ -1545,12 +2029,6 @@ static void cld_show_preview(const cld_ctx_t *ctx, uint16_t *fb,
     uint32_t free_b_kb = (uint32_t)((max_free_before * ctx->bpc) / 1024);
     uint32_t free_a_kb = (uint32_t)((max_free_after  * ctx->bpc) / 1024);
 
-    /* Total file bytes (for the summary line). */
-    DWORD total_bytes = 0;
-    for (int f = 0; f < ctx->n_files; f++) {
-        total_bytes += ctx->files[f].n_clusters * ctx->bpc;
-    }
-
     /* Helper to print a KB count in compact form (e.g. 4700K -> 4.7M). */
     #define CLD_FMT_KB(buf, kb) do { \
         if ((kb) >= 1024) snprintf((buf), sizeof(buf), "%lu.%luM", \
@@ -1575,25 +2053,38 @@ static void cld_show_preview(const cld_ctx_t *ctx, uint16_t *fb,
     nes_font_draw(fb, line2,
                    (FB_W - nes_font_width(line2)) / 2, 107, COL_HIGHLT);
 
+    /* Cost line — how much flash wear this plan commits to. */
     char line3[40];
-    snprintf(line3, sizeof(line3), "%d files  %luK  %d mv",
-             ctx->n_files, (unsigned long)(total_bytes / 1024),
-             moves_planned);
+    snprintf(line3, sizeof(line3), "cost: %d writes", moves_planned);
     nes_font_draw(fb, line3,
                    (FB_W - nes_font_width(line3)) / 2, 114, COL_DIM);
 
-    const char *prompt = "A=apply  B=cancel";
-    nes_font_draw(fb, prompt,
-                   (FB_W - nes_font_width(prompt)) / 2, 121, COL_HIGHLT);
+    /* K-weight indicator — user-adjustable with LEFT/RIGHT. Lower K
+     * biases toward fewer writes, higher K toward more free-space
+     * consolidation. */
+    char line4[40];
+    snprintf(line4, sizeof(line4), "<K=%d> A=go B=x",
+             s_plan_k_values[s_plan_k_idx]);
+    nes_font_draw(fb, line4,
+                   (FB_W - nes_font_width(line4)) / 2, 121, COL_HIGHLT);
 
     nes_lcd_wait_idle();
     nes_lcd_present(fb);
 }
 
-/* Wait for a button edge. Returns 1 if user pressed A (apply), 0 for B
- * or MENU (cancel). Any other button is ignored. */
-static int cld_wait_confirm(void) {
-    /* Drain any currently-held buttons first. */
+/* Preview-screen interaction codes. */
+enum {
+    CLD_UI_APPLY  = 1,
+    CLD_UI_CANCEL = 0,
+    CLD_UI_K_DOWN = 2,   /* LEFT pressed — bias toward fewer writes */
+    CLD_UI_K_UP   = 3,   /* RIGHT pressed — bias toward more free-space */
+};
+
+/* Wait for a button edge on the preview screen. Returns one of the
+ * CLD_UI_* codes. LEFT / RIGHT edge-detected (single press, not
+ * repeat) so a held button doesn't slam through the K range. */
+static int cld_wait_interaction(void) {
+    /* Drain currently-held buttons first. */
     while (nes_buttons_read() != 0 || nes_buttons_menu_pressed()) {
         tud_task();
         sleep_ms(10);
@@ -1602,9 +2093,11 @@ static int cld_wait_confirm(void) {
         tud_task();
         sleep_ms(10);
         uint8_t b = nes_buttons_read();
-        if (b & 0x20) return 1;                    /* A (PICO-8 X bit) */
-        if (b & 0x10) return 0;                    /* B (PICO-8 O bit) */
-        if (nes_buttons_menu_pressed()) return 0;  /* MENU = cancel too */
+        if (b & 0x20) return CLD_UI_APPLY;    /* A */
+        if (b & 0x10) return CLD_UI_CANCEL;   /* B */
+        if (nes_buttons_menu_pressed()) return CLD_UI_CANCEL;
+        if (b & 0x01) return CLD_UI_K_DOWN;   /* LEFT */
+        if (b & 0x02) return CLD_UI_K_UP;     /* RIGHT */
     }
 }
 
@@ -1930,19 +2423,39 @@ int nes_picker_defrag_compact(uint16_t *fb) {
         goto cleanup;
     }
 
-    /* Count how many cluster cells need moving vs stuck. */
+    /* Preview + interactive K tuning + confirm. Loops until the user
+     * either applies (A) or cancels (B/MENU); LEFT/RIGHT step through
+     * s_plan_k_values[] and trigger a full replan so the cluster map
+     * and the move/free numbers reflect the new K. */
+    int apply = 0;
     int moves_planned = 0, unplaceable = 0;
-    for (int f = 0; f < ctx.n_files; f++) {
-        if (ctx.files[f].target_sclust == 0) unplaceable++;
-    }
-    for (DWORD c = 0; c < ctx.n_clust; c++) {
-        if (CLD_BIT_GET(ctx.pinned_bits, c)) continue;
-        if (ctx.current_owner[c] != ctx.target_owner[c]) moves_planned++;
-    }
+    for (;;) {
+        /* Count moves + unplaceable from the current plan. */
+        moves_planned = 0;
+        unplaceable = 0;
+        for (int f = 0; f < ctx.n_files; f++) {
+            if (ctx.files[f].target_sclust == 0) unplaceable++;
+        }
+        for (DWORD c = 0; c < ctx.n_clust; c++) {
+            if (CLD_BIT_GET(ctx.pinned_bits, c)) continue;
+            if (ctx.target_owner[c] != 0
+                && ctx.target_owner[c] != ctx.current_owner[c]) moves_planned++;
+        }
 
-    /* Preview + confirm. */
-    cld_show_preview(&ctx, fb, moves_planned, unplaceable);
-    int apply = cld_wait_confirm();
+        cld_show_preview(&ctx, fb, moves_planned, unplaceable);
+        int action = cld_wait_interaction();
+        if (action == CLD_UI_APPLY)  { apply = 1; break; }
+        if (action == CLD_UI_CANCEL) { apply = 0; break; }
+
+        /* K adjust — step the index, re-plan, loop back to redraw. */
+        int new_idx = s_plan_k_idx + (action == CLD_UI_K_UP ? 1 : -1);
+        if (new_idx < 0) new_idx = 0;
+        if (new_idx >= CLD_PLAN_K_COUNT) new_idx = CLD_PLAN_K_COUNT - 1;
+        if (new_idx != s_plan_k_idx) {
+            s_plan_k_idx = new_idx;
+            cld_plan_block_search(&ctx);
+        }
+    }
     if (!apply) {
         rc = 0;
         goto cleanup;
