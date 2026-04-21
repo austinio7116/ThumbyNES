@@ -263,6 +263,10 @@ if (THUMBYONE_SLOT_MODE)
         THUMBYONE_SLOT_MODE=1
         FLASH_DISK_OFFSET=0x660000u
         FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
+        # Diagnostic — adds a BatDbg row under Battery showing raw
+        # ADC counts and fresh half-voltage. Temporary; drop once
+        # the battery-calibration question is resolved.
+        THUMBYONE_BATT_DEBUG=1
     )
     # Compile ThumbyOne's handoff source into this target directly
     # (common is not a CMake library — see common/CMakeLists.txt
