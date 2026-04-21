@@ -22,7 +22,6 @@
 #  include "thumbyone_fs_stats.h"
 #  include "thumbyone_settings.h"
 #  include "thumbyone_backlight.h"
-#  include "thumbyone_battery.h"
 #endif
 
 #include <limits.h>
@@ -3484,23 +3483,6 @@ int nes_picker_run(uint16_t *fb,
             char  battery_text[24];
             int   batt_v_int  = (int)batt_v;
             int   batt_v_dec  = (int)((batt_v - batt_v_int) * 100.0f + 0.5f);
-
-#if defined(THUMBYONE_SLOT_MODE) && defined(THUMBYONE_BATT_DEBUG)
-            /* Diagnostic readout — shows the internal numbers feeding
-             * the percent calculation so we can confirm whether the
-             * "45 % / 3.29 V" report reflects a real low-voltage cell
-             * or a firmware/ADC calibration bug. Remove once the
-             * calibration question is resolved. */
-            int   dbg_raw   = 0;
-            float dbg_hfresh = 0.0f;
-            float dbg_hema   = 0.0f;
-            thumbyone_battery_read_debug(&dbg_raw, &dbg_hfresh, &dbg_hema);
-            char battery_dbg[28];
-            int hf_int = (int)dbg_hfresh;
-            int hf_dec = (int)((dbg_hfresh - hf_int) * 1000.0f + 0.5f);
-            snprintf(battery_dbg, sizeof(battery_dbg),
-                      "r%d h%d.%03d", dbg_raw, hf_int, hf_dec);
-#endif
 #ifdef THUMBYONE_SLOT_MODE
             if (charging) {
                 snprintf(battery_text, sizeof(battery_text), "CHRG %d.%02dV",
@@ -3556,17 +3538,6 @@ int nes_picker_run(uint16_t *fb,
                   .info_text = battery_text,
                   .value_ptr = &v_batt_pct, .min = 0, .max = 100,
                   .enabled = true },
-#if defined(THUMBYONE_SLOT_MODE) && defined(THUMBYONE_BATT_DEBUG)
-                /* Diagnostic row — r=raw ADC counts, h=fresh half
-                 * voltage in volts. True pack voltage = 2 × h
-                 * (assuming the 1:2 divider is correctly wired).
-                 * If a fully-charged device reads r≈2600 / h≈2.10
-                 * the ADC path is healthy; lower values point at a
-                 * calibration issue. */
-                { .kind = NES_MENU_KIND_INFO, .label = "BatDbg",
-                  .info_text = battery_dbg,
-                  .enabled = true },
-#endif
                 { .kind = NES_MENU_KIND_INFO, .label = "Storage",
                   .info_text = storage_text,
                   .value_ptr = &v_storage_used_kb, .min = 0,
