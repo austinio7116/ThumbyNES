@@ -27,9 +27,9 @@ static void xmap_set(uptr *map, int shift, u32 start_addr, u32 end_addr,
     const void *func_or_mh, int is_func)
 {
 #ifdef __clang__
-  // workaround bug (segfault) in 
+  // workaround bug (segfault) in
   // Apple LLVM version 4.2 (clang-425.0.27) (based on LLVM 3.2svn)
-  volatile 
+  volatile
 #endif
   uptr addr = (uptr)func_or_mh;
   int mask = (1 << shift) - 1;
@@ -40,6 +40,16 @@ static void xmap_set(uptr *map, int shift, u32 start_addr, u32 end_addr,
       start_addr, end_addr);
     return;
   }
+
+  /* On Cortex-M33 (Thumb-only), function pointers have bit 0 set as a
+   * Thumb-mode indicator — `&func` returns `raw_addr | 1`. The map
+   * packs addresses as `addr >> 1` with MAP_FLAG in bit 31, which
+   * can't carry bit 0 through. Strip the Thumb bit here for function
+   * entries so the misalignment check doesn't bail; the dispatch path
+   * (MAKE_68K_READ* / MAKE_68K_WRITE* in memory.h) restores bit 0
+   * before calling. Data pointers must still be naturally even. */
+  if (is_func)
+    addr &= ~(uptr)1;
 
   if (addr & 1) {
     elprintf(EL_STATUS|EL_ANOMALY, "xmap_set: ptr is not aligned: %08lx", addr);
@@ -1078,8 +1088,11 @@ static void PicoWrite8_vdp(u32 a, u32 d)
   elprintf(EL_UIO|EL_ANOMALY, "68k bad write [%06x] %02x @%06x", a, d & 0xff, SekPc);
 }
 
+extern volatile unsigned int md_dbg_vdp_writes;
+
 static void PicoWrite16_vdp(u32 a, u32 d)
 {
+  md_dbg_vdp_writes++;
   if ((a & 0x00f9) == 0x0010) { // PSG Sound
     psg_write_68k(d);
     return;

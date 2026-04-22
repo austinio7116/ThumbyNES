@@ -56,6 +56,13 @@ int main(int argc, char **argv)
     double sec = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     printf("%d frames in %.3fs = %.1f fps\n", BENCH_FRAMES, sec, BENCH_FRAMES / sec);
 
+    const uint16_t *fb_dump = mdc_framebuffer();
+    if (fb_dump) {
+        uint64_t nz = 0;
+        for (int i = 0; i < 320*240; i++) if (fb_dump[i]) nz++;
+        printf("non-zero pixels in full frame: %llu / %d\n", (unsigned long long)nz, 320*240);
+    }
+
     mdc_shutdown();
     return 0;
 }

@@ -21,7 +21,11 @@
 // Options //
 #define FAMEC_ROLL_INLINE
 #define FAMEC_EMULATE_TRACE
-#define FAMEC_CHECK_BRANCHES
+/* ThumbyNES: disabled — the check was firing spuriously on MD boot
+ * and trapping the 68K in a group-0 exception loop. Disabling lets
+ * FORCE_ALIGNMENT silently mask bit 0 on branch targets. See logs
+ * from 2026-04-22 bring-up. */
+/* #define FAMEC_CHECK_BRANCHES */
 #define FAMEC_EXTRA_INLINE
 // #define FAMEC_DEBUG
 #define FAMEC_NO_GOTOS
@@ -5057,6 +5061,17 @@ idle_install:
 int fm68k_idle_install(void)
 #endif
 {
+	/* ThumbyNES: under FAME_JUMPTABLE_IN_FLASH the JumpTable is a
+	 * const flash array — these INSTALL_IDLE writes either no-op
+	 * silently or (worse) trigger QMI streaming writes that corrupt
+	 * the baked-in dispatch entries at 0x66fa/0x71fa/etc., which
+	 * Sonic 3 and most MD ROMs hit within the first few hundred
+	 * instructions (BNE.s loop). Skip the installation entirely;
+	 * we lose the idle-detection optimisation but dispatch stays
+	 * correct. */
+#ifdef FAME_JUMPTABLE_IN_FLASH
+	return 0;
+#else
 	// printf("install..\n");
 	INSTALL_IDLE(0x71fa, 0x66fa, idle_detector_bcc8, 0x6601_idle, 0x6601);
 	INSTALL_IDLE(0x71f8, 0x66f8, idle_detector_bcc8, 0x6601_idle, 0x6601);
@@ -5069,6 +5084,7 @@ int fm68k_idle_install(void)
 	INSTALL_IDLE(0x7dfe, 0x60fe, idle_detector_bcc8, 0x6001_idle, 0x6001);
 	INSTALL_IDLE(0x7dfc, 0x60fc, idle_detector_bcc8, 0x6001_idle, 0x6001);
 	return 0;
+#endif
 }
 
 #ifndef FAMEC_NO_GOTOS
@@ -5077,6 +5093,9 @@ idle_remove:
 int fm68k_idle_remove(void)
 #endif
 {
+#ifdef FAME_JUMPTABLE_IN_FLASH
+	return 0;   /* idle install is a no-op under flash JumpTable */
+#else
 	// printf("remove..\n");
 	UNDO_IDLE(0x71fa, 0x66fa, 0x6601);
 	UNDO_IDLE(0x71f8, 0x66f8, 0x6601);
@@ -5089,6 +5108,7 @@ int fm68k_idle_remove(void)
 	UNDO_IDLE(0x7dfe, 0x60fe, 0x6001);
 	UNDO_IDLE(0x7dfc, 0x60fc, 0x6001);
 	return 0;
+#endif
 }
 #endif // PICODRIVE_HACK
 

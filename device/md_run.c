@@ -198,6 +198,18 @@ static void scale_audio(int16_t *buf, int n, int volume) {
 int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     const char *name = e->name;
 
+    /* Debug checkpoints — 8x8 coloured blocks along the top of `fb`,
+     * one per stage reached. Top row has 16 slots (128/8). Present
+     * after each so a hang freezes the visible pattern. Remove once
+     * MD is stable on device. */
+    #define MD_DBG(color, slot) do { \
+        for (int _y = 0; _y < 8; _y++) \
+            for (int _x = 0; _x < 8; _x++) \
+                fb[((slot)*8 + _x) + _y * 128] = (color); \
+        nes_lcd_wait_idle(); nes_lcd_present(fb); \
+    } while (0)
+    MD_DBG(0xF800, 0);   /* red — entry */
+
     /* XIP mmap is the only viable path on device — a 2 MB ROM won't
      * fit in heap. If the file is fragmented, defrag inline before
      * giving up. */
@@ -210,10 +222,14 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
     }
     if (mmap_rc != 0) return -30 + mmap_rc;
+    MD_DBG(0xFC00, 1);   /* orange — mmap OK */
 
     if (mdc_init(MDC_REGION_AUTO, 22050) != 0) return -2;
+    MD_DBG(0xFFE0, 2);   /* yellow — mdc_init OK */
     if (mdc_load_rom_xip(rom_const, sz) != 0)  return -3;
+    MD_DBG(0x07E0, 3);   /* green — mdc_load_rom_xip OK */
     battery_load(name);
+    MD_DBG(0x07FF, 4);   /* cyan — battery_load OK */
 
     int  volume       = VOL_DEF;
     bool show_fps     = false;
@@ -255,6 +271,8 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     absolute_time_t fps_window = get_absolute_time();
     int fps_frames = 0, fps_show = 0;
     int frame_tick = 0;
+    MD_DBG(0x001F, 5);   /* blue — about to enter main loop */
+    int first_frame_dbg = 1;
 
     while (!exit_after) {
         int menu_down = !gpio_get(BTN_MENU_GP);
@@ -488,7 +506,79 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* Run frames. Frameskip = N means "render 1 of every (N+1)",
          * but the 68K still emulates every frame for timing. */
         int frame_runs = fast_forward ? 4 : (1 + frameskip);
+        if (first_frame_dbg) { MD_DBG(0xF81F, 6); /* magenta — about to run frame 1 */ }
+        extern volatile uint8_t  md_core_scan_fired;
+        extern volatile uint16_t md_core_line_or;
+        extern volatile uint32_t md_dbg_finalize_calls;
+        extern volatile uint32_t md_dbg_finalize_early;
+        md_core_scan_fired = 0;
+        md_core_line_or    = 0;
+        md_dbg_finalize_calls = 0;
+        md_dbg_finalize_early = 0;
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
+        if (first_frame_dbg) { MD_DBG(0xFFFF, 7); /* white — frame 1 returned */ first_frame_dbg = 0; }
+        /* Per-frame heartbeat. Top row 8x8 blocks:
+         *   slot 8  — VDP reg[1] bit 6 (display enable)
+         *   slot 9  — Pico.cram[1] — first user palette word (after bg)
+         *   slot 10 — count of VDP writes this frame (cycles colours)
+         *   slot 11 — current 68K PC low 16 bits as a colour
+         *   slot 12 — FinalizeLine behaviour (black/red/green)
+         *   slot 13 — raw line_or value
+         *   slot 14 — frame counter
+         *   slot 15 — scan fired this frame */
+        {
+            extern struct Pico_s { unsigned char _pad[0]; } Pico;  /* opaque */
+            extern unsigned short *mdbg_get_cram(void);
+            extern unsigned char  *mdbg_get_vdp_regs(void);
+            extern unsigned int    mdbg_get_pc(void);
+            extern unsigned int    mdbg_get_vdp_writes(void);
+            unsigned char  *vregs = mdbg_get_vdp_regs();
+            unsigned short *cram  = mdbg_get_cram();
+            unsigned int    pc    = mdbg_get_pc();
+            unsigned int    vwr   = mdbg_get_vdp_writes();
+            uint16_t slot8  = (vregs[1] & 0x40) ? 0x07E0 : 0xF800;
+            uint16_t slot9  = cram[1];   /* first palette entry (color index 1) */
+            uint16_t slot10 = (uint16_t)(vwr * 0x1111);  /* scaled to visible */
+            uint16_t slot11 = (uint16_t)(pc & 0xFFFF);
+            (void)slot8; (void)slot9; (void)slot10; (void)slot11;
+            static const uint16_t tick_colours[8] = {
+                0xF800, 0xFC00, 0xFFE0, 0x07E0,
+                0x07FF, 0x001F, 0xF81F, 0xFFFF
+            };
+            static int tick_idx = 0;
+            uint16_t line_or = md_core_line_or;
+            uint32_t fcalls  = md_dbg_finalize_calls;
+            uint32_t fearly  = md_dbg_finalize_early;
+            uint16_t fcolor = (fcalls == 0) ? 0x0000
+                            : (fearly == fcalls) ? 0xF800
+                            : 0x07E0;
+            for (int _y = 0; _y < 8; _y++)
+                for (int _x = 0; _x < 8; _x++) {
+                    fb[ 8*8 + _x + _y * 128] = slot8;
+                    fb[ 9*8 + _x + _y * 128] = slot9 ? slot9 : 0x2104;
+                    fb[10*8 + _x + _y * 128] = slot10;
+                    fb[11*8 + _x + _y * 128] = slot11;
+                    fb[12*8 + _x + _y * 128] = fcolor;
+                    fb[13*8 + _x + _y * 128] = line_or ? line_or : 0x2104;
+                    fb[14*8 + _x + _y * 128] = tick_colours[tick_idx & 7];
+                    fb[15*8 + _x + _y * 128] = md_core_scan_fired ? 0x07E0 : 0xF800;
+                }
+            tick_idx++;
+            /* Print 68K state as hex on rows 16-23 and 24-31. */
+            {
+                extern unsigned int mdbg_get_a7(void);
+                extern unsigned int mdbg_get_sr(void);
+                extern unsigned int mdbg_get_execinfo(void);
+                char line1[32], line2[32];
+                snprintf(line1, sizeof(line1), "PC%08X W%04X", pc, vwr & 0xFFFF);
+                snprintf(line2, sizeof(line2), "A7%08X S%04X E%02X",
+                         mdbg_get_a7(), mdbg_get_sr() & 0xFFFF,
+                         mdbg_get_execinfo() & 0xFF);
+                memset(fb + 16 * 128, 0, 128 * 16 * 2);
+                nes_font_draw(fb, line1, 2, 16, 0xFFFF);
+                nes_font_draw(fb, line2, 2, 24, 0xFFFF);
+            }
+        }
         unsaved_play_frames += frame_runs;
 
         /* Per-line callbacks have filled `fb`. Overlays + present. */

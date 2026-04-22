@@ -1517,8 +1517,22 @@ void FinalizeLine555(int sh, int line, struct PicoEState *est)
   unsigned short *pal=est->HighPal;
   int len;
 
-  if (DrawLineDestIncrement == 0)
+  /* ThumbyNES debug: increment diag counters so md_run_rom can see
+   * whether this function bailed or reached the copy loop. */
+  extern volatile uint32_t md_dbg_finalize_calls;
+  extern volatile uint32_t md_dbg_finalize_early;
+  md_dbg_finalize_calls++;
+
+  /* ThumbyNES: upstream treats DrawLineDestIncrement==0 as "no user
+   * buffer, skip drawing". Our MD_LINE_SCRATCH mode deliberately sets
+   * increment=0 so every MD scanline overwrites the same 640-byte
+   * scratch buffer — we still want the pixel write to happen, the
+   * PicoScanEnd callback consumes the line right after. Use the
+   * buffer base pointer as the real sentinel instead. */
+  if (DrawLineDestBase == DefOutBuff) {
+    md_dbg_finalize_early++;
     return;
+  }
 
   if (est->rendstatus & PDRAW_BGC_DMA)
     return BgcDMA(est);

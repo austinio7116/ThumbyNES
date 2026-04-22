@@ -333,14 +333,14 @@ set_source_files_properties(
 target_compile_definitions(picodrive PRIVATE
     "IRAM_ATTR=__attribute__((section(\".time_critical.md\")))"
 )
-# cart.c / state.c use crc32 + inflate. Link the Pico SDK's host-
-# provided zlib? — device target doesn't expose one. For now these
-# code paths are unreachable in MD (no ZIP/CSO support at runtime),
-# but the symbols must resolve. Provide a handful of crc32-only
-# stubs via -Wl,--defsym; this is cheap because we never execute
-# them. (TODO: properly link zlib if we ever add ZIP support.)
+# cart.c / state.c pull in zlib's crc32 + inflate. crc32 IS called at
+# ROM-load time (rom_crc32 fires for carthw.cfg sections that only
+# specify check_crc32, like the unlicensed multicarts) — it has a
+# real implementation in thumby_platform.c. The inflate/gz* paths
+# only fire for ZIP/CSO/save-state compression which we don't wire
+# up, so stubbing them to address-0 is safe — the linker just needs
+# the symbols to resolve.
 target_link_options(picodrive INTERFACE
-    "-Wl,--defsym=crc32=0"
     "-Wl,--defsym=inflateInit2_=0"
     "-Wl,--defsym=inflate=0"
     "-Wl,--defsym=inflateEnd=0"

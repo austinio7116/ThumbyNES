@@ -196,6 +196,12 @@ target_link_libraries(gbbench PRIVATE thumbynes)
 add_executable(mdbench src/md_bench_main.c)
 target_link_libraries(mdbench PRIVATE thumbynes)
 
+# XIP-borrow variant of mdbench — mmap(PROT_READ) then mdc_load_rom_xip.
+# Reproduces the device's read-only ROM scenario so device-only crashes
+# that don't affect mdc_load_rom can be triaged on host.
+add_executable(mdbench_xip src/md_bench_xip_main.c)
+target_link_libraries(mdbench_xip PRIVATE thumbynes)
+
 # ----------------------------------------------------------------------
 # Phase 1 SDL2 host runner (built only if SDL2 is available)
 # ----------------------------------------------------------------------

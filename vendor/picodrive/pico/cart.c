@@ -821,13 +821,19 @@ int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
   return 0;
 }
 
+/* ThumbyNES: when loading from read-only XIP flash (mdc_load_rom_xip),
+ * the safety-opcode stomp below can't be written. Caller sets this to
+ * 1 around PicoCartInsert and restores to 0. Default 0 keeps vanilla
+ * PicoDrive semantics for in-RAM copies. */
+int PicoCartSuppressSafetyOp = 0;
+
 // Insert a cartridge:
 int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_cfg)
 {
   // notaz: add a 68k "jump one op back" opcode to the end of ROM.
   // This will hang the emu, but will prevent nasty crashes.
   // note: 4 bytes are padded to every ROM
-  if (rom != NULL)
+  if (rom != NULL && !PicoCartSuppressSafetyOp)
     *(u32 *)(rom+romsize) = CPU_BE2(0x6000FFFE);
 
   Pico.rom=rom;

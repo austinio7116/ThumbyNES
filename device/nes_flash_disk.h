@@ -2,13 +2,18 @@
  * ThumbyNES — flash-backed disk for FatFs and TinyUSB MSC.
  *
  * The Thumby Color carries a 16 MB QSPI flash. We reserve the
- * bottom 1 MB for firmware growth and give the next 12 MB to the
- * FAT filesystem for cart storage. Three MB on the top end is
- * left as a safety margin.
+ * bottom 3 MB for firmware growth and give the next 12 MB to the
+ * FAT filesystem for cart storage. One MB on the top end is left
+ * as a safety margin.
  *
- *   0x10000000 .. 0x10100000   firmware (1 MB room — currently ~700 KB)
- *   0x10100000 .. 0x10D00000   FAT FS for carts (12 MB)
- *   0x10D00000 .. 0x11000000   reserved / future
+ *   0x10000000 .. 0x10300000   firmware (3 MB room — currently ~1.9 MB)
+ *   0x10300000 .. 0x10F00000   FAT FS for carts (12 MB)
+ *   0x10F00000 .. 0x11000000   reserved / future
+ *
+ * The 3 MB firmware budget absorbs the PicoDrive (MD/Genesis) core
+ * in flash — FAME 68K JumpTable (256 KB), YM2612 LFO/TL tables
+ * (~340 KB), CZ80 SZHVC (256 KB). Before MD was added this region
+ * was ~1 MB; if future work trims those tables we could shrink it.
  *
  * 12 MB at 4 KB clusters → 3072 clusters → well under the FAT12
  * 4084-cluster cap. Holds ~180 typical .p8.png carts.
@@ -24,12 +29,12 @@
 #include <stddef.h>
 
 /* Flash-disk region. Defaults target the standalone-firmware
- * flash map (1 MB firmware + 12 MB FAT). Parent projects that
+ * flash map (3 MB firmware + 12 MB FAT). Parent projects that
  * embed ThumbyNES into a larger partition-table layout (notably
  * ThumbyOne) override these via -D at build time to point at the
  * shared FAT region rather than the slot's own code space. */
 #ifndef FLASH_DISK_OFFSET
-#define FLASH_DISK_OFFSET   (1u * 1024u * 1024u)    /* 1 MB into flash  */
+#define FLASH_DISK_OFFSET   (3u * 1024u * 1024u)    /* 3 MB into flash  */
 #endif
 #ifndef FLASH_DISK_SIZE
 #define FLASH_DISK_SIZE     (12u * 1024u * 1024u)   /* 12 MB usable     */

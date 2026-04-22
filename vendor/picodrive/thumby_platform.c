@@ -25,6 +25,25 @@ void lprintf(const char *fmt, ...)
     va_end(ap);
 }
 
+/* ------ zlib crc32 --------------------------------------------------- *
+ * PicoDrive's cart.c calls crc32() from rom_crc32() when carthw.cfg has
+ * sections that check_crc32 without a preceding check_str — those run
+ * unconditionally for every loaded ROM. Previous host-target builds
+ * link zlib; the device build stubbed crc32 to address 0 on the
+ * assumption it was never called, which hard-faulted on the first
+ * MD ROM load. 30-line polynomial implementation — no 1 KB CRC table.
+ * Signature matches zlib's unsigned-long interface. */
+unsigned long crc32(unsigned long crc, const unsigned char *buf, unsigned int len)
+{
+    crc = ~crc;
+    for (unsigned int i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
+    }
+    return ~crc;
+}
+
 /* ------ memory allocation -------------------------------------------- */
 void *plat_mmap(unsigned long addr, size_t size, int need_exec, int is_fixed)
 {
@@ -183,6 +202,11 @@ void PicoDraw2SetOutBuf(void *dest, int incr)      { (void)dest; (void)incr; }
 void PicoDraw2Init(void)                           {}
 void PicoFrameFull(void)                           {}
 #endif /* THUMBY_DRAW2_EXCLUDED */
+
+/* ThumbyNES debug counters for FinalizeLine555 diagnostics. */
+volatile unsigned int md_dbg_finalize_calls;
+volatile unsigned int md_dbg_finalize_early;
+volatile unsigned int md_dbg_vdp_writes;
 
 /* ------ Video mode change callback ----------------------------------- */
 /* PicoDrive calls this whenever the VDP switches between H32/H40 or
