@@ -86,6 +86,63 @@ void Pico32xPrepare (void)           {}
 void Pico32xStartup (void)           {}
 void Pico32xShutdown(void)           {}
 
+/* ------ Mega-CD link-level stubs ------------------------------------- */
+/* Same pattern as 32X: all call sites are PAHW_MCD-guarded at runtime,
+ * but the CD sources themselves carry ~20 KB of dead BSS (cdd 4.8K,
+ * cdda_out_buffer 4.6K, PicoCpuFS68k 2.2K, Pico_msd 2.1K, s68k_*_map
+ * x3 = 6K) that would be resident even when other emulator cores are
+ * active. Excluding pico/cd/*.c from the build kills all of that BSS;
+ * these stubs stand in for the handful of functions cart.c / pico.c /
+ * media.c / state.c call on CD-inactive paths or for completeness.
+ * None of these execute — PAHW_MCD is never set in our build.         */
+#define PCD_EVENT_COUNT 4
+unsigned int pcd_event_times[PCD_EVENT_COUNT];
+
+void PicoInitMCD    (void)                              {}
+void PicoExitMCD    (void)                              {}
+void PicoPowerMCD   (void)                              {}
+int  PicoResetMCD   (void)                              { return 0; }
+void PicoFrameMCD   (void)                              {}
+void PicoMCDPrepare (void)                              {}
+void PicoMemSetupCD (void)                              {}
+int  cdd_load          (const char *f, int t)           { (void)f; (void)t; return -1; }
+int  cdd_unload        (void)                           { return 0; }
+int  pcd_sync_s68k     (unsigned int m, int p)          { (void)m; (void)p; return 0; }
+void pcd_state_loaded  (void)                           {}
+int  cdd_context_save  (unsigned char *s)               { (void)s; return 0; }
+int  cdd_context_load_old(unsigned char *s)             { (void)s; return 0; }
+int  cdc_context_save  (unsigned char *s)               { (void)s; return 0; }
+int  gfx_context_save  (unsigned char *s)               { (void)s; return 0; }
+void wram_1M_to_2M     (unsigned char *w)               { (void)w; }
+void wram_2M_to_1M     (unsigned char *w)               { (void)w; }
+void DmaSlowCell       (u32 src, u32 a, int l, unsigned char i) { (void)src; (void)a; (void)l; (void)i; }
+void pcd_pcm_update    (s32 *b, int l, int st)          { (void)b; (void)l; (void)st; }
+u32  pcd_base_address;
+int  cdd_context_load    (unsigned char *s)             { (void)s; return 0; }
+int  cdc_context_load    (unsigned char *s)             { (void)s; return 0; }
+int  cdc_context_load_old(unsigned char *s)             { (void)s; return 0; }
+int  gfx_context_load    (unsigned char *s)             { (void)s; return 0; }
+/* s68k memory maps (sub-CPU bus mapping table). Sized minimally — no
+ * code ever indexes them since PAHW_MCD never fires. */
+char s68k_read8_map[1], s68k_read16_map[1];
+char s68k_write8_map[1], s68k_write16_map[1];
+unsigned int SekCycleCntS68k;
+unsigned int SekCycleAimS68k;
+
+/* ThumbyNES: stub globals for symbols the MCD cd/*.c sources used to
+ * define. Compiled code in non-CD files takes their address under
+ * `if (is_sub)` / `if (PicoIn.AHW & PAHW_MCD)` branches that never
+ * execute — the linker just needs a symbol by name. Sizing each as
+ * a 1-byte array drops 2.2 KB (PicoCpuFS68k) + 2.1 KB (Pico_msd) +
+ * 4.6 KB (cdda_out_buffer) of otherwise-resident BSS. Declared
+ * without the real type so the size mismatch stays invisible to
+ * anything that would warn. */
+char PicoCpuFS68k[1];
+char Pico_msd[1];
+void *Pico_mcd;
+/* cdda_out_buffer is patched to a pointer in sound.c (see VENDORING.md),
+ * so no BSS cost here either — stays NULL in MD-only build. */
+
 /* ------ Video mode change callback ----------------------------------- */
 /* PicoDrive calls this whenever the VDP switches between H32/H40 or
  * between 28-row and 30-row modes. The device/host frontend uses it to

@@ -906,7 +906,9 @@ PICO_INTERNAL int  SekInterruptS68k(int irq);
 void SekInterruptClearS68k(int irq);
 
 // sound/sound.c
-extern short cdda_out_buffer[2*1152];
+/* ThumbyNES: pointer form — 4.6 KB of BSS eliminated; stays NULL in
+ * MD-only build. See the matching patch in pico/sound/sound.c. */
+extern short *cdda_out_buffer;
 
 void cdda_start_play(int lba_base, int lba_offset, int lb_len);
 

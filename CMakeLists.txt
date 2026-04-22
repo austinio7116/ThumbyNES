@@ -91,7 +91,6 @@ set(PICODRIVE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/picodrive)
 
 file(GLOB PICODRIVE_PICO_SRC   CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/*.c)
 file(GLOB PICODRIVE_SOUND_SRC  CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/sound/*.c)
-file(GLOB PICODRIVE_CD_SRC     CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/cd/*.c)
 file(GLOB PICODRIVE_CARTHW_SRC CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/carthw/*.c)
 file(GLOB PICODRIVE_SVP_SRC    CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/carthw/svp/*.c)
 file(GLOB PICODRIVE_PICOHW_SRC CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/pico/*.c)
@@ -100,17 +99,20 @@ file(GLOB PICODRIVE_UNZIP_SRC  CONFIGURE_DEPENDS ${PICODRIVE_DIR}/unzip/*.c)
 # Drop sources that aren't separate translation units, require 32X, or
 # need assembly cores we don't build:
 #   debugCPU.c — Musashi-vs-FAME validator (only compiled with pdb=1)
-#   pico_cmn.c / cell_map.c — #include'd by their containers
+#   pico_cmn.c — #include'd by pico.c, not a standalone TU
 #   carthw/svp/compiler.c — DRC, needs ARM emit_arm.c
+#   pico/cd/*.c — Mega-CD support. ~20 KB of otherwise-always-resident
+#     BSS (cdd, cdda_out_buffer, PicoCpuFS68k, Pico_msd, s68k_*_map)
+#     that never executes because PAHW_MCD is never set. Stubs live in
+#     thumby_platform.c for the ~11 entry points the runtime-gated
+#     call sites reach.
 list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/debugCPU\\.c$")
 list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/pico_cmn\\.c$")
-list(FILTER PICODRIVE_CD_SRC   EXCLUDE REGEX "pico/cd/cell_map\\.c$")
 list(FILTER PICODRIVE_SVP_SRC  EXCLUDE REGEX "carthw/svp/compiler\\.c$")
 
 add_library(picodrive STATIC
     ${PICODRIVE_PICO_SRC}
     ${PICODRIVE_SOUND_SRC}
-    ${PICODRIVE_CD_SRC}
     ${PICODRIVE_CARTHW_SRC}
     ${PICODRIVE_SVP_SRC}
     ${PICODRIVE_PICOHW_SRC}

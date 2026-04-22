@@ -26,7 +26,10 @@ void (*PsndMix_32_to_16)(s16 *dest, s32 *src, int count) = mix_32_to_16_stereo;
 static s32 PsndBuffer[2*(54000+100)/50+2];
 
 // cdda output buffer
-s16 cdda_out_buffer[2*1152];
+/* ThumbyNES: pointer instead of array — 4.6 KB of BSS that's only
+ * needed for Mega-CD CDDA playback (PAHW_MCD). Left NULL until the
+ * CD path ever sets it (which it doesn't in our MD-only build). */
+s16 *cdda_out_buffer;
 
 // FM resampling polyphase FIR
 static resampler_t *fmresampler;
@@ -200,7 +203,9 @@ void PsndRerate(int preserve_state)
 
   // clear all buffers
   memset32(PsndBuffer, 0, sizeof(PsndBuffer)/4);
-  memset(cdda_out_buffer, 0, sizeof(cdda_out_buffer));
+  /* ThumbyNES: cdda_out_buffer is a pointer now, NULL in our MD-only
+   * build. Guard the unconditional clear. */
+  if (cdda_out_buffer) memset(cdda_out_buffer, 0, 2*1152*sizeof(s16));
   if (PicoIn.sndOut)
     PsndClear();
 

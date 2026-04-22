@@ -152,10 +152,35 @@ NO_32X), and link-level stubs for the 32X memory-map hooks.
    reference to `drc_cmn_cleanup` is under `_SVP_DRC` in `svp.c` which
    we don't define. 4 MB of dead BSS gone.
 
-Patches 1-5 are all top-of-block-only, document-the-fix style — no
-logic changes. Look for `/* ThumbyNES: ... */` markers to find them.
-Combined impact on static BSS: **~4.35 MB → ~40 KB**, of which ~353
-KB is reclaimable SRAM on device (the 4 MB tcache was always dead).
+7. **`pico/cd/*.c` excluded from build + MCD stubs in
+   `thumby_platform.c`** — Mega-CD support carried ~15 KB of
+   unconditionally-resident BSS (`cdd` 4.8K, `Pico_msd` 2.1K,
+   `PicoCpuFS68k` 2.2K, `s68k_*_map` ×3 = 6K) that never executes
+   (PAHW_MCD never set). The CD sources now don't compile; stubs in
+   `thumby_platform.c` stand in for the ~15 entry points reached by
+   runtime-gated call sites in `pico.c`/`cart.c`/`state.c`/
+   `videoport.c`/`sound.c`/`debug.c`. The three remaining MCD-only
+   globals (`PicoCpuFS68k`, `Pico_msd`, `Pico_mcd`) are declared as
+   1-byte stubs rather than full-sized structs — compiled code takes
+   their addresses inside dead branches but never dereferences them.
+
+8. **`pico/sound/sound.c` + `pico/pico_int.h`** — `cdda_out_buffer`
+   (4.6 KB CDDA mix buffer) moved from an array to a pointer, left
+   NULL in MD-only builds. The one unconditional `memset` in
+   `PsndRerate` now checks for NULL. Header extern updated to match.
+
+Patches 1-5, 7, 8 are all top-of-block-only, document-the-fix style —
+no logic changes. Look for `/* ThumbyNES: ... */` markers to find them.
+Combined impact on static BSS: **~4.4 MB → ~26 KB**, of which ~353 KB
+is reclaimable SRAM on device (the 4 MB tcache was always dead).
+
+**Remaining ~26 KB is genuinely hot MD state** (68K context, VDP state,
+memory maps, YM2612 state, Z80 state, sprite line cache). Pointer-
+redirecting these would add a dereference per memory access — wrong
+trade-off. The device build plan is to put all of `libpicodrive.a`'s
+BSS into a named linker section that overlaps with the other emulator
+cores' sections, so the combined firmware pays 0 extra resident bytes
+when MD isn't the active core.
 
 ## nofrendo/
 
