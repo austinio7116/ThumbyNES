@@ -228,11 +228,22 @@ void Cz80_Reset(cz80_struc *CPU)
 
 /* */
 #if PICODRIVE_HACKS
+/* ThumbyNES: on Cortex-M33 (Thumb-only), function pointers have bit 0
+ * set as the Thumb indicator. The z80 map packs addresses as
+ * (addr >> 1) | MAP_FLAG and reconstructs via (v << 1) which produces
+ * an even address — calling that on M33 bus-faults. Restore bit 0
+ * at dispatch when compiling Thumb. Same fix as cpu68k_map's MAP_FP
+ * in pico/memory.h. */
+#ifdef __thumb__
+# define CZ80_MAP_FP(v)  (((v) << 1) | 1)
+#else
+# define CZ80_MAP_FP(v)  ((v) << 1)
+#endif
 static inline unsigned char picodrive_read(unsigned short a)
 {
 	uptr v = z80_read_map[a >> Z80_MEM_SHIFT];
 	if (map_flag_set(v))
-		return ((z80_read_f *)(v << 1))(a);
+		return ((z80_read_f *)CZ80_MAP_FP(v))(a);
 	return *(unsigned char *)((v << 1) + a);
 }
 #endif
