@@ -121,7 +121,11 @@ static uint16_t read_md_buttons(void) {
 
 /* --- per-ROM cfg --------------------------------------------------- */
 
-#define CFG_MAGIC   0x4D444556u   /* 'MDEV' */
+/* CFG_MAGIC bumped to 0x4D444557 ('MDEW') when adding `blend`.
+ * Older saves still load (we accept them under the read guard) but
+ * won't have the blend bit set — so default is on. */
+#define CFG_MAGIC   0x4D444557u   /* 'MDEW' — was 'MDEV', added blend */
+#define CFG_MAGIC_V0 0x4D444556u  /* old sidecar accepted on load */
 
 #define VOL_MIN    0
 #define VOL_UNITY 15
@@ -137,14 +141,15 @@ typedef struct {
     uint8_t  volume;
     uint8_t  six_button;    /* 0 = 3-button pad, 1 = 6-button */
     uint8_t  frameskip;     /* 0, 1, or 2 */
-    uint8_t  reserved[3];
+    uint8_t  blend;         /* 0 = nearest, 1 = 2x2 packed-RGB565 blend */
+    uint8_t  reserved[2];
     uint16_t clock_mhz;     /* 0 = use global; otherwise per-cart override */
     uint16_t _pad2;
 } md_cfg_t;
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *volume, bool *six_btn,
-                      int *frameskip, int *clock_mhz) {
+                      int *frameskip, bool *blend, int *clock_mhz) {
     (void)scale;   /* scale_mode not restored across launches, same as SMS. */
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
@@ -152,20 +157,25 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
     if (f_open(&f, path, FA_READ) != FR_OK) return;
     md_cfg_t c = {0};
     UINT br = 0;
-    if (f_read(&f, &c, sizeof(c), &br) == FR_OK && br >= 4
-        && c.magic == CFG_MAGIC) {
+    if (f_read(&f, &c, sizeof(c), &br) != FR_OK || br < 4) {
+        f_close(&f);
+        return;
+    }
+    if (c.magic == CFG_MAGIC || c.magic == CFG_MAGIC_V0) {
         *show_fps = c.show_fps != 0;
         if (c.volume <= VOL_MAX) *volume = c.volume;
         *six_btn   = c.six_button != 0;
         if (c.frameskip <= 2) *frameskip = c.frameskip;
         if (clock_mhz) *clock_mhz = c.clock_mhz;
+        /* blend field only valid on new-magic saves. V0 keeps default. */
+        if (c.magic == CFG_MAGIC && blend) *blend = c.blend != 0;
     }
     f_close(&f);
 }
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int volume, bool six_btn,
-                      int frameskip, int clock_mhz) {
+                      int frameskip, bool blend, int clock_mhz) {
     (void)scale;
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
@@ -175,7 +185,8 @@ static void cfg_save(const char *rom_name, scale_mode_t scale,
         .magic = CFG_MAGIC, .scale_mode = (uint8_t)SCALE_FIT,
         .show_fps = show_fps ? 1 : 0, .volume = (uint8_t)volume,
         .six_button = six_btn ? 1 : 0, .frameskip = (uint8_t)frameskip,
-        .reserved = {0,0,0}, .clock_mhz = (uint16_t)clock_mhz, ._pad2 = 0,
+        .blend = blend ? 1 : 0, .reserved = {0,0},
+        .clock_mhz = (uint16_t)clock_mhz, ._pad2 = 0,
     };
     UINT bw = 0;
     f_write(&f, &c, sizeof(c), &bw);
@@ -232,10 +243,12 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     bool fast_forward = false;
     bool six_button   = false;
     int  frameskip    = 0;
+    bool blend        = true;   /* default on; toggle for crispness */
     scale_mode_t scale_mode = SCALE_FIT;
     int  cart_clock_mhz = 0;
     cfg_load(name, &scale_mode, &show_fps, &volume, &six_button,
-             &frameskip, &cart_clock_mhz);
+             &frameskip, &blend, &cart_clock_mhz);
+    mdc_set_blend(blend ? 1 : 0);
     volume = nes_picker_global_volume();
     bool cfg_dirty = false;
 
@@ -332,15 +345,23 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         } else {
             if (menu_was_down) {
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
-                    /* Short tap of MENU alone → send MD START for
-                     * one frame. Scale-mode cycling moved into the
-                     * in-game menu (hold MENU longer to open). */
-                    s_start_pulse_frames = 2;
+                    /* Short tap of MENU alone → cycle FIT/FILL/CROP. */
+                    scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
+                    cfg_dirty = true;
                 }
                 menu_press_ms = 0;
                 menu_was_down = 0;
                 menu_consumed = 0;
             }
+        }
+
+        /* LB+RB simultaneous chord → MD START pulse. Triggers on the
+         * edge when both go from "not both held" to "both held". */
+        {
+            static int prev_lb_rb = 0;
+            int both_now = lb_down && rb_down;
+            if (both_now && !prev_lb_rb) s_start_pulse_frames = 2;
+            prev_lb_rb = both_now;
         }
         if (s_start_pulse_frames > 0) s_start_pulse_frames--;
         prev_a = a_down;
@@ -358,6 +379,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             int v_ff    = fast_forward ? 1 : 0;
             int v_fps   = show_fps ? 1 : 0;
             int v_6btn  = six_button ? 1 : 0;
+            int v_blend = blend ? 1 : 0;
             int v_skip  = frameskip;
             int v_clock = 0;
             if (cart_clock_mhz == 125) v_clock = 1;
@@ -401,6 +423,8 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .value_ptr = &v_fps, .enabled = true },
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "6-button",
                   .value_ptr = &v_6btn, .enabled = true },
+                { .kind = NES_MENU_KIND_TOGGLE, .label = "BLEND",
+                  .value_ptr = &v_blend, .enabled = true },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Frameskip",
                   .value_ptr = &v_skip, .choices = skip_choices, .num_choices = 3,
                   .enabled = true },
@@ -438,6 +462,8 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if ((bool)v_ff   != fast_forward) { fast_forward = (bool)v_ff;       }
             if ((bool)v_fps  != show_fps )    { show_fps     = (bool)v_fps;  cfg_dirty = true; }
             if ((bool)v_6btn != six_button)   { six_button   = (bool)v_6btn;cfg_dirty = true; }
+            if ((bool)v_blend!= blend)        { blend        = (bool)v_blend;cfg_dirty = true;
+                                                mdc_set_blend(blend ? 1 : 0); }
             if (v_skip != frameskip)          { frameskip    = v_skip;      cfg_dirty = true; }
             int new_mhz = clock_mhz_arr[v_clock];
             if (new_mhz != cart_clock_mhz) {
@@ -489,7 +515,12 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* Set up the line-scratch downsample target for this frame.
          * PicoDrive will write each MD scanline into md_core's 640-byte
          * scratch and our PicoScanEnd callback streams the downsample
-         * directly into `fb` (128x128 LCD) — no intermediate frame. */
+         * directly into `fb` (128x128 LCD) — no intermediate frame.
+         *
+         * Wait for the previous frame's DMA BEFORE letting PicoDrive
+         * touch `fb`; otherwise the scan callbacks race the in-flight
+         * transfer and the screen tears. */
+        nes_lcd_wait_idle();
         int vx, vy, vw, vh;
         mdc_viewport(&vx, &vy, &vw, &vh);
         /* Clear letterbox columns/rows once per frame (FIT/CROP). The
@@ -508,7 +539,6 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         /* Per-line callbacks have filled `fb`. Overlays + present. */
         {
-            nes_lcd_wait_idle();
             if (show_fps) {
                 char ftxt[16];
                 snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
@@ -552,7 +582,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     battery_save(name);
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, six_button,
-                             frameskip, cart_clock_mhz);
+                             frameskip, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     mdc_shutdown();
     while (!gpio_get(BTN_MENU_GP)) sleep_ms(10);

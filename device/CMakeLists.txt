@@ -367,6 +367,12 @@ target_include_directories(thumbynes_core PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}     # for thumby_state_bridge.h
 )
 target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH)
+# md_core_scan_end is called 224× per frame — hot enough to warrant
+# running from RAM via IRAM_ATTR. Same section the picodrive target
+# uses so everything MD-hot lands in one linker-copied block.
+target_compile_definitions(thumbynes_core PRIVATE
+    "IRAM_ATTR=__attribute__((section(\".time_critical.md\")))"
+)
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb picodrive)
 

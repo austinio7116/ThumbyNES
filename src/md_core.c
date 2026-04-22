@@ -30,8 +30,14 @@ static uint16_t   s_line_scratch[MDC_MAX_W];
 static uint16_t  *s_fb = s_line_scratch;
 static uint16_t  *s_lcd_fb;               /* set by mdc_set_scale_target */
 static uint8_t    s_scale_mode;
+static uint8_t    s_blend;                /* 0 = nearest (fast), 1 = 2x2 blend */
 static int16_t    s_vx, s_vy, s_vw, s_vh;
 static int16_t    s_pan_x, s_pan_y;
+/* Previous-dst-row tracking for vertical blending. When two+ src
+ * lines map to the same dy, the 2nd+ are averaged into whatever's
+ * already in the dst row. */
+static int16_t    s_prev_dy_fit;
+static int16_t    s_prev_dy_fill;
 #else
 /* Full 320x240 RGB565 frame. PicoDrive writes one scanline at a time
  * through DrawLineDest; we hand it a contiguous buffer and a row
@@ -268,6 +274,13 @@ void mdc_run_frame(void)
      * wipes PicoIn.sndOut. */
     PicoIn.sndOut = s_sndbuf;
     s_mixcount = 0;
+#ifdef MD_LINE_SCRATCH
+    /* Reset prev-dy trackers at frame boundary — first src line of
+     * the frame always writes fresh (no blend with a stale previous
+     * row from the prior frame). */
+    s_prev_dy_fit  = -1;
+    s_prev_dy_fill = -1;
+#endif
     PicoFrame();
 }
 
@@ -308,9 +321,20 @@ void mdc_set_scale_target(uint16_t *lcd_fb, int scale_mode,
     s_pan_x = (int16_t)pan_x; s_pan_y = (int16_t)pan_y;
 }
 
+void mdc_set_blend(int blend) { s_blend = blend ? 1 : 0; }
+
+/* Host builds don't have IRAM_ATTR; expand to nothing so md_core.c
+ * stays portable. Device build defines it via -DIRAM_ATTR=... */
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
+
 /* Downsample one MD scanline (just drawn into s_line_scratch) into
  * the 128x128 LCD framebuffer. `line` is 0..223 (V28) or 0..239 (V30).
- * Called from PicoDrive's per-line callback. */
+ * Called from PicoDrive's per-line callback.
+ * Runs from RAM on device — called 224× per frame, saves the
+ * ~50 ns/call XIP prefetch overhead. */
+IRAM_ATTR
 int md_core_scan_end(unsigned int line)
 {
     if (!s_lcd_fb) return 0;
@@ -346,17 +370,46 @@ int md_core_scan_end(unsigned int line)
         /* FIT (letterboxed 128x90) or FILL (stretched 128x128). */
         int dst_h = (s_scale_mode == 1) ? 128 : 90;
         int letterbox_top = (128 - dst_h) / 2;
-        /* Map source y to dest dy. */
         int dy = (y_src * dst_h) / s_vh;
-        /* Which src lines map to this dy? Draw only when this is
-         * the first src line for that dy — avoids redundant writes
-         * for multi-src-per-dy cases. */
-        int prev_dy = (y_src > 0) ? ((y_src - 1) * dst_h) / s_vh : -1;
-        if (dy == prev_dy) return 0;
+        int16_t *prev_dy_slot = (s_scale_mode == 1)
+                                ? &s_prev_dy_fill : &s_prev_dy_fit;
+        int blend_with_prev = (dy == *prev_dy_slot);
+        *prev_dy_slot = (int16_t)dy;
         uint16_t *drow = s_lcd_fb + (letterbox_top + dy) * 128;
-        for (int dx = 0; dx < 128; dx++) {
-            int sx = (dx * s_vw) / 128;
-            drow[dx] = srow[sx];
+
+        if (!s_blend) {
+            /* Nearest-neighbour — fastest. For the "second src line
+             * maps to same dst row" case, just skip; first src line's
+             * pixels stay in place. */
+            if (blend_with_prev) return 0;
+            for (int dx = 0; dx < 128; dx++) {
+                int sx = (dx * s_vw) / 128;
+                drow[dx] = srow[sx];
+            }
+        } else {
+            /* 2x2-ish box blend using packed RGB565 trick (same
+             * mechanism as gb_run.c's exp565/lerp565p):
+             *   expand p  → (p | p<<16) & 0x07E0F81F
+             *   places R,B in low 16 and G in high 16 with gap bits
+             *   that absorb adds without channels bleeding.
+             * For 50/50 avg of two expanded words: (A+B)>>1 & mask.
+             * H: average src[sx] and src[sx+1] → new (expanded).
+             * V: if same dst row already drawn, average new with
+             *    what's already there (also expanded inline). */
+            const uint32_t MASK = 0x07E0F81Fu;
+            for (int dx = 0; dx < 128; dx++) {
+                int sx = (dx * s_vw) / 128;
+                int sx2 = sx + 1; if (sx2 >= s_vw) sx2 = sx;
+                uint32_t ea = (srow[sx]  | ((uint32_t)srow[sx]  << 16)) & MASK;
+                uint32_t eb = (srow[sx2] | ((uint32_t)srow[sx2] << 16)) & MASK;
+                uint32_t avg = ((ea + eb) >> 1) & MASK;
+                if (blend_with_prev) {
+                    uint16_t old_px = drow[dx];
+                    uint32_t eo = (old_px | ((uint32_t)old_px << 16)) & MASK;
+                    avg = ((avg + eo) >> 1) & MASK;
+                }
+                drow[dx] = (uint16_t)((avg | (avg >> 16)) & 0xFFFFu);
+            }
         }
     }
     return 0;

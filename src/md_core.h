@@ -102,6 +102,9 @@ const uint16_t *mdc_framebuffer(void);
 void mdc_set_scale_target(uint16_t *lcd_fb_128x128,
                            int scale_mode, int vx, int vy, int vw, int vh,
                            int pan_x, int pan_y);
+/* blend: 0 = nearest (fastest, crisp), 1 = 2x2 packed RGB565 blend
+ * (smoother, ~same speed on Cortex-M33 with the packed channel trick). */
+void mdc_set_blend(int blend);
 #endif
 
 /* Set Player 1 controller mask (MDC_BTN_*). */
