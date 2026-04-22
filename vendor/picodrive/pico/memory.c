@@ -796,11 +796,8 @@ static u32 PicoRead8_rom_BE(u32 a)
 static u32 PicoRead16_rom_BE(u32 a)
 {
   a &= 0x00fffffe;
-  if (a < Pico.romsize) {
-    u32 v = (u16)__builtin_bswap16(*(u16 *)(Pico.rom + a));
-    if (getenv("MD_TRACE")) fprintf(stderr, "r16 %06x -> %04x\n", a, v);
-    return v;
-  }
+  if (a < Pico.romsize)
+    return (u16)__builtin_bswap16(*(u16 *)(Pico.rom + a));
   return m68k_unmapped_read16(a);
 }
 #endif
