@@ -45,6 +45,10 @@ PICO_INTERNAL void PsndExit(void)
   opll = NULL;
 
   resampler_free(fmresampler); fmresampler = NULL;
+
+  /* ThumbyNES: drop the YM2612 log tables so the MD core doesn't keep
+   * 213 KB resident when other cores are active. */
+  YM2612Shutdown_();
 }
 
 PICO_INTERNAL void PsndReset(void)

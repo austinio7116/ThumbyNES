@@ -29,7 +29,10 @@ static unsigned char PicoDraw2FB_[LINE_WIDTH * (8+240+8) + 8];
 static u32 HighCache2A[2*41*(TILE_ROWS+1)+1+1]; // caches for high layers
 static u32 HighCache2B[2*41*(TILE_ROWS+1)+1+1];
 
-unsigned short *PicoCramHigh=PicoMem.cram; // pointer to CRAM buff (0x40 shorts), converted to native device color (works only with 16bit for now)
+/* ThumbyNES: PicoMem is a pointer now, so this must be runtime-initialized
+ * (file-scope initializers need a constant address). PicoDraw2Init assigns it
+ * after PicoMem_ptr is allocated. */
+unsigned short *PicoCramHigh; // pointer to CRAM buff (0x40 shorts), converted to native device color (works only with 16bit for now)
 void (*PicoPrepareCram)(void) = NULL;      // prepares PicoCramHigh for renderer to use
 
 
@@ -747,5 +750,6 @@ void PicoDraw2SetOutBuf(void *dest, int incr)
 
 void PicoDraw2Init(void)
 {
+	PicoCramHigh = PicoMem.cram;   /* ThumbyNES: deferred init, see top of file */
 	PicoDraw2SetOutBuf(NULL, 0);
 }

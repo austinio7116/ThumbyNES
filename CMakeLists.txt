@@ -117,7 +117,11 @@ add_library(picodrive STATIC
     ${PICODRIVE_UNZIP_SRC}
     ${PICODRIVE_DIR}/cpu/fame/famec.c
     ${PICODRIVE_DIR}/cpu/cz80/cz80.c
-    ${PICODRIVE_DIR}/cpu/drc/cmn.c
+    # cpu/drc/cmn.c deliberately excluded — it declares a 4 MB static
+    # tcache_default[] for dynamic recompilation. We don't build any
+    # DRC (no SH2 DRC / no SVP DRC / no Cyclone), so the only reference
+    # to drc_cmn_cleanup is under _SVP_DRC in svp.c, which we don't
+    # define. Keeping cmn.c out of the build saves 4 MB BSS on device.
     ${PICODRIVE_DIR}/thumby_platform.c
 )
 target_include_directories(picodrive PUBLIC

@@ -12,7 +12,7 @@
 #include "sound/ym2612.h"
 
 struct Pico Pico;
-struct PicoMem PicoMem;
+struct PicoMemMap *PicoMem_ptr;
 PicoInterface PicoIn;
 
 void (*PicoResetHook)(void) = NULL;
@@ -21,6 +21,13 @@ void (*PicoLineHook)(void) = NULL;
 // to be called once on emu init
 void PicoInit(void)
 {
+  // ThumbyNES: lazy-alloc the PicoMem blob. First call grabs 140 KB;
+  // PicoExit gives it back so a sibling core can reuse the SRAM.
+  if (!PicoMem_ptr) {
+    PicoMem_ptr = (struct PicoMemMap *)calloc(1, sizeof(struct PicoMemMap));
+    if (!PicoMem_ptr) return;
+  }
+
   // Blank space for state:
   memset(&Pico,0,sizeof(Pico));
   memset(&PicoMem,0,sizeof(PicoMem));
@@ -59,6 +66,12 @@ void PicoExit(void)
   free(Pico.sv.data);
   Pico.sv.data = NULL;
   Pico.sv.start = Pico.sv.end = 0;
+
+  /* ThumbyNES: return PicoMem to the heap so a sibling core can reuse
+   * the 140 KB. Safe to re-enter (PicoInit re-allocs on next call). */
+  free(PicoMem_ptr);
+  PicoMem_ptr = NULL;
+
   pevt_dump();
 }
 

@@ -173,6 +173,9 @@ extern YM2612 ym2612;
 
 void YM2612Init_(int baseclock, int rate, int flags);
 void YM2612ResetChip_(void);
+/* ThumbyNES: free the heap-allocated log tables so MD's 213 KB doesn't
+ * stay resident when a non-MD core is active in the combined firmware. */
+void YM2612Shutdown_(void);
 int  YM2612UpdateOne_(s32 *buffer, int length, int stereo, int is_buf_empty);
 
 int  YM2612Write_(unsigned int a, unsigned int v);

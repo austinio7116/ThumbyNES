@@ -405,7 +405,7 @@ struct PicoEState
   int SonicPalCount;
 };
 
-struct PicoMem
+struct PicoMemMap
 {
   unsigned char ram[0x10000];  // 0x00000 scratch ram
   union {                      // vram is byteswapped for easier reads when drawing
@@ -811,7 +811,12 @@ void pcd_state_loaded_mem(void);
 
 // pico.c
 extern struct Pico Pico;
-extern struct PicoMem PicoMem;
+/* ThumbyNES: PicoMem is heap-allocated by PicoInit so its ~140 KB of
+ * VRAM/CRAM/VSRAM/zram/ioports doesn't live in BSS when a sibling
+ * emulator core is active. The #define keeps every `PicoMem.foo`,
+ * `&PicoMem`, and `sizeof(PicoMem)` access site unchanged. */
+extern struct PicoMemMap *PicoMem_ptr;
+#define PicoMem (*PicoMem_ptr)
 extern void (*PicoResetHook)(void);
 extern void (*PicoLineHook)(void);
 PICO_INTERNAL int  CheckDMA(int cycles);

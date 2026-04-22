@@ -183,10 +183,13 @@ void memset32(void *dest, int c, int count);
 */
 //#define TL_TAB_LEN (13*2*TL_RES_LEN)
 #define TL_TAB_LEN (13*TL_RES_LEN*256/8) // 106496*2
-UINT16 ym_tl_tab[TL_TAB_LEN];
+/* ThumbyNES: heap-allocated on first init_tables() call so the 213 KB
+ * log table doesn't consume SRAM when other emulator cores are active.
+ * Freed by YM2612Shutdown_() hooked into PsndExit. */
+UINT16 *ym_tl_tab;
 
 /* ~3K wasted but oh well */
-UINT16 ym_tl_tab2[13*TL_RES_LEN];
+UINT16 *ym_tl_tab2;
 
 #define ENV_QUIET		(2*13*TL_RES_LEN/8)
 
@@ -1470,6 +1473,12 @@ static void init_tables(void)
 	if (ym_init_tab) return;
 	ym_init_tab = 1;
 
+	/* ThumbyNES: allocate the two log tables on first call. Freed by
+	 * YM2612Shutdown_() when the MD core tears down so other emulator
+	 * cores in the combined firmware don't see this 213 KB resident. */
+	if (!ym_tl_tab)  ym_tl_tab  = (UINT16 *)calloc(TL_TAB_LEN,      sizeof(UINT16));
+	if (!ym_tl_tab2) ym_tl_tab2 = (UINT16 *)calloc(13*TL_RES_LEN,   sizeof(UINT16));
+
 	for (i=0; i < 256; i++)
 	{
 		/* non-standard sinus */
@@ -1837,6 +1846,17 @@ void YM2612Init_(int clock, int rate, int flags)
 
 	/* Extend handler */
 	YM2612ResetChip_();
+}
+
+
+/* ThumbyNES: free the heap-allocated log tables. Safe to call when
+ * MD isn't loaded (NULL pointers are ignored). Resets the init guard
+ * so the tables are rebuilt on next YM2612Init. */
+void YM2612Shutdown_(void)
+{
+	free(ym_tl_tab);  ym_tl_tab  = NULL;
+	free(ym_tl_tab2); ym_tl_tab2 = NULL;
+	ym_init_tab = 0;
 }
 
 

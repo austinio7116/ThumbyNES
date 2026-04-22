@@ -119,9 +119,43 @@ NO_32X), and link-level stubs for the 32X memory-map hooks.
    `PicoDrawSetCallbacks`. The NO_32X build doesn't declare the
    symbols. `PicoScanBegin` / `PicoScanEnd` are always set.
 
-Both patches are top-of-block-only and document-the-fix style —
-no logic changes, just gating. Look for `/* ThumbyNES: ... */`
-markers.
+3. **`pico/sound/ym2612.{c,h}`** — the 213 KB `ym_tl_tab` and 6.6 KB
+   `ym_tl_tab2` log tables were file-scope arrays (BSS). They now live
+   as pointers, `calloc`'d on first `init_tables()` call. Added a new
+   `YM2612Shutdown_()` that frees them and resets the init guard.
+   Called from `PsndExit()` (see patch 4 below). Moves 219 KB of BSS
+   to the heap so the MD core doesn't keep that resident when a
+   sibling core is active.
+
+4. **`pico/sound/sound.c`** — one-liner: `PsndExit()` now calls
+   `YM2612Shutdown_()` to drop the heap-allocated log tables on core
+   teardown.
+
+5. **`pico/pico_int.h` + `pico/pico.c` + `pico/draw2.c`** — `PicoMem`
+   (140 KB of VRAM / CRAM / VSRAM / zram / ioports) moved from BSS to
+   the heap. Approach:
+     - Renamed the struct tag from `struct PicoMem` to `struct
+       PicoMemMap` (4 sites) so it doesn't collide with the macro.
+     - Added `extern struct PicoMemMap *PicoMem_ptr;` and
+       `#define PicoMem (*PicoMem_ptr)` in `pico_int.h` so all 170+
+       existing `PicoMem.foo` / `&PicoMem` / `sizeof(PicoMem)` access
+       sites keep working unchanged.
+     - `PicoInit()` lazy-allocs, `PicoExit()` frees.
+     - `pico/draw2.c`'s file-scope initializer
+       `unsigned short *PicoCramHigh = PicoMem.cram;` moved into
+       `PicoDraw2Init()` since `PicoMem.cram` is no longer a constant
+       expression.
+
+6. **`cpu/drc/cmn.c` excluded from build** (CMake `add_library`) — it
+   declared a 4 MB static `tcache_default[]` for dynamic recompilation.
+   We build no DRC (no SH2 DRC, no SVP DRC, no Cyclone), so the only
+   reference to `drc_cmn_cleanup` is under `_SVP_DRC` in `svp.c` which
+   we don't define. 4 MB of dead BSS gone.
+
+Patches 1-5 are all top-of-block-only, document-the-fix style — no
+logic changes. Look for `/* ThumbyNES: ... */` markers to find them.
+Combined impact on static BSS: **~4.35 MB → ~40 KB**, of which ~353
+KB is reclaimable SRAM on device (the 4 MB tcache was always dead).
 
 ## nofrendo/
 
