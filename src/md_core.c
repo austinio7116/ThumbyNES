@@ -15,6 +15,10 @@
 #include "pico/pico_types.h"
 #include "pico/pico.h"
 #include "pico/pico_int.h"
+/* fm68k_shutdown() for device heap release. Prototype inline to avoid
+ * pulling in the full FAME header (which wants `cpu/fame/fame.h` on
+ * picodrive's private include path). */
+void fm68k_shutdown(void);
 
 /* Full 320x240 RGB565 frame. PicoDrive writes one scanline at a time
  * through DrawLineDest; we hand it a contiguous buffer and a row
@@ -86,38 +90,15 @@ static size_t strip_smd_header(const uint8_t *in, size_t len)
     return 0;
 }
 
-int mdc_load_rom(const uint8_t *data, size_t len)
+/* s_owns_rom tracks whether the ROM buffer handed to PicoCartInsert
+ * was malloc'd by us (and therefore needs plat_munmap on shutdown)
+ * vs borrowed from the caller (XIP flash on device — must NOT free). */
+static bool s_owns_rom;
+
+/* Shared tail of the load process — wires up PicoDrive once Pico.rom
+ * is set correctly. */
+static int mdc_finish_load(void)
 {
-    if (!data || len < 0x200) return -1;
-
-    size_t off = strip_smd_header(data, len);
-    size_t rom_len = len - off;
-
-    /* PicoDrive takes ownership of the buffer handed to PicoCartInsert
-     * (calls plat_munmap on unload). Copy so callers keep ownership of
-     * their original buffer. Over-allocate by 4 bytes: PicoCartInsert
-     * writes a safety "jump-back" opcode at rom[romsize..romsize+3]. */
-    s_rom_copy = (uint8_t *)malloc(rom_len + 4);
-    if (!s_rom_copy) return -2;
-    memcpy(s_rom_copy, data + off, rom_len);
-    memset(s_rom_copy + rom_len, 0, 4);
-
-    /* With FAME_BIG_ENDIAN defined at compile time, ROM stays raw
-     * big-endian in memory. FAME fetch, memory.c u16 reads, and the
-     * rom_read32 helper all byteswap on access (one M33 REV16 each,
-     * single cycle). No pre-swap pass — lets the device build borrow
-     * the XIP pointer directly for carts up to 8 MB without any RAM
-     * copy. */
-
-    /* PicoCartInsert: parses header, allocates SRAM if declared, wires
-     * the memory map, and calls PicoPower() internally — so no
-     * separate PicoReset needed. */
-    if (PicoCartInsert(s_rom_copy, (unsigned int)rom_len, NULL) != 0) {
-        free(s_rom_copy);
-        s_rom_copy = NULL;
-        return -3;
-    }
-
     /* Matches the libretro frontend sequence: LoopPrepare rebuilds
      * region-dependent timing tables; PsndRerate rebuilds the PCM
      * sample-per-frame tables at our audio rate. */
@@ -134,6 +115,55 @@ int mdc_load_rom(const uint8_t *data, size_t len)
 
     s_loaded = true;
     return 0;
+}
+
+int mdc_load_rom(const uint8_t *data, size_t len)
+{
+    if (!data || len < 0x200) return -1;
+
+    size_t off = strip_smd_header(data, len);
+    size_t rom_len = len - off;
+
+    /* Copy path: over-allocate by 4 bytes for PicoCartInsert's safety
+     * "jump-back" opcode at rom[romsize..romsize+3]. */
+    s_rom_copy = (uint8_t *)malloc(rom_len + 4);
+    if (!s_rom_copy) return -2;
+    memcpy(s_rom_copy, data + off, rom_len);
+    memset(s_rom_copy + rom_len, 0, 4);
+    s_owns_rom = true;
+
+    if (PicoCartInsert(s_rom_copy, (unsigned int)rom_len, NULL) != 0) {
+        free(s_rom_copy);
+        s_rom_copy = NULL;
+        s_owns_rom = false;
+        return -3;
+    }
+
+    return mdc_finish_load();
+}
+
+int mdc_load_rom_xip(const uint8_t *data, size_t len)
+{
+    if (!data || len < 0x200) return -1;
+
+    size_t off = strip_smd_header(data, len);
+    size_t rom_len = len - off;
+
+    /* Borrow the XIP pointer — no copy. PicoCartInsert wants to stomp
+     * a 4-byte safety opcode at rom[romsize..romsize+3], which we
+     * can't do on XIP flash. Accept that the safety write falls on
+     * whatever is at offset romsize in flash (padding / next file);
+     * the 68K only ever fetches from there on runaway execution,
+     * which well-behaved carts don't do. */
+    s_rom_copy = (uint8_t *)(data + off);
+    s_owns_rom = false;
+
+    if (PicoCartInsert(s_rom_copy, (unsigned int)rom_len, NULL) != 0) {
+        s_rom_copy = NULL;
+        return -3;
+    }
+
+    return mdc_finish_load();
 }
 
 void mdc_run_frame(void)
@@ -207,9 +237,21 @@ int mdc_load_state(const char *path)
 void mdc_shutdown(void)
 {
     if (s_loaded) {
-        PicoCartUnload();  /* frees s_rom_copy via plat_munmap */
+        /* PicoCartUnload calls plat_munmap(Pico.rom), which in our
+         * thumby_platform.c is backed by free(). For the XIP path we
+         * DON'T own Pico.rom, so patch it out before the unload to
+         * prevent a free() on a flash pointer. */
+        if (!s_owns_rom) {
+            Pico.rom = NULL;
+            Pico.romsize = 0;
+        }
+        PicoCartUnload();
         s_rom_copy = NULL;
+        s_owns_rom = false;
         PicoExit();
+        /* Drop the 256 KB FAME JumpTable so a sibling core (NES, SMS,
+         * GB) can reuse that heap when this one isn't active. */
+        fm68k_shutdown();
         s_loaded = false;
     }
     if (s_fb) { free(s_fb); s_fb = NULL; }

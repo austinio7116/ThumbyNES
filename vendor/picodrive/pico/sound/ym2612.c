@@ -183,13 +183,25 @@ void memset32(void *dest, int c, int count);
 */
 //#define TL_TAB_LEN (13*2*TL_RES_LEN)
 #define TL_TAB_LEN (13*TL_RES_LEN*256/8) // 106496*2
-/* ThumbyNES: heap-allocated on first init_tables() call so the 213 KB
- * log table doesn't consume SRAM when other emulator cores are active.
- * Freed by YM2612Shutdown_() hooked into PsndExit. */
+/* ThumbyNES: two paths.
+ *
+ *  YM2612_TABLES_IN_FLASH  (device builds) — tables are precomputed at
+ *      build time by tools/gen_md_ym2612_tab.c and linked as const
+ *      data in flash. Saves 220 KB of heap during MD sessions. The
+ *      pointers are initialized to the const arrays on program load.
+ *
+ *  otherwise (host builds) — tables are heap-allocated on first
+ *      init_tables() call and freed by YM2612Shutdown_() when the
+ *      MD core tears down. */
+#ifdef YM2612_TABLES_IN_FLASH
+extern const UINT16 md_ym_tl_tab_data [TL_TAB_LEN];
+extern const UINT16 md_ym_tl_tab2_data[13 * TL_RES_LEN];
+UINT16 *ym_tl_tab  = (UINT16 *)md_ym_tl_tab_data;
+UINT16 *ym_tl_tab2 = (UINT16 *)md_ym_tl_tab2_data;
+#else
 UINT16 *ym_tl_tab;
-
-/* ~3K wasted but oh well */
 UINT16 *ym_tl_tab2;
+#endif
 
 #define ENV_QUIET		(2*13*TL_RES_LEN/8)
 
@@ -509,12 +521,15 @@ static const UINT8 lfo_pm_output[7*8][8]={ /* 7 bits meaningful (of F-NUMBER), 8
 
 };
 
-/* all 128 LFO PM waveforms */
-static INT32 lfo_pm_table[128*8*32]; /* 128 combinations of 7 bits meaningful (of F-NUMBER), 8 LFO depths, 32 LFO output levels per one depth */
+/* all 128 LFO PM waveforms. ThumbyNES: heap-allocated on first
+ * YM2612Init so the 128 KB doesn't consume device BSS when MD isn't
+ * active. Freed by YM2612Shutdown_. */
+static INT32 *lfo_pm_table;
 
 /* there are 2048 FNUMs that can be generated using FNUM/BLK registers
-	but LFO works with one more bit of a precision so we really need 4096 elements */
-static UINT32 fn_table[4096];	/* fnumber->increment counter */
+	but LFO works with one more bit of a precision so we really need 4096 elements.
+ * ThumbyNES: heap-allocated to match lfo_pm_table. */
+static UINT32 *fn_table;
 
 /* register number to channel number , slot offset */
 #define OPN_CHAN(N) (N&3)
@@ -1473,11 +1488,23 @@ static void init_tables(void)
 	if (ym_init_tab) return;
 	ym_init_tab = 1;
 
+	/* ThumbyNES: allocate the lfo_pm / fn dynamic tables. These are
+	 * heap in both host and device builds — they never go to flash
+	 * because fn_table depends on runtime sample rate. */
+	if (!lfo_pm_table) lfo_pm_table = (INT32  *)calloc(128*8*32, sizeof(INT32));
+	if (!fn_table)     fn_table     = (UINT32 *)calloc(4096,     sizeof(UINT32));
+
+#ifdef YM2612_TABLES_IN_FLASH
+	/* ThumbyNES: tables already baked in flash — skip the heavy
+	 * pow/log/sin loop and skip the tl_tab2 / tl_tab population
+	 * below. The sin_tab array is still computed for other uses. */
+#else
 	/* ThumbyNES: allocate the two log tables on first call. Freed by
 	 * YM2612Shutdown_() when the MD core tears down so other emulator
 	 * cores in the combined firmware don't see this 213 KB resident. */
 	if (!ym_tl_tab)  ym_tl_tab  = (UINT16 *)calloc(TL_TAB_LEN,      sizeof(UINT16));
 	if (!ym_tl_tab2) ym_tl_tab2 = (UINT16 *)calloc(13*TL_RES_LEN,   sizeof(UINT16));
+#endif
 
 	for (i=0; i < 256; i++)
 	{
@@ -1506,6 +1533,11 @@ static void init_tables(void)
 	//dprintf("FM.C: ENV_QUIET= %08x", ENV_QUIET );
 
 
+#ifndef YM2612_TABLES_IN_FLASH
+	/* ThumbyNES: skip tl_tab / tl_tab2 population when the tables are
+	 * baked into flash (ym_tl_tab/ym_tl_tab2 point to const arrays in
+	 * that mode, writing to them would segfault on a mmu-less micro or
+	 * silently clobber flash). Host builds keep the original compute. */
 	for (x=0; x < TL_RES_LEN; x++)
 	{
 		m = (1<<16) / pow(2, (x+1) * (ENV_STEP/4.0) / 8.0);
@@ -1542,6 +1574,7 @@ static void init_tables(void)
 			else ym_tl_tab[(y<<7) | x] = ym_tl_tab2[p];
 		}
 	}
+#endif
 
 
 	/* build LFO PM modulation table */
@@ -1849,13 +1882,18 @@ void YM2612Init_(int clock, int rate, int flags)
 }
 
 
-/* ThumbyNES: free the heap-allocated log tables. Safe to call when
- * MD isn't loaded (NULL pointers are ignored). Resets the init guard
- * so the tables are rebuilt on next YM2612Init. */
+/* ThumbyNES: free the heap-allocated tables. Safe to call when MD
+ * isn't loaded (NULL pointers are ignored). Resets the init guard
+ * so the tables are rebuilt on next YM2612Init. tl_tab is a no-op
+ * under YM2612_TABLES_IN_FLASH since the tables live in const flash. */
 void YM2612Shutdown_(void)
 {
+	free(lfo_pm_table); lfo_pm_table = NULL;
+	free(fn_table);     fn_table     = NULL;
+#ifndef YM2612_TABLES_IN_FLASH
 	free(ym_tl_tab);  ym_tl_tab  = NULL;
 	free(ym_tl_tab2); ym_tl_tab2 = NULL;
+#endif
 	ym_init_tab = 0;
 }
 

@@ -546,7 +546,11 @@ extern M68K_CONTEXT PicoCpuFS68k;
 /* Custom function handler */
 typedef void (*opcode_func)(M68K_CONTEXT *ctx);
 
-static opcode_func JumpTable[0x10000];
+/* ThumbyNES: JumpTable is 64K × 4 bytes = 256 KB of BSS. That's
+ * half of the RP2350's total SRAM, for a table that only matters
+ * while the MD core is the active emulator. Heap-allocate on first
+ * init_jump_table(); freed by fm68k_shutdown() (new entry point). */
+static opcode_func *JumpTable;
 
 // exception cycle table (taken from musashi core)
 static const s32 exception_cycle_table[256] =
@@ -979,6 +983,14 @@ static int init_jump_table(void)
 #endif
 {
 	u32 i, j;
+
+	/* ThumbyNES: lazy-alloc the 256 KB JumpTable (65536 fn pointers).
+	 * Freed by fm68k_shutdown() so a sibling emulator core can reuse
+	 * the SRAM when MD isn't active. */
+	if (!JumpTable) {
+		JumpTable = (opcode_func *)calloc(0x10000, sizeof(opcode_func));
+		if (!JumpTable) return -1;
+	}
 
 	for(i = 0x0000; i <= 0xFFFF; i += 0x0001)
 		JumpTable[0x0000 + i] = CAST_OP(0x4AFC);
@@ -5066,4 +5078,14 @@ int fm68k_idle_remove(void)
 	return fm68k_emulate(NULL, 0, fm68k_reason_idle_remove);
 }
 #endif
-#endif // FAMEC_NO_GOTOS
+#endif /* !FAMEC_NO_GOTOS */
+
+/* ThumbyNES: free the heap-allocated 256 KB JumpTable and reset the
+ * init flag so the table rebuilds next time MD loads. Available in
+ * both FAMEC_NO_GOTOS and goto-table modes. */
+void fm68k_shutdown(void)
+{
+	free(JumpTable);
+	JumpTable = NULL;
+	initialised = 0;
+}

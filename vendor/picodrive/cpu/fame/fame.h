@@ -174,6 +174,10 @@ typedef enum
 
 /* General purpose functions */
 void fm68k_init(void);
+/* ThumbyNES: release the heap-allocated 256 KB JumpTable when MD
+ * tears down, so a sibling emulator core can reuse the SRAM. No-op
+ * if the table was never initialised. */
+void fm68k_shutdown(void);
 int  fm68k_reset(M68K_CONTEXT *ctx);
 int  fm68k_emulate(M68K_CONTEXT *ctx, int n, fm68k_call_reason reason);
 int  fm68k_would_interrupt(M68K_CONTEXT *ctx); // to be called from fm68k_emulate()

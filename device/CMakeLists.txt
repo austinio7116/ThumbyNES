@@ -160,19 +160,183 @@ target_compile_definitions(smsplus PRIVATE
 )
 target_include_directories(smsplus PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
+# ----------------------------------------------------------------------
+# Vendored PicoDrive MD/Genesis core (LGPLv2 — see vendor/VENDORING.md)
+#   Same patch profile as the host build (FAME_BIG_ENDIAN + MCD stubs
+#   + heap-allocated PicoMem). Additionally for device:
+#     - YM2612_TABLES_IN_FLASH: precomputed YM2612 log tables (213 KB)
+#       linked as const flash data instead of runtime-built on heap.
+#     - IRAM_ATTR section redirect so hot render/CPU paths run from
+#       SRAM (copy-in-at-boot) instead of XIP flash.
+# ----------------------------------------------------------------------
+set(PICODRIVE_DIR ${NES_ROOT}/vendor/picodrive)
+file(GLOB PICODRIVE_PICO_SRC   CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/*.c)
+file(GLOB PICODRIVE_SOUND_SRC  CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/sound/*.c)
+file(GLOB PICODRIVE_CARTHW_SRC CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/carthw/*.c)
+file(GLOB PICODRIVE_SVP_SRC    CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/carthw/svp/*.c)
+file(GLOB PICODRIVE_PICOHW_SRC CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/pico/*.c)
+file(GLOB PICODRIVE_UNZIP_SRC  CONFIGURE_DEPENDS ${PICODRIVE_DIR}/unzip/*.c)
+list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/debugCPU\\.c$")
+list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/pico_cmn\\.c$")
+list(FILTER PICODRIVE_SVP_SRC  EXCLUDE REGEX "carthw/svp/compiler\\.c$")
+# draw2.c is the alternate fast renderer (POPT_ALT_RENDERER). We use
+# the normal per-line renderer in draw.c exclusively. Excluding draw2
+# saves ~103 KB BSS (PicoDraw2FB_ 82K + HighCache2A/B 19K). Stubs for
+# the three externally-visible functions live in thumby_platform.c.
+list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/draw2\\.c$")
+# ym2413.c + emu2413/*.c are the Japanese Master System FM add-on.
+# Never used by MD (cart uses YM2612 instead) and an SMS-specific
+# corner case. Excluding saves ~267 KB (ym2413 tll_table 128K +
+# emu2413 internal state + code). Stubs for OPLL_* and YM2413_* and
+# PsndDoYM2413 in thumby_platform.c.
+list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2413\\.c$")
+
+# Generate YM2612 log tables (213 KB) at build time — linked as
+# const flash so the MD core doesn't need 220 KB of heap at init.
+set(MD_YM_TAB_C   ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_data.c)
+set(MD_YM_TAB_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_gen)
+add_custom_command(
+    OUTPUT  ${MD_YM_TAB_GEN}
+    COMMAND cc -O2 -o ${MD_YM_TAB_GEN} ${NES_ROOT}/tools/gen_md_ym2612_tab.c -lm
+    DEPENDS ${NES_ROOT}/tools/gen_md_ym2612_tab.c
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${MD_YM_TAB_C}
+    COMMAND ${MD_YM_TAB_GEN} ${MD_YM_TAB_C}
+    DEPENDS ${MD_YM_TAB_GEN}
+    VERBATIM
+)
+
+# Same pattern for cz80's 256 KB of SBC/ADC/SUB/ADD flag tables.
+set(MD_CZ80_SZHVC_C   ${CMAKE_CURRENT_BINARY_DIR}/md_cz80_szhvc_data.c)
+set(MD_CZ80_SZHVC_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_cz80_szhvc_gen)
+add_custom_command(
+    OUTPUT  ${MD_CZ80_SZHVC_GEN}
+    COMMAND cc -O2 -o ${MD_CZ80_SZHVC_GEN} ${NES_ROOT}/tools/gen_md_cz80_szhvc.c
+    DEPENDS ${NES_ROOT}/tools/gen_md_cz80_szhvc.c
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${MD_CZ80_SZHVC_C}
+    COMMAND ${MD_CZ80_SZHVC_GEN} ${MD_CZ80_SZHVC_C}
+    DEPENDS ${MD_CZ80_SZHVC_GEN}
+    VERBATIM
+)
+
+add_library(picodrive STATIC
+    ${PICODRIVE_PICO_SRC}
+    ${PICODRIVE_SOUND_SRC}
+    ${PICODRIVE_CARTHW_SRC}
+    ${PICODRIVE_SVP_SRC}
+    ${PICODRIVE_PICOHW_SRC}
+    ${PICODRIVE_UNZIP_SRC}
+    ${PICODRIVE_DIR}/cpu/fame/famec.c
+    ${PICODRIVE_DIR}/cpu/cz80/cz80.c
+    ${PICODRIVE_DIR}/thumby_platform.c
+    ${MD_YM_TAB_C}
+    ${MD_CZ80_SZHVC_C}
+)
+target_include_directories(picodrive PRIVATE
+    ${PICODRIVE_DIR}/pico
+    ${PICODRIVE_DIR}/cpu
+)
+# Only the root — picodrive's own source uses `#include <cpu/...>`
+# and `#include <pico/...>` against this root. PUBLIC-propagating
+# the ${PICODRIVE_DIR}/pico path would shadow pico-sdk's `<pico.h>`
+# (picodrive has its own pico/pico.h for the 68K core's public API).
+target_include_directories(picodrive PUBLIC
+    ${PICODRIVE_DIR}
+)
+target_compile_definitions(picodrive PUBLIC
+    EMU_F68K
+    _USE_CZ80
+    NO_32X
+    FAME_BIG_ENDIAN
+    YM2612_TABLES_IN_FLASH
+    CZ80_SZHVC_IN_FLASH
+    THUMBY_YM2413_EXCLUDED   # sound/ym2413.c not in build; stubs active
+    THUMBY_DRAW2_EXCLUDED    # pico/draw2.c not in build; stubs active
+    # Rename picodrive's z80 API so its symbols don't collide with
+    # smsplus's z80 implementation at final link. Both libraries are
+    # linked into nesrun_device, but only one runs per cart. The
+    # rename is compile-only; call sites in pico.c / memory.c etc.
+    # get the new names via these defines, smsplus keeps the originals.
+    z80_init=pd_z80_init
+    z80_reset=pd_z80_reset
+    z80_exit=pd_z80_exit
+    z80_read=pd_z80_read
+    z80_pack=pd_z80_pack
+    z80_unpack=pd_z80_unpack
+    z80_debug=pd_z80_debug
+)
+target_compile_options(picodrive PRIVATE
+    -O3
+    # pico-sdk gcc targets M33 with 16-byte function alignment, but
+    # cpu68k_map requires bit 0 clear for function pointers. Keep the
+    # 2-byte align to match the host build.
+    -falign-functions=2
+    -fno-strict-aliasing
+    -Wno-array-bounds
+    -Wno-format
+    -Wno-maybe-uninitialized
+    -Wno-pointer-sign
+    -Wno-sign-compare
+    -Wno-unused-but-set-variable
+    -Wno-unused-function
+    -Wno-unused-variable
+    -Wno-implicit-function-declaration
+)
+# FAME's 18k-line famec.c with its inlined opcode dispatch chokes
+# gcc at -O3 (7+ min / 600 MB RSS). Upstream's Makefile drops this
+# single file to -O2 — mirror that.
+set_source_files_properties(
+    ${PICODRIVE_DIR}/cpu/fame/famec.c
+    PROPERTIES COMPILE_OPTIONS "-O2;-fno-expensive-optimizations"
+)
+# Route the 5 hot functions identified by the host profile (draw.c
+# tile composition, VDP line finalize, FAME dispatch, cz80, YM2612
+# channel render) into .time_critical.md so the pico-sdk linker
+# script copies them into SRAM at boot. Same trick used for nofrendo
+# and smsplus.
+target_compile_definitions(picodrive PRIVATE
+    "IRAM_ATTR=__attribute__((section(\".time_critical.md\")))"
+)
+# cart.c / state.c use crc32 + inflate. Link the Pico SDK's host-
+# provided zlib? — device target doesn't expose one. For now these
+# code paths are unreachable in MD (no ZIP/CSO support at runtime),
+# but the symbols must resolve. Provide a handful of crc32-only
+# stubs via -Wl,--defsym; this is cheap because we never execute
+# them. (TODO: properly link zlib if we ever add ZIP support.)
+target_link_options(picodrive INTERFACE
+    "-Wl,--defsym=crc32=0"
+    "-Wl,--defsym=inflateInit2_=0"
+    "-Wl,--defsym=inflate=0"
+    "-Wl,--defsym=inflateEnd=0"
+    "-Wl,--defsym=inflateReset=0"
+    "-Wl,--defsym=gzwrite=0"
+    "-Wl,--defsym=gzread=0"
+    "-Wl,--defsym=gzopen=0"
+    "-Wl,--defsym=gzeof=0"
+    "-Wl,--defsym=gzseek=0"
+    "-Wl,--defsym=gzclose=0"
+    "-Wl,--defsym=gzsetparams=0"
+)
+
 # Cross-platform glue lives outside the device directory; build it
 # here as a small static lib.
 add_library(thumbynes_core STATIC
     ${NES_ROOT}/src/nes_core.c
     ${NES_ROOT}/src/sms_core.c
     ${NES_ROOT}/src/gb_core.c
+    ${NES_ROOT}/src/md_core.c
 )
 target_include_directories(thumbynes_core PUBLIC
     ${NES_ROOT}/src
     ${CMAKE_CURRENT_LIST_DIR}     # for thumby_state_bridge.h
 )
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
-target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
+target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb picodrive)
 
 # ----------------------------------------------------------------------
 # nesrun_device — Phase 3 firmware: lobby + picker, no emulator yet.
@@ -216,6 +380,7 @@ set(NES_SRC_BASE
     nes_run.c
     sms_run.c
     gb_run.c
+    md_run.c
     fatfs/diskio.c
     ${NES_FATFS_LIB_SRC}
 )

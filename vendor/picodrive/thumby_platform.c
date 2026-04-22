@@ -61,7 +61,7 @@ void cache_flush_d_inval_i(void *start, void *end) { (void)start; (void)end; }
  * the code path is ever reached by mistake. */
 int  mp3_get_bitrate(void *f, int size) { (void)f; (void)size; return 128000; }
 void mp3_start_play (void *f, int pos)  { (void)f; (void)pos; }
-void mp3_update     (int *buf, int length, int stereo) { (void)buf; (void)length; (void)stereo; }
+void mp3_update     (s32 *buf, int length, int stereo) { (void)buf; (void)length; (void)stereo; }
 
 /* ------ 32X hooks ---------------------------------------------------- */
 /* NO_32X is set so these are only referenced via the extern decl in
@@ -142,6 +142,47 @@ char Pico_msd[1];
 void *Pico_mcd;
 /* cdda_out_buffer is patched to a pointer in sound.c (see VENDORING.md),
  * so no BSS cost here either — stays NULL in MD-only build. */
+
+#ifdef THUMBY_YM2413_EXCLUDED
+/* ------ YM2413 link-level stubs ------------------------------------- */
+/* Mega-Drive cartridges never enable the YM2413 (it's the Japanese SMS
+ * FM add-on, POPT_EN_YM2413). Excluded from device build (see device/
+ * CMakeLists.txt) — this saves 128 KB of tll_table BSS plus the 6 KB
+ * default_patch + emu2413 internal state. sound.c and sms.c still
+ * call the OPLL_* and YM2413_* entry points; these stubs resolve
+ * link-time. The code paths themselves are runtime-guarded on
+ * PicoIn.opt & POPT_EN_YM2413 which never fires. Host builds keep
+ * the real ym2413.c in the link so these stubs stay out of the way. */
+void *OPLL_new(unsigned int clk, unsigned int rate) { (void)clk; (void)rate; return 0; }
+void  OPLL_delete(void *o)                         { (void)o; }
+void  OPLL_setChipType(void *o, int type)          { (void)o; (void)type; }
+void  OPLL_reset(void *o)                          { (void)o; }
+void  OPLL_setRate(void *o, int rate)              { (void)o; (void)rate; }
+int16_t OPLL_calc(void *o)                         { (void)o; return 0; }
+void  YM2413_regWrite(unsigned reg)                { (void)reg; }
+void  YM2413_dataWrite(unsigned data)              { (void)data; }
+void  PsndDoYM2413(int cyc_to)                     { (void)cyc_to; }
+void  ym2413_unpack_state(const void *buf, size_t size) { (void)buf; (void)size; }
+size_t ym2413_pack_state(void *buf, size_t size)        { (void)buf; (void)size; return 0; }
+void  YMFM_setup_FIR(int sample_rate, int output_rate, int use_tone) {
+    (void)sample_rate; (void)output_rate; (void)use_tone;
+}
+/* Global state pointer that sound.c tests and passes into OPLL_*
+ * stubs. Stays NULL — MD never initializes it. */
+void *opll;
+#endif /* THUMBY_YM2413_EXCLUDED */
+
+#ifdef THUMBY_DRAW2_EXCLUDED
+/* ------ draw2.c link-level stubs (ALT_RENDERER not used) ------------ */
+/* draw2.c is the alternate fast renderer (POPT_ALT_RENDERER). The
+ * Thumby runner always uses the per-line renderer in draw.c. Excluded
+ * from device build — saves ~103 KB BSS (PicoDraw2FB_ 82K + sprite
+ * caches). Stubs for the three externally-visible entry points; their
+ * callers are guarded on POPT_ALT_RENDERER. */
+void PicoDraw2SetOutBuf(void *dest, int incr)      { (void)dest; (void)incr; }
+void PicoDraw2Init(void)                           {}
+void PicoFrameFull(void)                           {}
+#endif /* THUMBY_DRAW2_EXCLUDED */
 
 /* ------ Video mode change callback ----------------------------------- */
 /* PicoDrive calls this whenever the VDP switches between H32/H40 or

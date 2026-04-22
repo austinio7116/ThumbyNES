@@ -47,13 +47,23 @@
  * success. Must be called once per process before mdc_load_rom. */
 int  mdc_init(int region, int sample_rate);
 
-/* Load a ROM image already resident in memory. On host the buffer must
- * remain valid for the lifetime of the session (PicoDrive's bus layer
- * uses it in place — zero copy path). `data` is treated as a plain
- * un-interleaved Genesis dump (.md / .bin / .gen); SMD interleaved
- * headers are NOT supported here and must be deinterleaved externally.
- * Returns 0 on success. */
+/* Load a ROM image already resident in memory. Default path copies the
+ * ROM into a malloc'd buffer so the caller can free its source. Use
+ * mdc_load_rom_xip() on device to skip the copy when the source is
+ * already in flash. `data` is treated as a plain un-interleaved
+ * Genesis dump (.md / .bin / .gen); SMD interleaved headers are NOT
+ * supported here. Returns 0 on success. */
 int  mdc_load_rom(const uint8_t *data, size_t len);
+
+/* Load a ROM image borrowed from a stable XIP-flash (or otherwise
+ * lifetime-safe) pointer. No copy. Caller must keep `data` valid until
+ * mdc_shutdown(). The buffer must have at least 4 bytes of writable
+ * scratch after `len` — PicoCartInsert writes a safety "jump-back"
+ * opcode at rom[len..len+3]. On device, the picker's XIP region is
+ * read-only flash, so this function writes the safety opcode into a
+ * tiny RAM trampoline that replaces the last page of `data` internally.
+ * Returns 0 on success. */
+int  mdc_load_rom_xip(const uint8_t *data, size_t len);
 
 /* Run one emulated frame (call PicoFrame). */
 void mdc_run_frame(void);

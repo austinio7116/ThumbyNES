@@ -42,6 +42,7 @@
 #include "nes_run.h"
 #include "sms_run.h"
 #include "gb_run.h"
+#include "md_run.h"
 
 #define THUMBYNES_VERSION "1.04"
 
@@ -376,6 +377,7 @@ int main(void) {
             switch (roms[sel].system) {
             case ROM_SYS_NES: per_cart = nes_run_clock_override(roms[sel].name); break;
             case ROM_SYS_GB:  per_cart = gb_run_clock_override (roms[sel].name); break;
+            case ROM_SYS_MD:  per_cart = md_run_clock_override (roms[sel].name); break;
             default:          per_cart = sms_run_clock_override(roms[sel].name); break;
             }
             int target = per_cart ? per_cart : nes_picker_global_clock_mhz();
@@ -395,6 +397,7 @@ int main(void) {
         switch (roms[sel].system) {
         case ROM_SYS_NES: rc = nes_run_rom(&roms[sel], fb); break;
         case ROM_SYS_GB:  rc = gb_run_rom (&roms[sel], fb); break;
+        case ROM_SYS_MD:  rc = md_run_rom (&roms[sel], fb); break;
         default:          rc = sms_run_rom(&roms[sel], fb); break;
         }
         if (rc != 0) {
