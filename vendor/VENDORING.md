@@ -61,6 +61,68 @@ LOG_PRINTF degrade to printf and IRAM_ATTR to nothing.
    section attribute on device, placing the Z80 dispatch loop in
    `.time_critical.sms` (SRAM) instead of XIP flash.
 
+## picodrive/
+
+Sega Mega Drive / Genesis emulation core. Vendored from notaz's
+standalone **PicoDrive** tree (not the libretro packaging).
+
+- Upstream: https://github.com/notaz/picodrive
+- Commit pinned: `dd762b861ecadf5ddd5fb03e9ca1db6707b54fbb` (HEAD at
+  import time, 2026-04-21)
+- License: LGPLv2 (see `picodrive/COPYING`) — combines with our GPLv2
+- Original author: Dave (2004) + notaz (2006-) + irixxxx (2020-)
+
+Trimmed from the upstream tree (not vendored here):
+
+- `pico/32x/*` — 32X support (build with `-DNO_32X`)
+- `cpu/cyclone/*` — ARM-asm 68K core (we use the `cpu/fame/` C core
+  via `-DEMU_F68K`; Cyclone is not M33-compatible and would need a
+  full port)
+- `cpu/DrZ80/*` — ARM-asm Z80 core (we use `cpu/cz80/` via `-D_USE_CZ80`)
+- `cpu/sh2/` except `sh2.h` — SH2 core used only by 32X. The header
+  is kept because `pico_int.h` includes it unconditionally
+- `pico/cd/libchdr/` — CHD/ZSTD/LZMA decoders, gated on `USE_LIBCHDR`
+  which we don't set; CD is runtime-disabled
+- `pico/*_arm.{s,S}`, `pico/sound/*_arm.S`, `pico/cd/*_arm.*` — all
+  ARM / MIPS hand-asm paths
+- `platform/*` — libpicofe + libretro + per-device frontends. We
+  provide our own stubs in `thumby_platform.c`
+
+Retained for compile-time coverage even though they never execute at
+runtime (behind PAHW-gated runtime branches):
+
+- `pico/sms.c`, `pico/mode4.c` — PicoDrive's built-in SMS renderer.
+  Four link-level symbols (`PicoResetMS`, `PicoPowerMS`, `PicoMemSetupMS`,
+  `PicoFrameMS`) would have to be stubbed if excluded. We already use
+  smsplus for SMS/GG so PAHW_SMS is never set here
+- `pico/cd/*.c` — CD support. No `NO_CD` flag upstream; runtime stays
+  silent because PAHW_MCD never gets set
+
+`thumby_platform.c` provides our implementations of `plat_mmap` /
+`plat_munmap` / `plat_mremap` (malloc-backed on host, flash-aware on
+device — to be written at Phase 3), `plat_mem_get_for_drc` (NULL, we
+use the interpreter core), `cache_flush_d_inval_i` (no-op), the three
+MCD `mp3_*` stubs, `emu_video_mode_change` (weak no-op, frontend
+overrides), `emu_32x_startup` + `p32x_bios_*` (never reached with
+NO_32X), and link-level stubs for the 32X memory-map hooks.
+
+### Patches applied
+
+1. **`pico/state.c`** — three `#ifndef NO_32X` guards around
+   `p32x_event_times` accesses and `Pico32xStateLoaded(arg)` calls.
+   The upstream NO_32X macro version of `Pico32xStateLoaded()` is
+   arity-0, so the load-time calls that pass `0`/`1` fail to compile
+   without guarding.
+
+2. **`pico/draw.c`** — one `#ifndef NO_32X` guard around the
+   `PicoScan32xBegin` / `PicoScan32xEnd` assignment block inside
+   `PicoDrawSetCallbacks`. The NO_32X build doesn't declare the
+   symbols. `PicoScanBegin` / `PicoScanEnd` are always set.
+
+Both patches are top-of-block-only and document-the-fix style —
+no logic changes, just gating. Look for `/* ThumbyNES: ... */`
+markers.
+
 ## nofrendo/
 
 NES emulation core. Vendored from the **retro-go** project's `retro-core/components/nofrendo` directory.

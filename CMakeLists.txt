@@ -80,6 +80,74 @@ target_include_directories(smsplus PUBLIC
 target_compile_definitions(smsplus PRIVATE)
 
 # ----------------------------------------------------------------------
+# Vendored PicoDrive (LGPLv2 — see vendor/VENDORING.md)
+#   MD / Genesis only. FAME 68K interpreter, cz80 for sound coprocessor.
+#   32X + Cyclone + ARM/MIPS asm trimmed from the tree. SMS is runtime-
+#   gated (we always boot MD-mode) so sms.c / mode4.c compile as dead
+#   code — simpler than stubbing the four link-level symbols. CD code
+#   stays in because PicoDrive has no NO_CD flag; PAHW_MCD never fires.
+# ----------------------------------------------------------------------
+set(PICODRIVE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/picodrive)
+
+file(GLOB PICODRIVE_PICO_SRC   CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/*.c)
+file(GLOB PICODRIVE_SOUND_SRC  CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/sound/*.c)
+file(GLOB PICODRIVE_CD_SRC     CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/cd/*.c)
+file(GLOB PICODRIVE_CARTHW_SRC CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/carthw/*.c)
+file(GLOB PICODRIVE_SVP_SRC    CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/carthw/svp/*.c)
+file(GLOB PICODRIVE_PICOHW_SRC CONFIGURE_DEPENDS ${PICODRIVE_DIR}/pico/pico/*.c)
+file(GLOB PICODRIVE_UNZIP_SRC  CONFIGURE_DEPENDS ${PICODRIVE_DIR}/unzip/*.c)
+
+# Drop sources that aren't separate translation units, require 32X, or
+# need assembly cores we don't build:
+#   debugCPU.c — Musashi-vs-FAME validator (only compiled with pdb=1)
+#   pico_cmn.c / cell_map.c — #include'd by their containers
+#   carthw/svp/compiler.c — DRC, needs ARM emit_arm.c
+list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/debugCPU\\.c$")
+list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/pico_cmn\\.c$")
+list(FILTER PICODRIVE_CD_SRC   EXCLUDE REGEX "pico/cd/cell_map\\.c$")
+list(FILTER PICODRIVE_SVP_SRC  EXCLUDE REGEX "carthw/svp/compiler\\.c$")
+
+add_library(picodrive STATIC
+    ${PICODRIVE_PICO_SRC}
+    ${PICODRIVE_SOUND_SRC}
+    ${PICODRIVE_CD_SRC}
+    ${PICODRIVE_CARTHW_SRC}
+    ${PICODRIVE_SVP_SRC}
+    ${PICODRIVE_PICOHW_SRC}
+    ${PICODRIVE_UNZIP_SRC}
+    ${PICODRIVE_DIR}/cpu/fame/famec.c
+    ${PICODRIVE_DIR}/cpu/cz80/cz80.c
+    ${PICODRIVE_DIR}/cpu/drc/cmn.c
+    ${PICODRIVE_DIR}/thumby_platform.c
+)
+target_include_directories(picodrive PUBLIC
+    ${PICODRIVE_DIR}
+    ${PICODRIVE_DIR}/pico
+    ${PICODRIVE_DIR}/cpu
+)
+target_compile_definitions(picodrive PUBLIC
+    EMU_F68K          # FAME 68K interpreter
+    _USE_CZ80         # Z80 coprocessor
+    NO_32X            # no 32X / SH2 DRC
+)
+# cart.c / state.c use crc32 + inflate + gz* — link system zlib
+# transitively so dependent executables pick it up at the right spot.
+target_link_libraries(picodrive PUBLIC z m)
+# PicoDrive uses aggressive aliasing in the mode4/draw renderers.
+target_compile_options(picodrive PRIVATE
+    -fno-strict-aliasing
+    -Wno-unused-but-set-variable
+    -Wno-unused-function
+    -Wno-unused-variable
+    -Wno-maybe-uninitialized
+    -Wno-pointer-sign
+    -Wno-sign-compare
+    -Wno-implicit-function-declaration
+    -Wno-array-bounds
+    -Wno-format
+)
+
+# ----------------------------------------------------------------------
 # Vendored peanut_gb (single-header DMG core) + minigb_apu
 # ----------------------------------------------------------------------
 set(PEANUT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/peanut_gb)
@@ -91,9 +159,9 @@ target_compile_options(peanut_gb PRIVATE -Wno-implicit-fallthrough -Wno-unused-f
 # ----------------------------------------------------------------------
 # ThumbyNES runtime glue
 # ----------------------------------------------------------------------
-add_library(thumbynes STATIC src/nes_core.c src/sms_core.c src/gb_core.c)
+add_library(thumbynes STATIC src/nes_core.c src/sms_core.c src/gb_core.c src/md_core.c)
 target_include_directories(thumbynes PUBLIC src)
-target_link_libraries(thumbynes PUBLIC nofrendo smsplus peanut_gb)
+target_link_libraries(thumbynes PUBLIC nofrendo smsplus peanut_gb picodrive)
 
 # ----------------------------------------------------------------------
 # Phase 0 bench harness
@@ -107,6 +175,9 @@ target_link_libraries(smsbench PRIVATE thumbynes)
 add_executable(gbbench src/gb_bench_main.c)
 target_link_libraries(gbbench PRIVATE thumbynes)
 
+add_executable(mdbench src/md_bench_main.c)
+target_link_libraries(mdbench PRIVATE thumbynes)
+
 # ----------------------------------------------------------------------
 # Phase 1 SDL2 host runner (built only if SDL2 is available)
 # ----------------------------------------------------------------------
@@ -118,7 +189,9 @@ if(SDL2_FOUND)
     target_link_libraries(smshost PRIVATE thumbynes SDL2::SDL2)
     add_executable(gbhost src/gb_host_main.c)
     target_link_libraries(gbhost PRIVATE thumbynes SDL2::SDL2)
-    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost + gbhost")
+    add_executable(mdhost src/md_host_main.c)
+    target_link_libraries(mdhost PRIVATE thumbynes SDL2::SDL2)
+    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost + gbhost + mdhost")
 else()
     # Older SDL2 cmake configs don't export the SDL2:: target.
     find_path(SDL2_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL2)
@@ -133,7 +206,10 @@ else()
         add_executable(gbhost src/gb_host_main.c)
         target_include_directories(gbhost PRIVATE ${SDL2_INCLUDE_DIR})
         target_link_libraries(gbhost PRIVATE thumbynes ${SDL2_LIBRARY})
-        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost + gbhost")
+        add_executable(mdhost src/md_host_main.c)
+        target_include_directories(mdhost PRIVATE ${SDL2_INCLUDE_DIR})
+        target_link_libraries(mdhost PRIVATE thumbynes ${SDL2_LIBRARY})
+        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost + gbhost + mdhost")
     else()
         message(STATUS "ThumbyNES: SDL2 not found, skipping neshost / smshost / gbhost")
     endif()
