@@ -919,10 +919,15 @@ static unsigned int rom_crc32(int size)
   elprintf(EL_STATUS, "calculating CRC32..");
   if (size <= 0 || size > Pico.romsize) size = Pico.romsize;
 
+#ifdef FAME_BIG_ENDIAN
+  /* ThumbyNES: ROM already stored raw BE in memory — no swap needed. */
+  crc = crc32(0, Pico.rom, size);
+#else
   // have to unbyteswap for calculation..
   Byteswap(Pico.rom, Pico.rom, size);
   crc = crc32(0, Pico.rom, size);
   Byteswap(Pico.rom, Pico.rom, size);
+#endif
   return crc;
 }
 
@@ -937,7 +942,7 @@ int rom_strcmp(void *rom, int size, int offset, const char *s1)
     return strncmp(s_rom + offset, s1, strlen(s1));
 
   for (i = 0; i < len; i++)
-    if (s1[i] != s_rom[MEM_BE2(i + offset)])
+    if (s1[i] != s_rom[MEM_BE2_ROM(i + offset)])
       return 1;
   return 0;
 }
@@ -945,7 +950,13 @@ int rom_strcmp(void *rom, int size, int offset, const char *s1)
 static unsigned int rom_read32(int addr)
 {
   unsigned short *m = (unsigned short *)(Pico.rom + addr);
+#ifdef FAME_BIG_ENDIAN
+  /* ThumbyNES: ROM kept raw BE; bswap each u16 before combining. */
+  return ((unsigned int)__builtin_bswap16(m[0]) << 16)
+        |  (unsigned int)__builtin_bswap16(m[1]);
+#else
   return (m[0] << 16) | m[1];
+#endif
 }
 
 static char *sskip(char *s)
@@ -1291,11 +1302,11 @@ static void PicoCartDetect(const char *carthw_cfg)
   int fill_sram = 0;
 
   memset(&Pico.sv, 0, sizeof(Pico.sv));
-  if (Pico.rom[MEM_BE2(0x1B0)] == 'R' && Pico.rom[MEM_BE2(0x1B1)] == 'A')
+  if (Pico.rom[MEM_BE2_ROM(0x1B0)] == 'R' && Pico.rom[MEM_BE2_ROM(0x1B1)] == 'A')
   {
     Pico.sv.start =  rom_read32(0x1B4) & ~0xff000001; // align
     Pico.sv.end   = (rom_read32(0x1B8) & ~0xff000000) | 1;
-    if (Pico.rom[MEM_BE2(0x1B3)] & 0x40)
+    if (Pico.rom[MEM_BE2_ROM(0x1B3)] & 0x40)
       // EEPROM
       Pico.sv.flags |= SRF_EEPROM;
     Pico.sv.flags |= SRF_ENABLED;

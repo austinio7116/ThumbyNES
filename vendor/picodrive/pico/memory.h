@@ -69,6 +69,17 @@ u32 name(u32 a)                                 \
     return *(u8 *)((v << 1) + MEM_BE2(a));      \
 }
 
+/* ThumbyNES: inline direct-ROM read path bswaps the u16 on LE hosts
+ * when FAME_BIG_ENDIAN is defined (ROM stays raw big-endian in
+ * memory). Single REV16 instruction on M33. The map-flagged function-
+ * dispatch branch is unchanged — each function (PicoRead16_sram etc.)
+ * handles its own byte ordering internally. */
+#ifdef FAME_BIG_ENDIAN
+#define MAKE_68K_ROM_READ16(vs, a) __builtin_bswap16(*(u16 *)((vs) + (a)))
+#else
+#define MAKE_68K_ROM_READ16(vs, a) (*(u16 *)((vs) + (a)))
+#endif
+
 #define MAKE_68K_READ16(name, map)              \
 u32 name(u32 a)                                 \
 {                                               \
@@ -78,7 +89,7 @@ u32 name(u32 a)                                 \
   if (map_flag_set(v))                          \
     return ((cpu68k_read_f *)(v << 1))(a);      \
   else                                          \
-    return *(u16 *)((v << 1) + a);              \
+    return MAKE_68K_ROM_READ16(v << 1, a);      \
 }
 
 #define MAKE_68K_READ32(name, map)              \
@@ -94,8 +105,8 @@ u32 name(u32 a)                                 \
     d |= ((cpu68k_read_f *)vs)(a + 2);          \
   }                                             \
   else {                                        \
-    u16 *m = (u16 *)(vs + a);                   \
-    d = (m[0] << 16) | m[1];                    \
+    d  = (u32)MAKE_68K_ROM_READ16(vs, a    ) << 16; \
+    d |= (u32)MAKE_68K_ROM_READ16(vs, a + 2);   \
   }                                             \
   return d;                                     \
 }

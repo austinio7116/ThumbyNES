@@ -4,7 +4,7 @@
 /* Autor: Oscar Orallo Pelaez                                               */
 /* Fecha de comienzo: 03-10-2006                                            */
 /* Ultima actualizacion: 08-10-2006                                         */
-/* Based on the excellent C68K emulator by St�phane Dallongueville          */
+/* Based on the excellent C68K emulator by St�phane Dallongueville          */
 /****************************************************************************/
 
 #include <stdio.h>
@@ -374,8 +374,21 @@
 
 #else
 
-	#define FETCH_LONG(A)               \
-		(A) = PC[0] | (PC[1] << 16);    \
+	/* ThumbyNES: FAME's BIG_ENDIAN branch is designed around host/ROM
+	 * byte orders that assume FETCH_LONG word-ordering matches how the
+	 * native u16 reads land. The original
+	 *   (A) = PC[0] | (PC[1] << 16);
+	 * reads two LE-host u16s of raw-BE ROM as (B1<<8|B0) and (B3<<8|B2),
+	 * producing 0xB3B2B1B0 — fully byte-reversed from the BE u32 value
+	 * 0xB0B1B2B3 that the 68K should see. Fix: bswap each u16 and place
+	 * them high-first (the BE canonical order). This produces the same
+	 * result the LE-default branch gets from pre-swapped ROM. Most ROMs
+	 * don't trip the bug early because FETCH_LONG is only used for
+	 * absolute-long operands (TST.L abs, MOVE.L #imm, etc.) — MLF and
+	 * Speedball 2 hit it within the first instruction at reset. */
+	#define FETCH_LONG(A)                                        \
+		(A) = ((u32)__builtin_bswap16(PC[0]) << 16)              \
+		    |  (u32)__builtin_bswap16(PC[1]);                    \
 		PC += 2;
 
 	#define GET_SWORD                           \
@@ -395,15 +408,22 @@
 		(A) = (s16)(((*PC & 0xFF) << 8) | (*PC >> 8));  \
 		PC++;
 
+	/* ThumbyNES: the original BIG_ENDIAN DECODE_EXT_WORD reads *PC
+	 * natively and extracts the displacement from bits 0..7, register
+	 * number from bits 4..7, and size flag from bit 3. Those positions
+	 * are correct for a true BE host reading BE data, but on an LE
+	 * host reading raw-BE ROM each u16 read is byte-swapped — bit 0
+	 * of the "logical" BE word is at native bit 8, etc. Bswap first
+	 * so the rest of the macro operates on the logical BE value. The
+	 * displacement byte is the LOW byte of the BE word, i.e. bits 0..7
+	 * after bswap. */
 	#define DECODE_EXT_WORD     \
 	{                           \
-	    u32 ext;                \
-	                            \
-	    ext = *PC++;            \
+	    u32 ext = __builtin_bswap16(*PC++);                     \
 	                                                            \
-	    adr += (s8)(ext >> 8);                                  \
-	    if (ext & 0x0008) adr += DREGs32((ext >> 4) & 0x000F);  \
-	    else adr += DREGs16((ext >> 4) & 0x000F);               \
+	    adr += (s8)(ext);                                       \
+	    if (ext & 0x0800) adr += DREGs32(ext >> 12);            \
+	    else adr += DREGs16(ext >> 12);                         \
 	}
 
 #endif

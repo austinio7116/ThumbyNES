@@ -589,6 +589,18 @@ static void DmaSlow(int len, u32 source)
     return;
   }
 
+#ifdef FAME_BIG_ENDIAN
+  /* ThumbyNES: detect whether `base` points into raw-BE ROM. If so,
+   * every u16 we read needs a bswap so that VRAM/CRAM/VSRAM end up
+   * with native-of-BE u16 values — the format the VDP expects. RAM
+   * sources (WRAM, MCD RAMs) are already native and must NOT swap. */
+  const int src_is_rom = ((const u8 *)base >= (const u8 *)Pico.rom
+                       && (const u8 *)base <  (const u8 *)Pico.rom + Pico.romsize);
+# define DMA_READ16(b, i) (src_is_rom ? __builtin_bswap16((b)[(i)]) : (b)[(i)])
+#else
+# define DMA_READ16(b, i) ((b)[(i)])
+#endif
+
   // operate in words
   source >>= 1;
   mask >>= 1;
@@ -602,14 +614,26 @@ static void DmaSlow(int len, u32 source)
           ((a >= SATaddr + 0x280) | (e < SATaddr)) &&
           !((source ^ (source + len-1)) & ~mask))
       {
+#ifdef FAME_BIG_ENDIAN
+        // most used DMA mode — bswap-copy from raw-BE ROM to VRAM,
+        // plain memcpy from already-native RAM sources
+        u16 *dst = (u16 *)((char *)r + a);
+        const u16 *src = base + (source & mask);
+        if (src_is_rom) {
+          for (int j = 0; j < len; j++) dst[j] = __builtin_bswap16(src[j]);
+        } else {
+          memcpy(dst, src, len * 2);
+        }
+#else
         // most used DMA mode
         memcpy((char *)r + a, base + (source & mask), len * 2);
+#endif
         a += len * 2;
         break;
       }
       for(; len; len--)
       {
-        u16 d = base[source++ & mask];
+        u16 d = DMA_READ16(base, source++ & mask);
         if(a & 1) d=(d<<8)|(d>>8);
         VideoWriteVRAM(a, d);
         // AutoIncrement
@@ -636,7 +660,7 @@ static void DmaSlow(int len, u32 source)
       }
       for (; len; len--)
       {
-        r[(a / 2) & 0x3f] = base[source++ & mask] & 0xeee;
+        r[(a / 2) & 0x3f] = DMA_READ16(base, source++ & mask) & 0xeee;
         // AutoIncrement
         a = (a+inc) & ~0x20000;
       }
@@ -646,7 +670,7 @@ static void DmaSlow(int len, u32 source)
       r = PicoMem.vsram;
       for (; len; len--)
       {
-        r[(a / 2) & 0x3f] = base[source++ & mask] & 0x7ff;
+        r[(a / 2) & 0x3f] = DMA_READ16(base, source++ & mask) & 0x7ff;
         // AutoIncrement
         a = (a+inc) & ~0x20000;
       }
@@ -655,7 +679,7 @@ static void DmaSlow(int len, u32 source)
     case 0x81: // vram 128k
       for(; len; len--)
       {
-        u16 d = base[source++ & mask];
+        u16 d = DMA_READ16(base, source++ & mask);
         VideoWriteVRAM128(a, d);
         // AutoIncrement
         a = (a+inc) & ~0x20000;

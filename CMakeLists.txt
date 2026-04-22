@@ -135,12 +135,24 @@ target_compile_definitions(picodrive PUBLIC
     EMU_F68K          # FAME 68K interpreter
     _USE_CZ80         # Z80 coprocessor
     NO_32X            # no 32X / SH2 DRC
+    FAME_BIG_ENDIAN   # ROM stays raw big-endian in memory (XIP on
+                      # device). FAME fetch + memory.c u16 reads +
+                      # cart.c rom_read32 do the bswap on read. Byte
+                      # reads work because MEM_BE2 drops to identity.
+                      # Patches are all gated on FAME_BIG_ENDIAN so
+                      # unflipping here restores upstream behavior.
 )
 # cart.c / state.c use crc32 + inflate + gz* — link system zlib
 # transitively so dependent executables pick it up at the right spot.
 target_link_libraries(picodrive PUBLIC z m)
 # PicoDrive uses aggressive aliasing in the mode4/draw renderers.
 target_compile_options(picodrive PRIVATE
+    # Upstream Makefile sets this so function pointers have bit 0 = 0.
+    # The cpu68k map encodes addresses by shifting right by 1 — function
+    # pointers at odd addresses fail xmap_set's alignment check and
+    # silently fall back to m68k_unmapped_read* handlers, giving the
+    # 68K garbage and crashing the game.
+    -falign-functions=2
     -fno-strict-aliasing
     -Wno-unused-but-set-variable
     -Wno-unused-function

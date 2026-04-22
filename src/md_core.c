@@ -102,14 +102,12 @@ int mdc_load_rom(const uint8_t *data, size_t len)
     memcpy(s_rom_copy, data + off, rom_len);
     memset(s_rom_copy + rom_len, 0, 4);
 
-    /* MD cart ROMs are stored big-endian; FAME's opcode fetch reads
-     * 16-bit words via host-native pointer loads. On little-endian
-     * hosts (and RP2350 Cortex-M33) we must pre-swap each byte pair
-     * so host reads yield correct big-endian values. PicoCartLoad
-     * normally does this, but we bypass it to avoid the pm_file
-     * layer. Byteswap is a no-op on big-endian hosts (gated by
-     * CPU_IS_LE inside). */
-    Byteswap(s_rom_copy, s_rom_copy, (int)rom_len);
+    /* With FAME_BIG_ENDIAN defined at compile time, ROM stays raw
+     * big-endian in memory. FAME fetch, memory.c u16 reads, and the
+     * rom_read32 helper all byteswap on access (one M33 REV16 each,
+     * single cycle). No pre-swap pass — lets the device build borrow
+     * the XIP pointer directly for carts up to 8 MB without any RAM
+     * copy. */
 
     /* PicoCartInsert: parses header, allocates SRAM if declared, wires
      * the memory map, and calls PicoPower() internally — so no

@@ -745,7 +745,7 @@ static u32 PicoRead8_sram(u32 a)
 
   // XXX: this is banking unfriendly
   if (a < Pico.romsize)
-    return Pico.rom[MEM_BE2(a)];
+    return Pico.rom[MEM_BE2_ROM(a)];
   
   return m68k_unmapped_read8(a);
 }
@@ -767,12 +767,43 @@ static u32 PicoRead16_sram(u32 a)
   }
 
   if (a < Pico.romsize)
+#ifdef FAME_BIG_ENDIAN
+    /* ThumbyNES: ROM kept raw BE; bswap on read. */
+    return (u16)__builtin_bswap16(*(u16 *)(Pico.rom + a));
+#else
     return *(u16 *)(Pico.rom + a);
+#endif
 
   return m68k_unmapped_read16(a);
 }
 
 #endif // _ASM_MEMORY_C
+
+#ifdef FAME_BIG_ENDIAN
+/* ThumbyNES: when ROM is kept raw big-endian (XIP from flash on device,
+ * or zero-copy on host), we can't serve 68K u16/u32 reads via the
+ * inline direct-pointer path in MAKE_68K_READ16 — that path also serves
+ * RAM reads, which must stay native. Route ROM pages through these
+ * function handlers so only ROM reads pay the bswap. */
+static u32 PicoRead8_rom_BE(u32 a)
+{
+  a &= 0x00ffffff;
+  if (a < Pico.romsize)
+    return Pico.rom[a];
+  return m68k_unmapped_read8(a);
+}
+
+static u32 PicoRead16_rom_BE(u32 a)
+{
+  a &= 0x00fffffe;
+  if (a < Pico.romsize) {
+    u32 v = (u16)__builtin_bswap16(*(u16 *)(Pico.rom + a));
+    if (getenv("MD_TRACE")) fprintf(stderr, "r16 %06x -> %04x\n", a, v);
+    return v;
+  }
+  return m68k_unmapped_read16(a);
+}
+#endif
 
 static void PicoWrite8_sram(u32 a, u32 d)
 {
@@ -1086,8 +1117,28 @@ PICO_INTERNAL void PicoMemSetup(void)
   rs = (Pico.romsize + mask) & ~mask;
   if (rs > 0xa00000) rs = 0xa00000; // max cartridge area
   if (rs) {
+#ifdef FAME_BIG_ENDIAN
+    /* ThumbyNES: can't map raw-BE ROM inline because the inline u16
+     * read path also serves RAM (which stays native). Route data
+     * reads through function handlers that bswap on u16/u32 reads. */
+    cpu68k_map_set(m68k_read8_map,  0x000000, rs - 1, PicoRead8_rom_BE,  1);
+    cpu68k_map_set(m68k_read16_map, 0x000000, rs - 1, PicoRead16_rom_BE, 1);
+    /* FAME's opcode fetch path handles byteswap inside its own FETCH_*
+     * macros (built with FAME_BIG_ENDIAN), and needs a DIRECT pointer
+     * in ctx->Fetch to find the ROM bytes. cpu68k_map_set skips Fetch
+     * population when is_func=1, so populate it manually with the raw
+     * ROM pointer. */
+    {
+      int shiftout = 24 - FAMEC_FETCHBITS;
+      int i = 0;
+      uptr base = (uptr)Pico.rom;
+      for (; i <= ((rs - 1) >> shiftout); i++)
+        PicoCpuFM68k.Fetch[i] = base;
+    }
+#else
     cpu68k_map_set(m68k_read8_map,  0x000000, rs - 1, Pico.rom, 0);
     cpu68k_map_set(m68k_read16_map, 0x000000, rs - 1, Pico.rom, 0);
+#endif
   }
 
   // Common case of on-cart (save) RAM, usually at 0x200000-...

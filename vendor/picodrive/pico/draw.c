@@ -1366,6 +1366,11 @@ void BackFill(int bgc, int sh, struct PicoEState *est)
 // --------------------------------------------
 
 static u16 *BgcDMAbase;
+#ifdef FAME_BIG_ENDIAN
+/* ThumbyNES: per-DMA flag set by PicoDrawBgcDMA so the scanline copy
+ * below knows whether to bswap each u16 read (ROM) or not (RAM). */
+static int BgcDMA_is_rom;
+#endif
 static u32 BgcDMAsrc, BgcDMAmask;
 static int BgcDMAlen, BgcDMAoffs;
 
@@ -1397,6 +1402,9 @@ void BgcDMA(struct PicoEState *est)
   for (i = BgcDMAoffs; i < l; i += 2) {
     // TODO use ps to overwrite only real bg pixels
     t = BgcDMAbase[BgcDMAsrc++ & BgcDMAmask];
+#ifdef FAME_BIG_ENDIAN
+    if (BgcDMA_is_rom) t = __builtin_bswap16(t);
+#endif
     q[i] = q[i+1] = PXCONV(t);
   }
   BgcDMAsrc += xl; // HSYNC DMA
@@ -1947,6 +1955,11 @@ void PicoDrawBgcDMA(u16 *base, u32 source, u32 mask, int dlen, int sl)
   int xl = (est->Pico->video.reg[12]&1) ? 38 : 33; // DMA slots during HSYNC
 
   BgcDMAbase = base;
+#ifdef FAME_BIG_ENDIAN
+  BgcDMA_is_rom = (base != NULL
+                && (const u8 *)base >= (const u8 *)Pico.rom
+                && (const u8 *)base <  (const u8 *)Pico.rom + Pico.romsize);
+#endif
   BgcDMAsrc = source;
   BgcDMAmask = mask;
   BgcDMAlen = dlen;

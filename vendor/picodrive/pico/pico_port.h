@@ -60,6 +60,19 @@
 #define MEM_BE4(a)	((a)^3)		// addr/offs of u8 in u32
 #define MEM_LE2(a)	(a)
 #define MEM_LE4(a)	(a)
+/* ThumbyNES: MEM_BE2_ROM / MEM_BE4_ROM are for byte reads from the
+ * cart ROM specifically. Under FAME_BIG_ENDIAN the ROM stays in raw
+ * big-endian order (XIP from flash on device), so byte at BE offset
+ * A is simply at memory offset A. In upstream / pre-swap mode the
+ * ROM on LE hosts is byte-swapped so MEM_BE2_ROM reduces to the
+ * regular MEM_BE2 (a^1). RAM sites keep using the plain MEM_BE2. */
+#ifdef FAME_BIG_ENDIAN
+#define MEM_BE2_ROM(a)	(a)
+#define MEM_BE4_ROM(a)	(a)
+#else
+#define MEM_BE2_ROM(a)	((a)^1)
+#define MEM_BE4_ROM(a)	((a)^3)
+#endif
 // swapping
 #define CPU_BE2(v)	((u32)((u64)(v)<<16)|((u32)(v)>>16))
 #define CPU_BE4(v)	(((u32)(v)>>24)|(((v)>>8)&0x00ff00)| \
@@ -72,6 +85,10 @@
 #define MEM_BE4(a)	(a)
 #define MEM_LE2(a)	((a)^1)
 #define MEM_LE4(a)	((a)^3)
+/* On big-endian hosts the ROM is stored natively regardless of mode,
+ * so MEM_BE2_ROM is always identity. */
+#define MEM_BE2_ROM(a)	(a)
+#define MEM_BE4_ROM(a)	(a)
 // swapping
 #define CPU_BE2(v)	(v)
 #define CPU_BE4(v)	(v)
