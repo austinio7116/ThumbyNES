@@ -29,6 +29,32 @@
 #define ENV_STEP    (128.0/64.0)             /* matches ym2612.c */
 #define SIN_LEN     1024                     /* matches ym2612.c */
 
+/* Copied verbatim from vendor/picodrive/pico/sound/ym2612.c lines
+ * 451..522. If you update one, update the other. */
+static const uint8_t lfo_pm_output[7*8][8] = {
+/* FNUM BIT 4 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},
+{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,1,1,1,1},
+/* FNUM BIT 5 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},
+{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,1,1,1,1},{0,0,1,1,2,2,2,3},
+/* FNUM BIT 6 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},
+{0,0,0,0,0,0,0,1},{0,0,0,0,1,1,1,1},{0,0,1,1,2,2,2,3},{0,0,2,3,4,4,5,6},
+/* FNUM BIT 7 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,1,1},{0,0,0,0,1,1,1,1},
+{0,0,0,1,1,1,1,2},{0,0,1,1,2,2,2,3},{0,0,2,3,4,4,5,6},{0,0,4,6,8,8,0xa,0xc},
+/* FNUM BIT 8 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,1,1,1,1},{0,0,0,1,1,1,2,2},{0,0,1,1,2,2,3,3},
+{0,0,1,2,2,2,3,4},{0,0,2,3,4,4,5,6},{0,0,4,6,8,8,0xa,0xc},{0,0,8,0xc,0x10,0x10,0x14,0x18},
+/* FNUM BIT 9 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,2,2,2,2},{0,0,0,2,2,2,4,4},{0,0,2,2,4,4,6,6},
+{0,0,2,4,4,4,6,8},{0,0,4,6,8,8,0xa,0xc},{0,0,8,0xc,0x10,0x10,0x14,0x18},{0,0,0x10,0x18,0x20,0x20,0x28,0x30},
+/* FNUM BIT 10 */
+{0,0,0,0,0,0,0,0},{0,0,0,0,4,4,4,4},{0,0,0,4,4,4,8,8},{0,0,4,4,8,8,0xc,0xc},
+{0,0,4,8,8,8,0xc,0x10},{0,0,8,0xc,0x10,0x10,0x14,0x18},{0,0,0x10,0x18,0x20,0x20,0x28,0x30},{0,0,0x20,0x30,0x40,0x40,0x50,0x60},
+};
+
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s out.c\n", argv[0]); return 1; }
     FILE *f = fopen(argv[1], "w");
@@ -91,6 +117,36 @@ int main(int argc, char **argv) {
     fprintf(f, "const uint16_t md_ym_tl_tab2_data[13 * %d] = {\n", TL_RES_LEN);
     for (int i = 0; i < 13 * TL_RES_LEN; i++) {
         fprintf(f, "0x%04x,", tl_tab2[i]);
+        if ((i & 15) == 15) fputc('\n', f);
+    }
+    fprintf(f, "};\n\n");
+
+    /* ---- lfo_pm_table: 128 KB of INT32 LFO phase modulation values.
+     * Computed from lfo_pm_output via the exact loop in ym2612.c
+     * init_tables (lines ~1569..1599). Fully deterministic, doesn't
+     * depend on sample rate. */
+    static int32_t lfo_pm[128 * 8 * 32];
+    for (int i = 0; i < 8; i++) {                /* 8 PM depths */
+        for (int fnum = 0; fnum < 128; fnum++) {  /* 7 bits of F-NUMBER */
+            uint8_t offset_depth = i;
+            for (int step = 0; step < 8; step++) {
+                uint8_t value = 0;
+                for (int bit_tmp = 0; bit_tmp < 7; bit_tmp++) {
+                    if (fnum & (1 << bit_tmp)) {
+                        int offset_fnum_bit = bit_tmp * 8;
+                        value += lfo_pm_output[offset_fnum_bit + offset_depth][step];
+                    }
+                }
+                lfo_pm[(fnum*32*8) + (i*32) + step    + 0 ] =  value;
+                lfo_pm[(fnum*32*8) + (i*32) +(step^7) + 8 ] =  value;
+                lfo_pm[(fnum*32*8) + (i*32) + step    + 16] = -value;
+                lfo_pm[(fnum*32*8) + (i*32) +(step^7) + 24] = -value;
+            }
+        }
+    }
+    fprintf(f, "const int32_t md_ym_lfo_pm_data[128*8*32] = {\n");
+    for (int i = 0; i < 128*8*32; i++) {
+        fprintf(f, "%d,", lfo_pm[i]);
         if ((i & 15) == 15) fputc('\n', f);
     }
     fprintf(f, "};\n");

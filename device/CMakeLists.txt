@@ -224,6 +224,36 @@ add_custom_command(
     VERBATIM
 )
 
+# FAME 68K JumpTable — 256 KB of function pointers, precomputed at
+# build time and emitted as #include'd designated initialiser data
+# that famec.c picks up under FAME_JUMPTABLE_IN_FLASH.
+set(MD_FAME_JT_INC ${CMAKE_CURRENT_BINARY_DIR}/famec_jumptable_data.inc)
+set(MD_FAME_JT_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_fame_jt_gen)
+add_custom_command(
+    OUTPUT  ${MD_FAME_JT_GEN}
+    COMMAND cc -O2 -I${NES_ROOT}
+                -o ${MD_FAME_JT_GEN} ${NES_ROOT}/tools/gen_md_fame_jumptable.c
+    DEPENDS ${NES_ROOT}/tools/gen_md_fame_jumptable.c
+            ${PICODRIVE_DIR}/cpu/fame/famec_jumptable_init.inc
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT  ${MD_FAME_JT_INC}
+    COMMAND ${MD_FAME_JT_GEN} ${MD_FAME_JT_INC}
+    DEPENDS ${MD_FAME_JT_GEN}
+    VERBATIM
+)
+# famec.c #includes "famec_jumptable_data.inc" via relative path; the
+# generated file lives in the build tree, so add the build dir to
+# famec.c's include path. Apply the -O2 override from below and -I
+# for the generated header together.
+set_source_files_properties(
+    ${PICODRIVE_DIR}/cpu/fame/famec.c
+    PROPERTIES
+        OBJECT_DEPENDS ${MD_FAME_JT_INC}
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}"
+)
+
 add_library(picodrive STATIC
     ${PICODRIVE_PICO_SRC}
     ${PICODRIVE_SOUND_SRC}
@@ -255,6 +285,7 @@ target_compile_definitions(picodrive PUBLIC
     FAME_BIG_ENDIAN
     YM2612_TABLES_IN_FLASH
     CZ80_SZHVC_IN_FLASH
+    FAME_JUMPTABLE_IN_FLASH  # 256 KB FAME opcode dispatch table → flash
     THUMBY_YM2413_EXCLUDED   # sound/ym2413.c not in build; stubs active
     THUMBY_DRAW2_EXCLUDED    # pico/draw2.c not in build; stubs active
     # Rename picodrive's z80 API so its symbols don't collide with
@@ -335,6 +366,7 @@ target_include_directories(thumbynes_core PUBLIC
     ${NES_ROOT}/src
     ${CMAKE_CURRENT_LIST_DIR}     # for thumby_state_bridge.h
 )
+target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH)
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb picodrive)
 

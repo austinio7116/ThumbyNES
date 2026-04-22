@@ -20,10 +20,24 @@
  * picodrive's private include path). */
 void fm68k_shutdown(void);
 
+#ifdef MD_LINE_SCRATCH
+/* Device build: line-scratch mode. s_fb is a single-line buffer
+ * (MDC_MAX_W shorts = 640 bytes). Each scanline PicoDrive draws
+ * goes into it; our PicoScanEnd callback downsamples into the
+ * caller-provided 128x128 LCD fb. Saves 153 KB of heap vs the
+ * full-frame path. */
+static uint16_t   s_line_scratch[MDC_MAX_W];
+static uint16_t  *s_fb = s_line_scratch;
+static uint16_t  *s_lcd_fb;               /* set by mdc_set_scale_target */
+static uint8_t    s_scale_mode;
+static int16_t    s_vx, s_vy, s_vw, s_vh;
+static int16_t    s_pan_x, s_pan_y;
+#else
 /* Full 320x240 RGB565 frame. PicoDrive writes one scanline at a time
  * through DrawLineDest; we hand it a contiguous buffer and a row
  * increment (in bytes) so each line lands at the right Y offset. */
 static uint16_t *s_fb;              /* MDC_MAX_W * MDC_MAX_H shorts */
+#endif
 static int16_t   s_sndbuf[2048];    /* stereo int16, ~735 samples/frame @ 22050/60 */
 static int16_t   s_mixbuf[1024];    /* mono int16 after downmix */
 static int       s_mixcount;
@@ -63,10 +77,12 @@ int mdc_init(int region, int sample_rate)
     s_mixcount = 0;
     s_sample_rate = sample_rate;
 
+#ifndef MD_LINE_SCRATCH
     if (!s_fb) {
         s_fb = (uint16_t *)calloc(MDC_MAX_W * MDC_MAX_H, sizeof(uint16_t));
         if (!s_fb) return -1;
     }
+#endif
 
     PicoInit();
 
@@ -111,7 +127,17 @@ static int mdc_finish_load(void)
      * sets. Without that flag the first-frame draw short-circuits in
      * PicoDrawSync (line 1887) and our framebuffer stays blank. */
     PicoDrawSetOutFormat(PDF_RGB555, 0);
+#ifdef MD_LINE_SCRATCH
+    /* increment = 0 → every scanline overwrites the same 640-byte
+     * scratch; PicoScanEnd consumes it per-line. */
+    PicoDrawSetOutBuf(s_fb, 0);
+    {
+        extern int md_core_scan_end(unsigned int line);
+        PicoDrawSetCallbacks(NULL, md_core_scan_end);
+    }
+#else
     PicoDrawSetOutBuf(s_fb, MDC_MAX_W * sizeof(uint16_t));
+#endif
 
     s_loaded = true;
     return 0;
@@ -201,7 +227,72 @@ void mdc_viewport(int *x, int *y, int *w, int *h)
     if (h) *h = h_out;
 }
 
+#ifdef MD_LINE_SCRATCH
+const uint16_t *mdc_framebuffer(void) { return NULL; }  /* no full fb */
+
+void mdc_set_scale_target(uint16_t *lcd_fb, int scale_mode,
+                           int vx, int vy, int vw, int vh,
+                           int pan_x, int pan_y)
+{
+    s_lcd_fb     = lcd_fb;
+    s_scale_mode = (uint8_t)scale_mode;
+    s_vx = (int16_t)vx; s_vy = (int16_t)vy;
+    s_vw = (int16_t)vw; s_vh = (int16_t)vh;
+    s_pan_x = (int16_t)pan_x; s_pan_y = (int16_t)pan_y;
+}
+
+/* Downsample one MD scanline (just drawn into s_line_scratch) into
+ * the 128x128 LCD framebuffer. `line` is 0..223 (V28) or 0..239 (V30).
+ * Called from PicoDrive's per-line callback. */
+int md_core_scan_end(unsigned int line)
+{
+    if (!s_lcd_fb) return 0;
+
+    /* Line position inside the active viewport. PicoDrive's DrawSync
+     * already handles the V28/V30 letterbox in the 240-slot; `line`
+     * here is the absolute line within that 240-slot. Map it back
+     * into 0..s_vh by subtracting s_vy. */
+    int y_src = (int)line - s_vy;
+    if (y_src < 0 || y_src >= s_vh) return 0;
+
+    const uint16_t *srow = s_line_scratch + s_vx;
+
+    if (s_scale_mode == 2) {           /* CROP 1:1 */
+        int pmax_x = s_vw - 128; if (pmax_x < 0) pmax_x = 0;
+        int pmax_y = s_vh - 128; if (pmax_y < 0) pmax_y = 0;
+        int px = s_pan_x; if (px < 0) px = 0; if (px > pmax_x) px = pmax_x;
+        int py = s_pan_y; if (py < 0) py = 0; if (py > pmax_y) py = pmax_y;
+        int copy_h = s_vh < 128 ? s_vh : 128;
+        int dy = y_src - py;
+        if (dy < 0 || dy >= copy_h) return 0;
+        int copy_w = s_vw < 128 ? s_vw : 128;
+        int dst_x = (128 - copy_w) / 2;
+        int dst_y = (128 - copy_h) / 2;
+        uint16_t *drow = s_lcd_fb + (dst_y + dy) * 128 + dst_x;
+        memcpy(drow, srow + px, copy_w * 2);
+    } else {
+        /* FIT (letterboxed 128x90) or FILL (stretched 128x128). */
+        int dst_h = (s_scale_mode == 1) ? 128 : 90;
+        int letterbox_top = (128 - dst_h) / 2;
+        /* Map source y to dest dy. */
+        int dy = (y_src * dst_h) / s_vh;
+        /* Which src lines map to this dy? Draw only when this is
+         * the first src line for that dy — avoids redundant writes
+         * for multi-src-per-dy cases. */
+        int prev_dy = (y_src > 0) ? ((y_src - 1) * dst_h) / s_vh : -1;
+        if (dy == prev_dy) return 0;
+        uint16_t *drow = s_lcd_fb + (letterbox_top + dy) * 128;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx = (dx * s_vw) / 128;
+            drow[dx] = srow[sx];
+        }
+    }
+    return 0;
+}
+
+#else
 const uint16_t *mdc_framebuffer(void) { return s_fb; }
+#endif
 
 void mdc_set_buttons(uint16_t mask)
 {
@@ -254,5 +345,7 @@ void mdc_shutdown(void)
         fm68k_shutdown();
         s_loaded = false;
     }
+#ifndef MD_LINE_SCRATCH
     if (s_fb) { free(s_fb); s_fb = NULL; }
+#endif
 }

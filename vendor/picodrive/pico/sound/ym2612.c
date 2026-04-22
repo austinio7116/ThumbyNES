@@ -521,10 +521,19 @@ static const UINT8 lfo_pm_output[7*8][8]={ /* 7 bits meaningful (of F-NUMBER), 8
 
 };
 
-/* all 128 LFO PM waveforms. ThumbyNES: heap-allocated on first
- * YM2612Init so the 128 KB doesn't consume device BSS when MD isn't
- * active. Freed by YM2612Shutdown_. */
+/* all 128 LFO PM waveforms. Three modes:
+ *
+ *  YM2612_TABLES_IN_FLASH — device build. Precomputed by
+ *      tools/gen_md_ym2612_tab.c and linked as const flash data.
+ *
+ *  default (host) — heap-allocated on first YM2612Init, freed by
+ *      YM2612Shutdown_ so sibling cores reclaim. */
+#ifdef YM2612_TABLES_IN_FLASH
+extern const INT32 md_ym_lfo_pm_data[128*8*32];
+static INT32 *lfo_pm_table = (INT32 *)md_ym_lfo_pm_data;
+#else
 static INT32 *lfo_pm_table;
+#endif
 
 /* there are 2048 FNUMs that can be generated using FNUM/BLK registers
 	but LFO works with one more bit of a precision so we really need 4096 elements.
@@ -1488,10 +1497,12 @@ static void init_tables(void)
 	if (ym_init_tab) return;
 	ym_init_tab = 1;
 
-	/* ThumbyNES: allocate the lfo_pm / fn dynamic tables. These are
-	 * heap in both host and device builds — they never go to flash
-	 * because fn_table depends on runtime sample rate. */
+	/* ThumbyNES: allocate the fn_table (depends on runtime sample
+	 * rate so can't live in flash). lfo_pm_table is either const
+	 * flash (device) or heap-allocated (host, see declaration). */
+#ifndef YM2612_TABLES_IN_FLASH
 	if (!lfo_pm_table) lfo_pm_table = (INT32  *)calloc(128*8*32, sizeof(INT32));
+#endif
 	if (!fn_table)     fn_table     = (UINT32 *)calloc(4096,     sizeof(UINT32));
 
 #ifdef YM2612_TABLES_IN_FLASH
@@ -1577,7 +1588,9 @@ static void init_tables(void)
 #endif
 
 
-	/* build LFO PM modulation table */
+#ifndef YM2612_TABLES_IN_FLASH
+	/* build LFO PM modulation table — skipped under
+	 * YM2612_TABLES_IN_FLASH (baked into flash instead). */
 	for(i = 0; i < 8; i++) /* 8 PM depths */
 	{
 		UINT8 fnum;
@@ -1607,6 +1620,7 @@ static void init_tables(void)
 			}
 		}
 	}
+#endif   /* !YM2612_TABLES_IN_FLASH */
 }
 
 
@@ -1888,9 +1902,9 @@ void YM2612Init_(int clock, int rate, int flags)
  * under YM2612_TABLES_IN_FLASH since the tables live in const flash. */
 void YM2612Shutdown_(void)
 {
-	free(lfo_pm_table); lfo_pm_table = NULL;
 	free(fn_table);     fn_table     = NULL;
 #ifndef YM2612_TABLES_IN_FLASH
+	free(lfo_pm_table); lfo_pm_table = NULL;
 	free(ym_tl_tab);  ym_tl_tab  = NULL;
 	free(ym_tl_tab2); ym_tl_tab2 = NULL;
 #endif

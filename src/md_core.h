@@ -78,8 +78,31 @@ int  mdc_refresh_rate(void);
 void mdc_viewport(int *x, int *y, int *w, int *h);
 
 /* Pointer to the most recently rendered frame, as uint16 RGB565,
- * stride = MDC_MAX_W * 2 bytes. Valid until the next mdc_run_frame. */
+ * stride = MDC_MAX_W * 2 bytes. Valid until the next mdc_run_frame.
+ * Returns NULL on builds that use the line-scratch path (see
+ * mdc_set_scale_target). */
 const uint16_t *mdc_framebuffer(void);
+
+/* Line-scratch render target (device-only — saves 153 KB heap by
+ * skipping the 320x240 intermediate buffer). md_run calls this once
+ * before each frame with the 128x128 LCD fb. PicoDrive's per-line
+ * writer fills a 640-byte scratch; our PicoScanEnd callback
+ * downsamples each scanline into `lcd_fb` at the right Y row and
+ * within the active viewport.
+ *
+ *   scale_mode: 0=FIT (letterbox 128x90), 1=FILL (stretched 128x128),
+ *               2=CROP (pannable 1:1 window).
+ *   vx, vy, vw, vh: active source rect inside MDC_MAX_W x MDC_MAX_H,
+ *                    as returned by mdc_viewport().
+ *   pan_x, pan_y:   CROP source-coord pan (ignored in FIT/FILL).
+ *
+ * Only compiled when MD_LINE_SCRATCH is defined. Host builds keep the
+ * full-framebuffer path via mdc_framebuffer(). */
+#ifdef MD_LINE_SCRATCH
+void mdc_set_scale_target(uint16_t *lcd_fb_128x128,
+                           int scale_mode, int vx, int vy, int vw, int vh,
+                           int pan_x, int pan_y);
+#endif
 
 /* Set Player 1 controller mask (MDC_BTN_*). */
 void mdc_set_buttons(uint16_t mask);

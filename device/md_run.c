@@ -4,14 +4,8 @@
  * Mirrors sms_run.c but drives PicoDrive instead of smsplus. Uses the
  * picker's XIP mmap path — ROM data stays in flash, PicoDrive reads
  * raw-BE bytes directly and byteswaps on access (see FAME_BIG_ENDIAN
- * in the vendored core).
- *
- *   MD  320x224 → blit_fit_md  : 2.5:1 H / 1.75:1 V, letterbox 19px top/bottom
- *                blit_fill_md : asymmetric fill — full screen, stretched
- *                blit_crop_md : 1:1 128x128 window, pannable
- *
- *   H32 (256x224) and V30 (320x240) variants handled at blit time by
- *   reading the runtime viewport from mdc_viewport().
+ * in the vendored core). Scaling (FIT / FILL / CROP) is done inside
+ * md_core's PicoScanEnd callback — see mdc_set_scale_target().
  */
 #include "md_run.h"
 #include "md_core.h"
@@ -107,80 +101,11 @@ static uint16_t read_md_buttons(void) {
     return m;
 }
 
-/* --- scalers ------------------------------------------------------- */
+/* Scaling lives in md_core's per-line PicoScanEnd callback — see
+ * mdc_set_scale_target(). md_run just hands it the LCD framebuffer,
+ * viewport, pan, and mode; PicoDrive streams each scanline through
+ * our downsample and never materialises a full 320x240 frame. */
 
-/* MD 320x224 → 128x90 nearest, centred with 19 px top/bottom letterbox.
- * Integer math: src_x = dx * 320 / 128 = dx * 5 / 2,
- *                src_y = dy * 224 / 90.
- * For H32 (256x224) carts, the source viewport's vx offset shifts the
- * x sample inside the 320-wide MD framebuffer.  */
-static void __not_in_flash_func(blit_fit_md)(uint16_t *fb, const uint16_t *src,
-                                             int vx, int vy, int vw, int vh) {
-    (void)vy;   /* PicoDrive always puts the top of active display at y=0 of
-                 * the (cropped) viewport; vy is the offset INTO the 240-line
-                 * buffer where the active window lives. We consume that on
-                 * the read side via `src + vy * MDC_MAX_W`. */
-    const uint16_t *srow_base = src + vy * MDC_MAX_W;
-    /* dst rect: 128 x 90, centred at y=19..108 on the 128x128 LCD. */
-    const int DST_H = 90;
-    const int top_letterbox = (128 - DST_H) / 2;     /* 19 */
-    /* clear letterbox (top and bottom) */
-    memset(fb,                               0, 128 * top_letterbox * 2);
-    memset(fb + (top_letterbox + DST_H) * 128, 0,
-           128 * (128 - top_letterbox - DST_H) * 2);
-    for (int dy = 0; dy < DST_H; dy++) {
-        int sy = (dy * vh) / DST_H;
-        const uint16_t *srow = srow_base + sy * MDC_MAX_W + vx;
-        uint16_t *drow = fb + (top_letterbox + dy) * 128;
-        for (int dx = 0; dx < 128; dx++) {
-            int sx = (dx * vw) / 128;
-            drow[dx] = srow[sx];
-        }
-    }
-}
-
-/* MD 320x224 → 128x128 full-screen with independent H/V nearest scale.
- * Stretches vertically (makes sprites taller) but shows the whole play
- * field. Some games look fine here (Sonic horizontally scrolls), some
- * don't (puzzle/portrait).  */
-static void __not_in_flash_func(blit_fill_md)(uint16_t *fb, const uint16_t *src,
-                                              int vx, int vy, int vw, int vh) {
-    const uint16_t *srow_base = src + vy * MDC_MAX_W;
-    for (int dy = 0; dy < 128; dy++) {
-        int sy = (dy * vh) / 128;
-        const uint16_t *srow = srow_base + sy * MDC_MAX_W + vx;
-        uint16_t *drow = fb + dy * 128;
-        for (int dx = 0; dx < 128; dx++) {
-            int sx = (dx * vw) / 128;
-            drow[dx] = srow[sx];
-        }
-    }
-}
-
-/* MD 1:1 crop into a 128x128 window of the viewport. Pan in source
- * coords; clamped to [0, vw-128] horizontally and [0, vh-128] vert. */
-static void blit_crop_md(uint16_t *fb, const uint16_t *src,
-                          int vx, int vy, int vw, int vh,
-                          int pan_x, int pan_y) {
-    int pmax_x = vw - 128; if (pmax_x < 0) pmax_x = 0;
-    int pmax_y = vh - 128; if (pmax_y < 0) pmax_y = 0;
-    if (pan_x < 0)       pan_x = 0;
-    if (pan_x > pmax_x)  pan_x = pmax_x;
-    if (pan_y < 0)       pan_y = 0;
-    if (pan_y > pmax_y)  pan_y = pmax_y;
-    const uint16_t *srow_base = src + vy * MDC_MAX_W;
-    /* Clear any remaining border if viewport is narrower / shorter than 128. */
-    if (vw < 128 || vh < 128) memset(fb, 0, 128 * 128 * 2);
-    int copy_w = vw < 128 ? vw : 128;
-    int copy_h = vh < 128 ? vh : 128;
-    int dst_x  = (128 - copy_w) / 2;
-    int dst_y  = (128 - copy_h) / 2;
-    for (int dy = 0; dy < copy_h; dy++) {
-        const uint16_t *srow = srow_base + (pan_y + dy) * MDC_MAX_W + vx + pan_x;
-        uint16_t *drow = fb + (dst_y + dy) * 128 + dst_x;
-        memcpy(drow, srow, copy_w * 2);
-    }
-}
 
 /* --- per-ROM cfg --------------------------------------------------- */
 
@@ -546,26 +471,29 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
         mdc_set_buttons(pad);
 
+        /* Set up the line-scratch downsample target for this frame.
+         * PicoDrive will write each MD scanline into md_core's 640-byte
+         * scratch and our PicoScanEnd callback streams the downsample
+         * directly into `fb` (128x128 LCD) — no intermediate frame. */
+        int vx, vy, vw, vh;
+        mdc_viewport(&vx, &vy, &vw, &vh);
+        /* Clear letterbox columns/rows once per frame (FIT/CROP). The
+         * scanline callback only writes the active dest rect. */
+        if (scale_mode == SCALE_FIT)  memset(fb, 0, 128 * 19 * 2),
+                                       memset(fb + (19+90)*128, 0, 128*19*2);
+        else if (scale_mode == SCALE_CROP) memset(fb, 0, 128 * 128 * 2);
+        mdc_set_scale_target(fb, (int)scale_mode, vx, vy, vw, vh,
+                              pan_x, pan_y);
+
         /* Run frames. Frameskip = N means "render 1 of every (N+1)",
-         * but the 68K still emulates every frame for timing. Simulate
-         * by setting PicoIn.skipFrame — requires md_core extension,
-         * but for now just run extra frames for FF. */
+         * but the 68K still emulates every frame for timing. */
         int frame_runs = fast_forward ? 4 : (1 + frameskip);
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
         unsaved_play_frames += frame_runs;
 
-        /* Blit this frame */
-        const uint16_t *mdfb = mdc_framebuffer();
-        if (mdfb) {
-            int vx, vy, vw, vh;
-            mdc_viewport(&vx, &vy, &vw, &vh);
+        /* Per-line callbacks have filled `fb`. Overlays + present. */
+        {
             nes_lcd_wait_idle();
-            if (scale_mode == SCALE_CROP)
-                blit_crop_md(fb, mdfb, vx, vy, vw, vh, pan_x, pan_y);
-            else if (scale_mode == SCALE_FILL)
-                blit_fill_md(fb, mdfb, vx, vy, vw, vh);
-            else
-                blit_fit_md (fb, mdfb, vx, vy, vw, vh);
             if (show_fps) {
                 char ftxt[16];
                 snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
