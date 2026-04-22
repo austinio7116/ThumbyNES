@@ -208,6 +208,56 @@ volatile unsigned int md_dbg_finalize_calls;
 volatile unsigned int md_dbg_finalize_early;
 volatile unsigned int md_dbg_vdp_writes;
 
+/* Odd-branch-target capture — first 4 distinct events. Site PC is the
+ * calling instruction's PC (GET_PC at exception site); target is the
+ * odd value the branch wanted to jump to. */
+volatile unsigned int md_dbg_odd_count;
+volatile unsigned int md_dbg_odd_site[4];
+volatile unsigned int md_dbg_odd_target[4];
+
+volatile unsigned int   md_dbg_cram_writes;
+volatile unsigned short md_dbg_cram_val[4];
+volatile unsigned char  md_dbg_cram_addr[4];
+volatile unsigned int   md_dbg_cram_pc[4];   /* 0x100|pc = direct, 0x200|(src_is_rom<<4) = DMA */
+
+volatile unsigned int   md_dbg_rom_reads;
+volatile unsigned int   md_dbg_rom_addr[4];
+volatile unsigned short md_dbg_rom_val[4];
+
+volatile unsigned short md_dbg_rom_peek_18e;     /* header checksum */
+volatile unsigned short md_dbg_rom_peek_1a4_hi;  /* ROM end high word */
+volatile unsigned short md_dbg_rom_peek_1a6_lo;  /* ROM end low word */
+volatile unsigned int   md_dbg_rom_maxaddr;      /* highest addr ever read */
+volatile unsigned short md_dbg_rom_xor;          /* 16-bit SUM of reads in 0x200..0xFFFFF */
+volatile unsigned short md_dbg_rom_qsum[16];     /* per-64KB-chunk sums */
+volatile unsigned short md_dbg_ch15_f0000;       /* read at ROM[0xF0000] — expect 0x0280 */
+volatile unsigned short md_dbg_ch15_f8000;       /* read at ROM[0xF8000] — expect 0xF684 */
+volatile unsigned short md_dbg_ch15_fc000;       /* read at ROM[0xFC000] — expect 0xB020 */
+volatile unsigned short md_dbg_ch15_ffffe;       /* read at ROM[0xFFFFE] — expect 0x0000 */
+
+volatile unsigned int md_dbg_io_poll_count;     /* total IO reads (MD $A10000+) */
+volatile unsigned int md_dbg_io_poll_addr;      /* last address read twice in a row */
+volatile unsigned int md_dbg_io_last_addr;      /* previous IO read addr */
+
+volatile unsigned int   md_dbg_vdp_reads;       /* total VDP reads ($C00000+) */
+volatile unsigned short md_dbg_vdp_last_val;    /* last value PicoVideoRead returned */
+volatile unsigned int   md_dbg_int_count[8];    /* per-IPL interrupt delivery count */
+
+/* PC trap — set md_dbg_trap_pc to a 68K address before load; the
+ * emulator captures D1 the first time PC reaches that address. */
+volatile unsigned int md_dbg_trap_pc  = 0x3C2;   /* Sonic 2 error-handler entry */
+volatile unsigned int md_dbg_trap_d1;
+volatile unsigned int md_dbg_trap_hit;
+void md_dbg_log_odd_branch(unsigned int site_pc, unsigned int target)
+{
+    unsigned int n = md_dbg_odd_count;
+    if (n < 4) {
+        md_dbg_odd_site[n]   = site_pc;
+        md_dbg_odd_target[n] = target;
+    }
+    md_dbg_odd_count = n + 1;
+}
+
 /* ------ Video mode change callback ----------------------------------- */
 /* PicoDrive calls this whenever the VDP switches between H32/H40 or
  * between 28-row and 30-row modes. The device/host frontend uses it to

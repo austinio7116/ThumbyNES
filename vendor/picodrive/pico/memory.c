@@ -806,8 +806,42 @@ static u32 PicoRead8_rom_BE(u32 a)
 static u32 PicoRead16_rom_BE(u32 a)
 {
   a &= 0x00fffffe;
-  if (a < Pico.romsize)
-    return (u16)__builtin_bswap16(*(u16 *)(Pico.rom + a));
+  if (a < Pico.romsize) {
+    u16 raw = *(u16 *)(Pico.rom + a);
+    u16 r = (u16)__builtin_bswap16(raw);
+    /* Diagnostic: capture specific reads of interest — the header
+     * checksum (0x18E), ROM-end address (0x1A4), and the running
+     * MAX addr seen. Also accumulate a simple XOR of every ROM
+     * value so we can compare against a known expectation (file
+     * XOR, computed on host). */
+    extern volatile unsigned short md_dbg_rom_peek_18e;
+    extern volatile unsigned short md_dbg_rom_peek_1a4_hi;
+    extern volatile unsigned short md_dbg_rom_peek_1a6_lo;
+    extern volatile unsigned int   md_dbg_rom_maxaddr;
+    extern volatile unsigned short md_dbg_rom_xor;
+    if (a == 0x18e) md_dbg_rom_peek_18e    = r;
+    if (a == 0x1a4) md_dbg_rom_peek_1a4_hi = r;
+    if (a == 0x1a6) md_dbg_rom_peek_1a6_lo = r;
+    /* Specific captures inside chunk 15 to see exact read values. */
+    extern volatile unsigned short md_dbg_ch15_f0000;
+    extern volatile unsigned short md_dbg_ch15_f8000;
+    extern volatile unsigned short md_dbg_ch15_fc000;
+    extern volatile unsigned short md_dbg_ch15_ffffe;
+    if (a == 0xf0000) md_dbg_ch15_f0000 = r;
+    if (a == 0xf8000) md_dbg_ch15_f8000 = r;
+    if (a == 0xfc000) md_dbg_ch15_fc000 = r;
+    if (a == 0xffffe) md_dbg_ch15_ffffe = r;
+    if (a > md_dbg_rom_maxaddr) md_dbg_rom_maxaddr = a;
+    /* Per-64KB-chunk sums (16 chunks = 1 MB) to pinpoint where the
+     * ROM read corruption begins. */
+    extern volatile unsigned short md_dbg_rom_qsum[16];
+    if (a >= 0x200 && a < 0x100000) {
+        unsigned int chunk = a >> 16;
+        md_dbg_rom_qsum[chunk] = (md_dbg_rom_qsum[chunk] + r) & 0xFFFF;
+        md_dbg_rom_xor = (md_dbg_rom_xor + r) & 0xFFFF;
+    }
+    return r;
+  }
   return m68k_unmapped_read16(a);
 }
 #endif
@@ -931,9 +965,17 @@ static void PicoWrite16_z80(u32 a, u32 d)
 #ifndef _ASM_MEMORY_C
 
 // IO/control area (0xa10000 - 0xa1ffff)
+extern volatile unsigned int md_dbg_io_poll_count;
+extern volatile unsigned int md_dbg_io_poll_addr;
+extern volatile unsigned int md_dbg_io_last_addr;
+
 u32 PicoRead8_io(u32 a)
 {
   u32 d;
+  /* Track most-frequently-read IO address (poll detector). */
+  md_dbg_io_poll_count++;
+  if (a == md_dbg_io_last_addr) md_dbg_io_poll_addr = a;
+  md_dbg_io_last_addr = a;
 
   if ((a & 0xffe0) == 0x0000) { // I/O ports
     d = io_ports_read(a);
@@ -965,6 +1007,9 @@ end:
 u32 PicoRead16_io(u32 a)
 {
   u32 d;
+  md_dbg_io_poll_count++;
+  if (a == md_dbg_io_last_addr) md_dbg_io_poll_addr = a;
+  md_dbg_io_last_addr = a;
 
   if ((a & 0xffe0) == 0x0000) { // I/O ports
     d = io_ports_read(a);
@@ -1041,9 +1086,13 @@ void PicoWrite16_io(u32 a, u32 d)
 
 // VDP area (0xc00000 - 0xdfffff)
 // TODO: verify if lower byte goes to PSG on word writes
+extern volatile unsigned int md_dbg_vdp_reads;
+extern volatile unsigned short md_dbg_vdp_last_val;
+
 u32 PicoRead8_vdp(u32 a)
 {
   u32 d;
+  md_dbg_vdp_reads++;
   if ((a & 0x00f0) == 0x0000) {
     switch (a & 0x0d)
     {
@@ -1066,8 +1115,12 @@ u32 PicoRead8_vdp(u32 a)
 
 static u32 PicoRead16_vdp(u32 a)
 {
-  if ((a & 0x00e0) == 0x0000)
-    return PicoVideoRead(a);
+  md_dbg_vdp_reads++;
+  if ((a & 0x00e0) == 0x0000) {
+    u32 v = PicoVideoRead(a);
+    md_dbg_vdp_last_val = (unsigned short)v;
+    return v;
+  }
 
   elprintf(EL_UIO|EL_ANOMALY, "68k bad read [%06x] @%06x", a, SekPc);
   return 0;

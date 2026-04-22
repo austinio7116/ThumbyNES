@@ -142,6 +142,73 @@ target_compile_definitions(picodrive PUBLIC
                       # Patches are all gated on FAME_BIG_ENDIAN so
                       # unflipping here restores upstream behavior.
 )
+# TEMPORARY — diagnosing device black-screen bug. Enables the same
+# flash-resident tables the device uses (FAME JumpTable, YM2612 log
+# tables, CZ80 SZHVC flag tables). Revert once we know whether one
+# of these is the regression. Configure with
+#   -DMD_TEST_DEVICE_FLAGS=1  (all three)
+#   -DMD_TEST_JT_FLASH=1      (just the JumpTable)
+if(DEFINED MD_TEST_JT_FLASH OR DEFINED MD_TEST_DEVICE_FLAGS)
+    set(MD_FAME_JT_INC ${CMAKE_CURRENT_BINARY_DIR}/famec_jumptable_data.inc)
+    set(MD_FAME_JT_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_fame_jt_gen)
+    add_custom_command(
+        OUTPUT  ${MD_FAME_JT_GEN}
+        COMMAND cc -O2 -I${CMAKE_CURRENT_SOURCE_DIR}
+                    -o ${MD_FAME_JT_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_md_fame_jumptable.c
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_md_fame_jumptable.c
+                ${PICODRIVE_DIR}/cpu/fame/famec_jumptable_init.inc
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${MD_FAME_JT_INC}
+        COMMAND ${MD_FAME_JT_GEN} ${MD_FAME_JT_INC}
+        DEPENDS ${MD_FAME_JT_GEN}
+        VERBATIM
+    )
+    set_source_files_properties(
+        ${PICODRIVE_DIR}/cpu/fame/famec.c
+        PROPERTIES
+            OBJECT_DEPENDS ${MD_FAME_JT_INC}
+            INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+    target_compile_definitions(picodrive PUBLIC FAME_JUMPTABLE_IN_FLASH)
+endif()
+
+if(DEFINED MD_TEST_DEVICE_FLAGS)
+    set(MD_YM_TAB_C   ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_data.c)
+    set(MD_YM_TAB_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_gen)
+    add_custom_command(
+        OUTPUT  ${MD_YM_TAB_GEN}
+        COMMAND cc -O2 -o ${MD_YM_TAB_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_md_ym2612_tab.c -lm
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_md_ym2612_tab.c
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${MD_YM_TAB_C}
+        COMMAND ${MD_YM_TAB_GEN} ${MD_YM_TAB_C}
+        DEPENDS ${MD_YM_TAB_GEN}
+        VERBATIM
+    )
+    set(MD_CZ80_SZHVC_C   ${CMAKE_CURRENT_BINARY_DIR}/md_cz80_szhvc_data.c)
+    set(MD_CZ80_SZHVC_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_cz80_szhvc_gen)
+    add_custom_command(
+        OUTPUT  ${MD_CZ80_SZHVC_GEN}
+        COMMAND cc -O2 -o ${MD_CZ80_SZHVC_GEN} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_md_cz80_szhvc.c
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_md_cz80_szhvc.c
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${MD_CZ80_SZHVC_C}
+        COMMAND ${MD_CZ80_SZHVC_GEN} ${MD_CZ80_SZHVC_C}
+        DEPENDS ${MD_CZ80_SZHVC_GEN}
+        VERBATIM
+    )
+    target_sources(picodrive PRIVATE ${MD_YM_TAB_C} ${MD_CZ80_SZHVC_C})
+    target_compile_definitions(picodrive PUBLIC
+        YM2612_TABLES_IN_FLASH
+        CZ80_SZHVC_IN_FLASH
+    )
+endif()
 # cart.c / state.c use crc32 + inflate + gz* — link system zlib
 # transitively so dependent executables pick it up at the right spot.
 target_link_libraries(picodrive PUBLIC z m)
@@ -201,6 +268,18 @@ target_link_libraries(mdbench PRIVATE thumbynes)
 # that don't affect mdc_load_rom can be triaged on host.
 add_executable(mdbench_xip src/md_bench_xip_main.c)
 target_link_libraries(mdbench_xip PRIVATE thumbynes)
+
+# MD_LINE_SCRATCH variant — reproduces the device's per-scanline
+# downsample render path on host so we can triage the black-screen
+# bug without flashing. Separate thumbynes_scratch lib so the main
+# thumbynes (used by mdbench / mdhost) keeps the full-framebuffer
+# path.
+add_library(thumbynes_scratch STATIC src/md_core.c)
+target_compile_definitions(thumbynes_scratch PUBLIC MD_LINE_SCRATCH)
+target_include_directories(thumbynes_scratch PUBLIC src)
+target_link_libraries(thumbynes_scratch PUBLIC picodrive)
+add_executable(mdbench_scratch src/md_bench_scratch_main.c)
+target_link_libraries(mdbench_scratch PRIVATE thumbynes_scratch)
 
 # ----------------------------------------------------------------------
 # Phase 1 SDL2 host runner (built only if SDL2 is available)

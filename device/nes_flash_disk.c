@@ -26,7 +26,6 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 
-#ifdef THUMBYONE_SLOT_MODE
 /* RP2350 QMI regs — used to snapshot/restore ATRANS around flash
  * ops. The SDK's flash_range_erase / flash_range_program call
  * rom_flash_enter_cmd_xip internally, which RESETS all QMI regs
@@ -35,8 +34,24 @@
  * both, instruction fetch after the flash op either faults (wrong
  * ATRANS) or runs ~2x slower (slow cmd-XIP). */
 #include "hardware/structs/qmi.h"
+#ifdef THUMBYONE_SLOT_MODE
 #include "thumbyone_handoff.h"   /* for thumbyone_xip_fast_setup */
 #endif
+
+/* Standalone ThumbyNES: ensure ATRANS slots 1..3 are identity-mapped
+ * so XIP reads past 4 MB (where large ROMs like Sonic 2 or MD carts
+ * stored in the flash-disk region span into) go to the right flash
+ * pages. The RP2350 bootrom for standard UF2 boot may leave slots
+ * 1..3 at SIZE=0 — and after any flash_range_erase/program call the
+ * SDK's rom_flash_enter_cmd_xip resets them again. Call this at
+ * boot and after every commit. */
+__attribute__((constructor(101)))
+static void nes_atrans_identity_init(void) {
+    qmi_hw->atrans[1] = (0x400u << 16) | 0x400u;  /*   4..8  MB */
+    qmi_hw->atrans[2] = (0x400u << 16) | 0x800u;  /*   8..12 MB */
+    qmi_hw->atrans[3] = (0x400u << 16) | 0xC00u;  /*  12..16 MB */
+    __asm__ volatile("dsb" ::: "memory");
+}
 
 #define XIP_BASE_ADDR 0x10000000u
 
@@ -70,6 +85,11 @@ static uint32_t stat_commits       = 0;
 static uint32_t stat_commit_errors = 0;
 
 void nes_flash_disk_init(void) {
+#ifndef THUMBYONE_SLOT_MODE
+    /* Explicit call in addition to the constructor, in case the SDK
+     * has already clobbered ATRANS during early boot. */
+    nes_atrans_identity_init();
+#endif
     for (int i = 0; i < CACHE_BLOCKS; i++) {
         cache[i].block = -1;
         cache[i].dirty = 0;
@@ -171,6 +191,10 @@ static void __not_in_flash_func(commit_entry)(int idx) {
         flash_range_erase(flash_off, FLASH_DISK_ERASE);
 #ifdef THUMBYONE_SLOT_MODE
         thumbyone_restore_atrans(saved_atrans);
+#else
+        /* Standalone: re-apply the identity ATRANS for slots 1..3
+         * that flash_range_erase/program wipes via rom_flash_enter_cmd_xip. */
+        nes_atrans_identity_init();
 #endif
         restore_interrupts(ints);
     }
@@ -185,6 +209,8 @@ static void __not_in_flash_func(commit_entry)(int idx) {
         flash_range_program(flash_off + off, cache[idx].data + off, PROG_CHUNK);
 #ifdef THUMBYONE_SLOT_MODE
         thumbyone_restore_atrans(saved_atrans);
+#else
+        nes_atrans_identity_init();
 #endif
         restore_interrupts(ints);
         /* IRQs are now on — USB controller can service any pending

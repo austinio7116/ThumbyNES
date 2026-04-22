@@ -258,8 +258,19 @@
 
 #else
 
+/* ThumbyNES PC trap: capture D1 exactly when 68K is about to fetch
+ * the MOVE.L D1,-(A7) at Sonic 2's error-handler entry (0x3C2).
+ * GET_PC here is the byte offset of the NEXT opcode to execute. */
+extern volatile unsigned int md_dbg_trap_pc;
+extern volatile unsigned int md_dbg_trap_d1;
+extern volatile unsigned int md_dbg_trap_hit;
 #define NEXT \
     do { \
+        u32 _pc_now = (u32)((uintptr_t)PC - BasePC); \
+        if (_pc_now == md_dbg_trap_pc && !md_dbg_trap_hit) { \
+            md_dbg_trap_d1 = ctx->dreg[1].D; \
+            md_dbg_trap_hit = 1; \
+        } \
         FETCH_WORD(Opcode); \
         JumpTable[Opcode](ctx); \
     } while (ctx->io_cycle_counter > 0);
@@ -518,6 +529,15 @@
 		SET_PC(new_PC); \
 		CHECK_BRANCH_EXCEPTION_GOTO_END \
 	}
+#elif defined(MD_DBG_LOG_ODD_BRANCHES)
+/* ThumbyNES diagnostic: record odd-target branches without trapping.
+ * FORCE_ALIGNMENT still masks bit 0, so the 68K carries on (possibly
+ * into wrong code but without a group-0 exception loop). We get the
+ * site PC + target value of the first few mismatches on the LCD
+ * overlay, which points directly at the broken opcode handler. */
+extern void md_dbg_log_odd_branch(u32 site_pc, u32 target);
+#define CHECK_BRANCH_EXCEPTION(_PC_) \
+	if ((_PC_) & 1) { md_dbg_log_odd_branch(GET_PC, (_PC_)); }
 #else
 #define CHECK_BRANCH_EXCEPTION(_PC_)
 #endif
@@ -905,6 +925,10 @@ int fm68k_emulate(M68K_CONTEXT *ctx, int cycles, fm68k_call_reason reason)
 			else
 				ctx->interrupts[0] = 0;
 
+			{
+				extern volatile unsigned int md_dbg_int_count[8];
+				md_dbg_int_count[line & 7]++;
+			}
 			SET_PC(execute_exception(ctx, line + 0x18, GET_PC, GET_SR));
 			flag_I = (u32)line;
 			if (ctx->io_cycle_counter <= 0) goto famec_End;
@@ -965,6 +989,10 @@ famec_Exec:
 			line=interrupt_chk__(ctx);
 			if (line>0)
 			{
+				{
+					extern volatile unsigned int md_dbg_int_count[8];
+					md_dbg_int_count[line & 7]++;
+				}
 				if (ctx->iack_handler != NULL)
 					ctx->iack_handler(line);
 				else

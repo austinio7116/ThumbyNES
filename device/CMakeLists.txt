@@ -366,7 +366,13 @@ target_include_directories(thumbynes_core PUBLIC
     ${NES_ROOT}/src
     ${CMAKE_CURRENT_LIST_DIR}     # for thumby_state_bridge.h
 )
-target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH)
+target_compile_definitions(thumbynes_core PUBLIC
+    MD_LINE_SCRATCH
+    # TODO: Cz80 on Cortex-M33 wedges Sonic 2's sound-driver-upload
+    # wait. Turning off the Z80 core lets games boot without sound.
+    # Host build keeps Z80 on — SDL audio works there.
+    MD_DISABLE_Z80
+)
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb picodrive)
 

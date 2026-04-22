@@ -38,6 +38,66 @@ static int16_t    s_pan_x, s_pan_y;
  * increment (in bytes) so each line lands at the right Y offset. */
 static uint16_t *s_fb;              /* MDC_MAX_W * MDC_MAX_H shorts */
 #endif
+/* Diagnostic flags written by md_core_scan_end, polled by md_run.c
+ * overlay. md_core_scan_fired raises on first callback invocation per
+ * frame; md_core_line_or ORs pixel values from a few source columns
+ * across all scanlines. If line_or stays 0 across a frame, FinalizeLine
+ * never put real data into s_line_scratch. */
+volatile uint8_t  md_core_scan_fired;
+volatile uint16_t md_core_line_or;
+
+/* Debug getters for md_run.c overlay — pull 68K state + VDP state
+ * from PicoDrive internals without leaking the full include chain
+ * into device code. */
+unsigned short *mdbg_get_cram(void)     { return PicoMem.cram; }
+unsigned char  *mdbg_get_vdp_regs(void) { return Pico.video.reg; }
+unsigned int    mdbg_get_pc(void)       { return PicoCpuFM68k.pc; }
+unsigned int    mdbg_get_a7(void)       { return PicoCpuFM68k.areg[7].D; }
+unsigned int    mdbg_get_sr(void)       { return PicoCpuFM68k.sr; }
+unsigned int    mdbg_get_execinfo(void) { return PicoCpuFM68k.execinfo; }
+unsigned int    mdbg_get_d0(void)       { return PicoCpuFM68k.dreg[0].D; }
+unsigned int    mdbg_get_d1(void)       { return PicoCpuFM68k.dreg[1].D; }
+unsigned int    mdbg_get_a0(void)       { return PicoCpuFM68k.areg[0].D; }
+unsigned int    mdbg_get_a1(void)       { return PicoCpuFM68k.areg[1].D; }
+unsigned int    mdbg_get_rom_ptr(void)  { return (unsigned int)(uintptr_t)Pico.rom; }
+unsigned int    mdbg_get_rom_size(void) { return (unsigned int)Pico.romsize; }
+
+/* Read a 16-bit MD u16 (BE-in-flash) at ROM offset `a` via the
+ * UNCACHED XIP alias (RP2350: XIP_BASE=0x10000000, uncached alias
+ * at 0x14000000). Bypasses any stale cache line. Returns bswapped
+ * value. RP2040's uncached alias was 0x13000000 — different here. */
+unsigned short mdbg_read_uncached(unsigned int a) {
+    if (!Pico.rom) return 0xDEAD;
+    uintptr_t cached   = (uintptr_t)Pico.rom;
+    uintptr_t uncached = (cached & 0x00FFFFFFu) | 0x14000000u;
+    unsigned short raw = *(volatile unsigned short *)(uncached + a);
+    return (unsigned short)((raw << 8) | (raw >> 8));
+}
+
+/* Live snapshot of QMI ATRANS slots so we can verify what's actually
+ * mapped where at runtime. */
+unsigned int mdbg_get_atrans(unsigned int slot) {
+    volatile unsigned int *qmi_atrans = (volatile unsigned int *)(0x400D0000 + 0x34);
+    if (slot > 3) return 0;
+    return qmi_atrans[slot];
+}
+
+unsigned int mdbg_get_z80_state(void) {
+    /* Pack: bit 0 = z80Run, bit 1 = z80_reset, bits 8..15 = reg[1] */
+    return (Pico.m.z80Run & 1)
+         | ((Pico.m.z80_reset & 1) << 1)
+         | ((Pico.video.reg[1] & 0xFF) << 8);
+}
+
+/* Bisect helper: read 1 MB ROM at offset `a` via the XIP pointer. */
+unsigned short mdbg_read_rom_u16(unsigned int a) {
+    if (!Pico.rom || a >= Pico.romsize) return 0xDEAD;
+    unsigned short raw = *(volatile unsigned short *)(Pico.rom + a);
+    return (unsigned short)((raw << 8) | (raw >> 8));
+}
+extern volatile unsigned int md_dbg_vdp_writes;
+unsigned int    mdbg_get_vdp_writes(void){ return md_dbg_vdp_writes; }
+
 static int16_t   s_sndbuf[2048];    /* stereo int16, ~735 samples/frame @ 22050/60 */
 static int16_t   s_mixbuf[1024];    /* mono int16 after downmix */
 static int       s_mixcount;
@@ -86,8 +146,15 @@ int mdc_init(int region, int sample_rate)
 
     PicoInit();
 
-    PicoIn.opt = POPT_EN_FM | POPT_EN_PSG | POPT_EN_Z80
-               | POPT_EN_STEREO | POPT_ACC_SPRITES;
+    /* MD_DISABLE_Z80 — the Cz80 core has an open bug on Cortex-M33
+     * that wedges Sonic 2 and similar in the sound-driver-upload
+     * wait. With Z80 off the 68K skips the wait and gameplay runs
+     * (silently). Host build keeps Z80 on so sound works there. */
+    PicoIn.opt = POPT_EN_FM | POPT_EN_PSG | POPT_EN_STEREO | POPT_ACC_SPRITES
+#ifndef MD_DISABLE_Z80
+               | POPT_EN_Z80
+#endif
+               ;
     PicoIn.sndRate        = sample_rate;
     PicoIn.sndOut         = s_sndbuf;
     PicoIn.writeSound     = capture_audio;
@@ -247,6 +314,11 @@ void mdc_set_scale_target(uint16_t *lcd_fb, int scale_mode,
 int md_core_scan_end(unsigned int line)
 {
     if (!s_lcd_fb) return 0;
+    md_core_scan_fired = 1;
+    /* Sample pixel values from a few columns to confirm FinalizeLine
+     * is actually writing data to s_line_scratch. */
+    md_core_line_or |= s_line_scratch[0]  | s_line_scratch[64]
+                    |  s_line_scratch[160] | s_line_scratch[200];
 
     /* Line position inside the active viewport. PicoDrive's DrawSync
      * already handles the V28/V30 letterbox in the 240-slot; `line`

@@ -477,8 +477,28 @@ static void VideoWrite(u16 d)
             a |= pvid->addr_u << 16;
             VideoWriteVRAM(a, d);
             break;
-    case 3: if (PicoMem.cram [(a >> 1) & 0x3f] != (d & 0xeee)) Pico.m.dirtyPal = 1;
-            PicoMem.cram [(a >> 1) & 0x3f] = d & 0xeee; break;
+    case 3: {
+            extern volatile unsigned int   md_dbg_cram_writes;
+            extern volatile unsigned short md_dbg_cram_val[4];
+            extern volatile unsigned char  md_dbg_cram_addr[4];
+            extern volatile unsigned int   md_dbg_cram_pc[4];
+            unsigned int cram_idx = (a >> 1) & 0x3f;
+            /* Capture first write where the caller INTENDED a non-
+             * zero palette entry — irrespective of which CRAM index
+             * the VDP address register claims. Lets us see if the
+             * VDP address is correctly tracking the ctrl-port
+             * commands (cram_idx should vary across writes) or
+             * wedged at 0 (everything lands at CRAM[0]). */
+            if ((d & 0xeee) != 0 && md_dbg_cram_writes < 4) {
+                unsigned int n = md_dbg_cram_writes;
+                md_dbg_cram_val[n]  = (unsigned short)d;
+                md_dbg_cram_addr[n] = (unsigned char)cram_idx;
+                md_dbg_cram_pc[n]   = 0x100 | (SekPc & 0xFFFFFF);
+                md_dbg_cram_writes = n + 1;
+            }
+            if (PicoMem.cram [cram_idx] != (d & 0xeee)) Pico.m.dirtyPal = 1;
+            PicoMem.cram [cram_idx] = d & 0xeee;
+            } break;
     case 5: PicoMem.vsram[(a >> 1) & 0x3f] = d & 0x7ff; break;
     case 0x81:
             a |= pvid->addr_u << 16;
@@ -660,7 +680,26 @@ static void DmaSlow(int len, u32 source)
       }
       for (; len; len--)
       {
-        r[(a / 2) & 0x3f] = DMA_READ16(base, source++ & mask) & 0xeee;
+        unsigned short val = DMA_READ16(base, source++ & mask);
+        unsigned int cram_idx = (a / 2) & 0x3f;
+        /* diag: capture first CRAM[0] DMA write */
+        {
+            extern volatile unsigned int   md_dbg_cram_writes;
+            extern volatile unsigned short md_dbg_cram_val[4];
+            extern volatile unsigned char  md_dbg_cram_addr[4];
+            extern volatile unsigned int   md_dbg_cram_pc[4];
+            if (cram_idx == 0 && (val & 0xeee) != 0) {
+                unsigned int n = md_dbg_cram_writes;
+                if (n < 4) {
+                    md_dbg_cram_val[n]  = val;
+                    md_dbg_cram_addr[n] = (unsigned char)cram_idx;
+                    /* 0x200 | src_is_rom bit means "via DMA" */
+                    md_dbg_cram_pc[n]   = 0x200 | (src_is_rom << 4);
+                }
+                md_dbg_cram_writes = n + 1;
+            }
+        }
+        r[cram_idx] = val & 0xeee;
         // AutoIncrement
         a = (a+inc) & ~0x20000;
       }
