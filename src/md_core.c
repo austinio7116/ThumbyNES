@@ -49,10 +49,13 @@ static int16_t    s_prev_dy_fill;
 /* Per-dx source-column LUT. Replaces the `(dx * s_vw) / 128`
  * integer div that happened 128 (blend: 256) times per scanline
  * × ~224 scanlines = ~57 k divs/frame. uint16_t: H40 mode goes up
- * to sx=317, won't fit in uint8_t. Rebuilt when s_vw changes. */
+ * to sx=317, won't fit in uint8_t. Rebuilt when s_vw, s_vh, or
+ * s_scale_mode changes (FIT and FILL sample X differently). */
 static uint16_t   s_sx_lut[128];
 static uint16_t   s_sx2_lut[128];
-static int16_t    s_lut_vw;      /* cached s_vw the LUT was built for */
+static int16_t    s_lut_vw;
+static int16_t    s_lut_vh;
+static uint8_t    s_lut_scale;
 #else
 /* Full 320x240 RGB565 frame. PicoDrive writes one scanline at a time
  * through DrawLineDest; we hand it a contiguous buffer and a row
@@ -351,18 +354,53 @@ void mdc_set_scale_target(uint16_t *lcd_fb, int scale_mode,
 
 void mdc_set_blend(int blend) { s_blend = blend ? 1 : 0; }
 
-/* Rebuild the sx/sx2 source-column LUTs for the current viewport
- * width. Called on first scanline of each frame when s_vw has
- * changed. Cheap: 128 muls + 128 divs on viewport change only. */
+/* Rebuild the sx/sx2 source-column LUTs for the current viewport +
+ * scale-mode. Cheap: 128 muls + 128 divs on mode/viewport change.
+ *
+ * FIT (scale_mode 0): stretch X to 128 cols, letterboxed Y (128x90).
+ *     sx = dx * s_vw / 128
+ * FILL (scale_mode 1): preserve aspect — Y uses full 128 rows, X
+ *     uses the SAME scale as Y (128/s_vh) applied to a centred
+ *     s_vh-wide source window. For H40 PAL (320x224):
+ *       scale = 128/224 = 0.571
+ *       visible src cols = 224, centred in 320 → crop 48 each side
+ *       sx = 48 + dx * 224/128
+ *     So MD sprites keep their native aspect; left+right 48px of
+ *     the source are cropped off (matches SMS FILL's aspect-
+ *     preserving approach).
+ * CROP (scale_mode 2): uses memcpy path, no LUT needed. */
 static void md_core_rebuild_sx_lut(void) {
     int vw = s_vw;
-    for (int dx = 0; dx < 128; dx++) {
-        int sx  = (dx * vw) / 128;
-        int sx2 = sx + 1; if (sx2 >= vw) sx2 = sx;
-        s_sx_lut[dx]  = (uint16_t)sx;
-        s_sx2_lut[dx] = (uint16_t)sx2;
+    int vh = s_vh;
+    int mode = s_scale_mode;
+
+    if (mode == 1) {
+        /* FILL — preserve aspect by using Y scale in X too, then
+         * crop centre-window of width `vh` out of `vw`. */
+        int visible = vh;
+        int crop    = (vw - visible) / 2;
+        if (crop < 0) crop = 0;
+        for (int dx = 0; dx < 128; dx++) {
+            int sx  = crop + (dx * visible) / 128;
+            if (sx >= vw) sx = vw - 1;
+            int sx2 = sx + 1; if (sx2 >= vw) sx2 = sx;
+            s_sx_lut[dx]  = (uint16_t)sx;
+            s_sx2_lut[dx] = (uint16_t)sx2;
+        }
+    } else {
+        /* FIT (and any future scale_mode==0 variants). Stretch X to
+         * full 128 cols; Y letterboxing is applied separately in
+         * the scan callback via dst_h. */
+        for (int dx = 0; dx < 128; dx++) {
+            int sx  = (dx * vw) / 128;
+            int sx2 = sx + 1; if (sx2 >= vw) sx2 = sx;
+            s_sx_lut[dx]  = (uint16_t)sx;
+            s_sx2_lut[dx] = (uint16_t)sx2;
+        }
     }
-    s_lut_vw = (int16_t)vw;
+    s_lut_vw    = (int16_t)vw;
+    s_lut_vh    = (int16_t)vh;
+    s_lut_scale = (uint8_t)mode;
 }
 
 /* Downsample one MD scanline (just drawn into s_line_scratch) into
@@ -385,8 +423,10 @@ int md_core_scan_end(unsigned int line)
     int y_src = (int)line - s_vy;
     if (y_src < 0 || y_src >= s_vh) return 0;
 
-    /* Refresh sx LUT on H32 ↔ H40 viewport changes. */
-    if (s_vw != s_lut_vw) md_core_rebuild_sx_lut();
+    /* Refresh sx LUT when viewport OR scale_mode changes — FIT and
+     * FILL sample X differently (stretch vs aspect-preserving crop). */
+    if (s_vw != s_lut_vw || s_vh != s_lut_vh || s_scale_mode != s_lut_scale)
+        md_core_rebuild_sx_lut();
 
     const uint16_t *srow = s_line_scratch + s_vx;
 

@@ -629,26 +629,30 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         {
             nes_lcd_wait_idle();
             if (show_fps) {
-                /* FPS | audio tag | emul us | present us | audio us | skipped/s | 68K PC.
-                 * Audio tag: empty=FULL, "h"=HALF, "m"=muted/OFF, "F"=fast-fwd.
-                 * k<n> = frames/s where VDP render was skipped to catch up.
-                 * pc = current 68K PC — useful for diagnosing hangs; a
-                 * stuck value means 68K is in a tight loop. */
-                extern unsigned int mdbg_get_pc(void);
-                const char *atag = fast_forward          ? "F"
-                                 : (audio_mode == AUDIO_HALF) ? "h"
-                                 : (audio_mode == AUDIO_OFF ) ? "m"
-                                 :                              "";
-                char ftxt[48];
-                snprintf(ftxt, sizeof(ftxt), "%d%s e%u k%u pc%06x",
+                /* Overlay values are all rollover-sampled (once per
+                 * 1-second window), so text width is stable and we
+                 * can draw without a black-background wipe — each
+                 * frame's redraw overwrites the same pixels. */
+                /* Fixed-width format so the string length never changes —
+                 * each frame's draw overwrites exactly the same pixels
+                 * without leaving stale glyphs. One-char tag (space when
+                 * FULL), 2-digit FPS, 5-digit emul us, 2-digit skipped. */
+                char atag = fast_forward          ? 'F'
+                          : (audio_mode == AUDIO_HALF) ? 'h'
+                          : (audio_mode == AUDIO_OFF ) ? 'm'
+                          :                              ' ';
+                char ftxt[32];
+                snprintf(ftxt, sizeof(ftxt), "%2d%c e%5u k%2u",
                          fps_show, atag,
                          (unsigned)phase_emu_show,
-                         (unsigned)skipped_show,
-                         mdbg_get_pc() & 0xffffff);
-                /* Wipe the 6-row strip under the text before redraw —
-                 * prevents stale digits lingering when the string
-                 * shrinks. */
-                memset(fb + 5 * 128, 0, NES_FONT_CELL_H * 128 * 2);
+                         (unsigned)skipped_show);
+                /* Strip-wipe behind text ONLY in FIT mode, where the
+                 * wiped strip sits within the already-black letterbox
+                 * (invisible). FILL / CROP draw over game content
+                 * directly; fixed-width format keeps stale digits
+                 * from appearing in practice. */
+                if (scale_mode == SCALE_FIT)
+                    memset(fb + 5 * 128, 0, NES_FONT_CELL_H * 128 * 2);
                 nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
             }
             if (osd_text_ms > 0) {
