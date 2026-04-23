@@ -291,6 +291,13 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int fps_frames = 0, fps_show = 0;
     int frame_tick = 0;
 
+    /* Per-frame phase timers, summed across the 1-second window and
+     * divided by fps_frames at rollover. Numbers shown on the second
+     * FPS overlay line. time_us_32 reads the hardware us timer —
+     * ~100 ns per call, negligible against a 25 ms frame. */
+    uint32_t phase_emu_acc  = 0, phase_pres_acc = 0, phase_aud_acc = 0;
+    uint32_t phase_emu_show = 0, phase_pres_show = 0, phase_aud_show = 0;
+
     while (!exit_after) {
         int menu_down = !gpio_get(BTN_MENU_GP);
         int lb_down = !gpio_get(BTN_LB_GP);
@@ -547,21 +554,29 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         /* Run frames. Frameskip = N means "render 1 of every (N+1)",
          * but the 68K still emulates every frame for timing. */
+        uint32_t t_emu0 = time_us_32();
         int frame_runs = fast_forward ? 4 : (1 + frameskip);
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
         unsaved_play_frames += frame_runs;
+        uint32_t t_emu1 = time_us_32();
 
         /* Per-line callbacks have filled `fb`. Wait for any in-flight
          * DMA to drain, then overlay + present. */
         {
             nes_lcd_wait_idle();
             if (show_fps) {
-                char ftxt[16];
-                snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
-                         fast_forward ? " FF" : (frameskip ? " FS" : ""));
+                /* FPS | emulation us | present us | audio us, all on
+                 * one line. Phase sum ≈ 1e6/fps at steady state. */
+                char ftxt[32];
+                snprintf(ftxt, sizeof(ftxt), "%d%s e%u p%u a%u",
+                         fps_show,
+                         fast_forward ? "F" : (frameskip ? "S" : ""),
+                         (unsigned)phase_emu_show,
+                         (unsigned)phase_pres_show,
+                         (unsigned)phase_aud_show);
                 /* Wipe the 6-row strip under the text before redraw —
                  * prevents stale digits lingering when the string
-                 * shrinks (e.g. "40 FS" → "40"). */
+                 * shrinks. */
                 memset(fb + 5 * 128, 0, NES_FONT_CELL_H * 128 * 2);
                 nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
             }
@@ -572,12 +587,18 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             }
             nes_lcd_present(fb);
         }
+        uint32_t t_pres = time_us_32();
 
         int n = mdc_audio_pull(audio, 1024);
         if (n > 0) {
             scale_audio(audio, n, volume);
             nes_audio_pwm_push(audio, n);
         }
+        uint32_t t_aud = time_us_32();
+
+        phase_emu_acc  += (t_emu1 - t_emu0);
+        phase_pres_acc += (t_pres - t_emu1);
+        phase_aud_acc  += (t_aud  - t_pres);
 
         if (unsaved_play_frames > 0 &&
             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
@@ -595,6 +616,12 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             next_frame = get_absolute_time();
         }
         if (absolute_time_diff_us(fps_window, get_absolute_time()) > 1000000) {
+            if (fps_frames > 0) {
+                phase_emu_show  = phase_emu_acc  / (uint32_t)fps_frames;
+                phase_pres_show = phase_pres_acc / (uint32_t)fps_frames;
+                phase_aud_show  = phase_aud_acc  / (uint32_t)fps_frames;
+            }
+            phase_emu_acc = phase_pres_acc = phase_aud_acc = 0;
             fps_show = fps_frames; fps_frames = 0;
             fps_window = get_absolute_time();
         }

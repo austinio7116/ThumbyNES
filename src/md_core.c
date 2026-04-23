@@ -152,11 +152,13 @@ int mdc_init(int region, int sample_rate)
 
     PicoInit();
 
-    /* MD_DISABLE_Z80 — the Cz80 core has an open bug on Cortex-M33
-     * that wedges Sonic 2 and similar in the sound-driver-upload
-     * wait. With Z80 off the 68K skips the wait and gameplay runs
-     * (silently). Host build keeps Z80 on so sound works there. */
-    PicoIn.opt = POPT_EN_FM | POPT_EN_PSG | POPT_EN_STEREO | POPT_ACC_SPRITES
+    /* MD_DISABLE_Z80 / MD_DISABLE_FM — diagnostic build flags that
+     * drop Z80 dispatch or YM2612 synthesis respectively, so we can
+     * cost-isolate those paths against the FPS timer. */
+    PicoIn.opt = POPT_EN_PSG | POPT_EN_STEREO | POPT_ACC_SPRITES
+#ifndef MD_DISABLE_FM
+               | POPT_EN_FM
+#endif
 #ifndef MD_DISABLE_Z80
                | POPT_EN_Z80
 #endif
