@@ -204,20 +204,20 @@ for `name + 16` so the leading `/` and any sidecar suffix
 
 ### Cart inputs
 
-| Thumby button | NES | SMS | Game Gear | Game Boy | Mega Drive |
+| Thumby button | NES | SMS | Game Gear | Game Boy | Mega Drive / Genesis |
 |---|---|---|---|---|---|
 | **A** (right face) | A | Button 2 | Button 2 | A | B (jump/light attack) |
 | **B** (left face)  | B | Button 1 | Button 1 | B | A |
 | **D-pad**          | D-pad | D-pad | D-pad | D-pad | D-pad |
-| **LB**             | Select | — | — | Select | Mode |
+| **LB**             | Select | — | — | Select | **Start** |
 | **RB**             | Start | Pause | Start | Start | C (heavy attack) |
-| **LB + RB** (chord) | — | — | — | — | Start (pulse) |
 
-MD's **Start** is an LB+RB chord because MENU tap is reserved for
+MD's **Start** is simply **LB** — held works for "press START to continue"
+prompts, and tap dismisses level-clear screens. MENU tap is reserved for
 scale-mode cycling (FIT / FILL / CROP). MENU+A still saves a screenshot,
-and MENU long-hold opens the in-game menu. The Mode button (mapped to
-LB) only does anything with 6-button ROMs and can be ignored for
-3-button titles.
+and MENU long-hold opens the in-game menu. 6-button sub-mode (X/Y/Z/MODE)
+stays available via the in-game toggle for any future rebind; by default
+it stays off and those bits are stripped so carts read a plain 3-button pad.
 
 ### MENU chords during play
 
@@ -464,7 +464,7 @@ Specifics per system:
 Toggle BLEND from the in-game menu — the row is enabled in FIT
 mode and greyed in CROP / SMS FILL where it has no meaning.
 
-### FILL (SMS + Mega Drive)
+### FILL (SMS + Mega Drive / Genesis)
 
 A third MENU-tap cycle position between FIT and CROP, available on
 the SMS and MD runners. Fills the full 128×128 display with an
@@ -476,11 +476,11 @@ gets cropped off the visible area.
 - **SMS** — 1.5× uniform area-weighted blit of the middle 192×192 of
   the 256×192 source (crops 32 src cols / side). The cart keeps
   playing (unlike SMS CROP which pauses).
-- **Mega Drive** — scale factor 128/224 applied to both axes; for
-  H40 (320-wide) that shows a centred 224-col window (crops 48 src
-  cols / side); for H32 (256-wide) it crops 16 cols / side. Uses
-  the same `sx_lut` table as FIT with a different column mapping,
-  so the cost is identical.
+- **Mega Drive / Genesis** — scale factor 128/224 applied to both
+  axes; for H40 (320-wide) that shows a centred 224-col window
+  (crops 48 src cols / side); for H32 (256-wide) it crops 16 cols /
+  side. Uses the same `sx_lut` table as FIT with a different column
+  mapping, so the cost is identical.
 
 The trade is visible — for games with action or HUD at the far
 edges (scoreboards, end-of-stage indicators, lives counters) you'll
@@ -1141,7 +1141,7 @@ Explicit scope cuts to protect the RAM/CPU budget:
 
 ### v1.05 — Mega Drive / Genesis
 
-- **Mega Drive emulation** via vendored [PicoDrive](https://github.com/notaz/picodrive)
+- **Mega Drive / Genesis emulation** via vendored [PicoDrive](https://github.com/notaz/picodrive)
   (LGPLv2, notaz master @ `dd762b8`). Drops `.md` / `.gen` / `.bin`
   into the picker alongside NES/SMS/GB. Boots and plays most 1990-
   era 3-button carts — Sonic 2, Streets of Rage 2, many more —

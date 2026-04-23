@@ -88,10 +88,6 @@ static void battery_save(const char *rom_name) {
  *   MENU      → START
  * The 68K code convention pairs jump on the rightmost face button — on
  * most MD titles that's B. Match that. */
-/* One-frame Start pulse triggered by a short tap of MENU. Counts down
- * to zero in the main loop; while > 0 read_md_buttons OR's in START. */
-static int s_start_pulse_frames = 0;
-
 static uint16_t read_md_buttons(void) {
     uint16_t m = 0;
     if (!gpio_get(BTN_UP_GP))    m |= MDC_BTN_UP;
@@ -101,15 +97,23 @@ static uint16_t read_md_buttons(void) {
     /* MD pad → Thumby mapping:
      *   Thumby B   → MD A     (primary action — Sonic jump)
      *   Thumby A   → MD B
+     *   Thumby LB  → MD START  (was MODE; changed 2026-04-23 — START
+     *                           on its own is more useful than MODE
+     *                           since the 6-button sub-mode is rarely
+     *                           needed, and replaces the earlier
+     *                           LB+RB chord which was awkward.)
      *   Thumby RB  → MD C
-     *   Thumby LB  → MD MODE  (acts as "select" on MD)
-     *   Thumby MENU (short tap) → MD START (see s_start_pulse_frames)
-     *   Thumby MENU (long hold) → in-game menu (unchanged) */
+     *   Thumby MENU (short tap) → cycle FIT / FILL / CROP display mode
+     *   Thumby MENU (long hold) → in-game menu
+     * If you genuinely need MODE (arcade games' "select/service"),
+     * turn on the "6-button" toggle in the in-game menu — that frees
+     * up the X/Y/Z/MODE bits again (still no Thumby binding for them
+     * today but they stop being stripped so a future rebind has
+     * somewhere to go). */
     if (!gpio_get(BTN_B_GP))     m |= MDC_BTN_A;
     if (!gpio_get(BTN_A_GP))     m |= MDC_BTN_B;
+    if (!gpio_get(BTN_LB_GP))    m |= MDC_BTN_START;
     if (!gpio_get(BTN_RB_GP))    m |= MDC_BTN_C;
-    if (!gpio_get(BTN_LB_GP))    m |= MDC_BTN_MODE;
-    if (s_start_pulse_frames > 0) m |= MDC_BTN_START;
     return m;
 }
 
@@ -410,15 +414,10 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             }
         }
 
-        /* LB+RB simultaneous chord → MD START pulse. Triggers on the
-         * edge when both go from "not both held" to "both held". */
-        {
-            static int prev_lb_rb = 0;
-            int both_now = lb_down && rb_down;
-            if (both_now && !prev_lb_rb) s_start_pulse_frames = 2;
-            prev_lb_rb = both_now;
-        }
-        if (s_start_pulse_frames > 0) s_start_pulse_frames--;
+        /* LB → MD START is now a direct gpio read inside
+         * read_md_buttons — no chord, no pulse needed. Held LB gives
+         * held START (e.g. menu select hold, arcade "press START to
+         * continue" prompts). */
         prev_a = a_down;
 
         /* ----- in-game menu ----- */
