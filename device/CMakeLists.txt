@@ -41,6 +41,25 @@ endif()
 set(NES_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 
 # ----------------------------------------------------------------------
+# Optional Mega Drive / Genesis support (PicoDrive).
+# ----------------------------------------------------------------------
+# MD's precomputed flash tables (FAME jumptable 256 KB + YM2612 tables
+# 208 KB + cz80 SZHVC 256 KB + LFO 128 KB) add ~850 KB of flash on top
+# of the nofrendo+smsplus+peanut_gb baseline, pushing nesrun_device
+# past the default 1 MB partition used in ThumbyOne. When this flag is
+# OFF, picodrive + md_core.c + md_run.c + md_iram.c are skipped and
+# the picker won't offer the .md/.gen/.bin extensions. The resulting
+# image fits in the standard 1 MB NES partition with room to spare.
+# ThumbyOne propagates THUMBYONE_WITH_MD as THUMBYNES_WITH_MD so the
+# parent-level flag controls everything. Standalone builds default ON.
+option(THUMBYNES_WITH_MD "Build Mega Drive / Genesis (PicoDrive) into ThumbyNES" ON)
+# Honour the parent override: if ThumbyOne set THUMBYONE_WITH_MD=0 we
+# disable MD here too, regardless of the local default.
+if (DEFINED THUMBYONE_WITH_MD AND NOT THUMBYONE_WITH_MD)
+    set(THUMBYNES_WITH_MD OFF)
+endif()
+
+# ----------------------------------------------------------------------
 # Vendored Nofrendo NES core (GPLv2 — see vendor/VENDORING.md)
 # ----------------------------------------------------------------------
 set(NOFRENDO_DIR ${NES_ROOT}/vendor/nofrendo)
@@ -160,6 +179,7 @@ target_compile_definitions(smsplus PRIVATE
 )
 target_include_directories(smsplus PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
+if (THUMBYNES_WITH_MD)
 # ----------------------------------------------------------------------
 # Vendored PicoDrive MD/Genesis core (LGPLv2 — see vendor/VENDORING.md)
 #   Same patch profile as the host build (FAME_BIG_ENDIAN + MCD stubs
@@ -353,34 +373,41 @@ target_link_options(picodrive INTERFACE
     "-Wl,--defsym=gzclose=0"
     "-Wl,--defsym=gzsetparams=0"
 )
+endif()  # THUMBYNES_WITH_MD — picodrive block
 
 # Cross-platform glue lives outside the device directory; build it
-# here as a small static lib.
-add_library(thumbynes_core STATIC
+# here as a small static lib. md_core.c only compiled when MD is
+# enabled — it pulls in PicoDrive headers that don't exist when
+# the picodrive target above is skipped.
+set(THUMBYNES_CORE_SRC
     ${NES_ROOT}/src/nes_core.c
     ${NES_ROOT}/src/sms_core.c
     ${NES_ROOT}/src/gb_core.c
-    ${NES_ROOT}/src/md_core.c
 )
+if (THUMBYNES_WITH_MD)
+    list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/md_core.c)
+endif()
+add_library(thumbynes_core STATIC ${THUMBYNES_CORE_SRC})
 target_include_directories(thumbynes_core PUBLIC
     ${NES_ROOT}/src
     ${CMAKE_CURRENT_LIST_DIR}     # for thumby_state_bridge.h
 )
-target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH)
-# Tried placing md_core_scan_end in .time_critical.md (RAM-copied)
-# via IRAM_ATTR — no measurable FPS gain on Sonic 2, so leaving it
-# in XIP flash and saving the SRAM.
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
-target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb picodrive)
+target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 
-# MD dynamic IRAM — Cz80_Exec is tagged into .md_iram_pool in flash
-# (see md_iram.ld) and memcpy'd to heap at mdc_init so it runs from
-# SRAM. Zero BSS cost across cores (heap-allocated only while MD is
-# active). Host builds stay in XIP flash.
-option(MD_IRAM_DYNAMIC "Dynamic IRAM for MD hot functions" ON)
-if (MD_IRAM_DYNAMIC)
-    target_compile_definitions(thumbynes_core PUBLIC MD_IRAM_DYNAMIC=1)
-    target_compile_definitions(picodrive      PUBLIC MD_IRAM_DYNAMIC=1)
+if (THUMBYNES_WITH_MD)
+    target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH THUMBYNES_WITH_MD=1)
+    target_link_libraries(thumbynes_core PUBLIC picodrive)
+
+    # MD dynamic IRAM — Cz80_Exec is tagged into .md_iram_pool in flash
+    # (see md_memmap.ld) and memcpy'd to heap at mdc_init so it runs
+    # from SRAM. Zero BSS cost across cores (heap-allocated only while
+    # MD is active). Host builds stay in XIP flash.
+    option(MD_IRAM_DYNAMIC "Dynamic IRAM for MD hot functions" ON)
+    if (MD_IRAM_DYNAMIC)
+        target_compile_definitions(thumbynes_core PUBLIC MD_IRAM_DYNAMIC=1)
+        target_compile_definitions(picodrive      PUBLIC MD_IRAM_DYNAMIC=1)
+    endif()
 endif()
 
 #
@@ -431,12 +458,14 @@ set(NES_SRC_BASE
     nes_run.c
     sms_run.c
     gb_run.c
-    md_run.c
     fatfs/diskio.c
     ${NES_FATFS_LIB_SRC}
 )
-if (MD_IRAM_DYNAMIC)
-    list(APPEND NES_SRC_BASE md_iram.c)
+if (THUMBYNES_WITH_MD)
+    list(APPEND NES_SRC_BASE md_run.c)
+    if (MD_IRAM_DYNAMIC)
+        list(APPEND NES_SRC_BASE md_iram.c)
+    endif()
 endif()
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_SRC_BASE
@@ -475,7 +504,7 @@ target_link_libraries(nesrun_device PRIVATE ${NES_LINK_BASE})
 pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
 
-if (MD_IRAM_DYNAMIC)
+if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
     # --wrap routes direct bl / function-pointer assignments to each
     # hot function through our thunks in md_iram.c, which dispatch
     # via function pointers (flash initially, heap after mdc_init).
@@ -491,11 +520,23 @@ endif()
 if (THUMBYONE_SLOT_MODE)
     # Embedded in ThumbyOne's NES partition. See common/slot_layout.h
     # in the ThumbyOne repo for the canonical flash-offset values.
-    target_compile_definitions(nesrun_device PRIVATE
-        THUMBYONE_SLOT_MODE=1
-        FLASH_DISK_OFFSET=0x660000u
-        FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
-    )
+    # THUMBYONE_WITH_MD (set by the parent build) shifts the FAT up by
+    # 1 MB to make room for the 2 MB NES partition that holds MD
+    # emulation. Without MD the original 9.6 MB FAT is retained.
+    if (THUMBYONE_WITH_MD)
+        target_compile_definitions(nesrun_device PRIVATE
+            THUMBYONE_SLOT_MODE=1
+            THUMBYONE_WITH_MD=1
+            FLASH_DISK_OFFSET=0x760000u
+            FLASH_DISK_SIZE=0x8A0000u   # 8.6 MB (down from 9.6 MB)
+        )
+    else()
+        target_compile_definitions(nesrun_device PRIVATE
+            THUMBYONE_SLOT_MODE=1
+            FLASH_DISK_OFFSET=0x660000u
+            FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
+        )
+    endif()
     # Compile ThumbyOne's handoff source into this target directly
     # (common is not a CMake library — see common/CMakeLists.txt
     # for why). Parent project exports THUMBYONE_COMMON_SRC and

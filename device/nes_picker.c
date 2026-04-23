@@ -230,9 +230,11 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         if      (strcasecmp(info.fname + L - 4, ".nes") == 0) sys = ROM_SYS_NES;
         else if (strcasecmp(info.fname + L - 4, ".sms") == 0) sys = ROM_SYS_SMS;
         else if (strcasecmp(info.fname + L - 4, ".gbc") == 0) sys = ROM_SYS_GB;
+#ifdef THUMBYNES_WITH_MD
         else if (strcasecmp(info.fname + L - 4, ".gen") == 0) sys = ROM_SYS_MD;
         else if (strcasecmp(info.fname + L - 4, ".bin") == 0) sys = ROM_SYS_MD;
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".md")  == 0) sys = ROM_SYS_MD;
+#endif
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gb")  == 0) sys = ROM_SYS_GB;
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gg")  == 0) sys = ROM_SYS_GG;
         else continue;
