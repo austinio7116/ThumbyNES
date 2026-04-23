@@ -22,6 +22,7 @@
 #  include "thumbyone_fs_stats.h"
 #  include "thumbyone_settings.h"
 #  include "thumbyone_backlight.h"
+#  include "thumbyone_led.h"
 #endif
 
 #include <limits.h>
@@ -3578,13 +3579,16 @@ int nes_picker_run(uint16_t *fb,
 #ifdef THUMBYONE_SLOT_MODE
             /* Brightness: write /.brightness + flush + apply PWM.
              * Clamp before cast — the slider max is 255 so the int
-             * value always fits in uint8_t, but be defensive. */
+             * value always fits in uint8_t, but be defensive. After
+             * the backlight set, re-paint the front LED at the new
+             * slider value so it visibly tracks the screen. */
             if (v_bri != old_bri) {
                 if (v_bri < 0)   v_bri = 0;
                 if (v_bri > 255) v_bri = 255;
                 thumbyone_settings_save_brightness((uint8_t)v_bri);
                 nes_flash_disk_flush();
                 thumbyone_backlight_set((uint8_t)v_bri);
+                thumbyone_led_refresh();
             }
 #endif
             int new_mhz = clock_mhz[v_clock];

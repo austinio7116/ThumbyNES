@@ -46,6 +46,10 @@
 #include "md_run.h"
 #endif
 
+#ifdef THUMBYONE_SLOT_MODE
+#include "thumbyone_led.h"
+#endif
+
 #define THUMBYNES_VERSION "1.04"
 
 /* Static framebuffer + filesystem state. */
@@ -299,11 +303,15 @@ int main(void) {
     /* Apply the ThumbyOne system-wide brightness (/.brightness on
      * the shared FAT). Default is full-on if the file is absent;
      * otherwise we honour whatever the lobby or a sibling slot's
-     * menu was last set to. */
+     * menu was last set to. Paint the front LED to match — green
+     * for "idle / in picker", same colour the lobby and MPY picker
+     * use, scaled by the same slider via thumbyone_led. */
     {
         extern uint8_t thumbyone_settings_load_brightness(void);
         extern void thumbyone_backlight_set(uint8_t);
         thumbyone_backlight_set(thumbyone_settings_load_brightness());
+        thumbyone_led_init();
+        thumbyone_led_set_rgb(0, 255, 0);
     }
 #endif
 
