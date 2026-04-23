@@ -177,10 +177,186 @@ is reclaimable SRAM on device (the 4 MB tcache was always dead).
 **Remaining ~26 KB is genuinely hot MD state** (68K context, VDP state,
 memory maps, YM2612 state, Z80 state, sprite line cache). Pointer-
 redirecting these would add a dereference per memory access — wrong
-trade-off. The device build plan is to put all of `libpicodrive.a`'s
-BSS into a named linker section that overlaps with the other emulator
-cores' sections, so the combined firmware pays 0 extra resident bytes
-when MD isn't the active core.
+trade-off. The device build keeps MD's BSS live only while MD is the
+active core; sibling cores (NES/SMS/GB) reuse the heap once MD shuts
+down.
+
+#### Further patches for performance + device correctness
+
+9. **`cpu/cz80/cz80.c` + `cpu/cz80/cz80macro.h`** — CZ80's Z80 function-
+    pointer memory map packs handler addresses as `(addr >> 1) | MAP_FLAG`.
+    On ARMv8-M Thumb-2 (Cortex-M33) a function pointer must have bit 0
+    set as the Thumb indicator; the shift-and-mask round-trip discards
+    it, and calling the reconstructed pointer bus-faults. Added a
+    `CZ80_MAP_FP(v)` / `CZ80_WR_MAP_FP(v)` macro that OR-s bit 0 back
+    at dispatch under `__thumb__`. Without this patch, Cz80 wedges on
+    the first Z80→YM2612 / Z80→SN76489 write of every cart (Sonic 2
+    hung in the sound-driver-upload wait loop, boot crash on others).
+    Same fix pattern as `cpu68k_map`'s `MAP_FP` in `pico/memory.h`.
+
+10. **`pico/cart.c`** — call-site change in `PicoCartInsert`: the
+    `*(u32 *)(rom + romsize) = CPU_BE2(0x6000FFFE)` "runaway safety"
+    opcode write is skipped when `PicoCartSuppressSafetyOp = 1`. Set
+    from our `mdc_load_rom_xip()` — the XIP path borrows a flash
+    pointer that can't be written, and on some RP2350 QMI
+    configurations an unaligned write to XIP flash bus-faults into
+    HardFault. Guarding the write lets Sonic 3 (and several other
+    carts) boot from XIP without a bus fault. The safety opcode is
+    only ever fetched by 68K runaway execution which well-behaved
+    carts never do.
+
+11. **`pico/videoport.c`** — VRAM DMA source reads. PicoDrive's
+    `DmaSlow` reads source words via `base[(source+i) & mask]` which
+    assumes native-u16 source. Under `FAME_BIG_ENDIAN` our ROM stays
+    raw-BE; RAM sources stay native. Added a runtime `src_is_rom`
+    check (`base` inside `[Pico.rom, Pico.rom + Pico.romsize)`) and a
+    `DMA_READ16` macro that bswaps only when source is ROM. Both the
+    per-word `for (;len;--)` inner loop and the fast `memcpy` short-
+    circuit have `src_is_rom` branches; `PicoDrawBgcDMA` stashes the
+    same flag into `BgcDMA_is_rom` for the deferred scanline copy.
+    Without this, all ROM→VRAM tile-load DMAs land byte-swapped and
+    the screen fills with nonsense.
+
+12. **`pico/draw.c`** — per-scanline diag counters (`md_dbg_*`) wired
+    at the top of `FinalizeLine555` and around the SONIC-mode palette
+    update so the device runner's overlay can confirm rendering
+    actually advances during hangs / black-screens. `DrawLineDest`
+    sentinel switched from `DrawLineDestIncrement==0` to
+    `DrawLineDestBase==DefOutBuff` — our `MD_LINE_SCRATCH` mode sets
+    `increment=0` deliberately so every scanline overwrites a shared
+    640 B scratch, and the upstream "no user buffer" short-circuit
+    would skip our output. Small one-liner.
+
+13. **`cpu/cz80/cz80.c`** `Cz80_Set_IRQ` behaviour under `MD_DUAL_CORE`
+    — the upstream guards `CZ80_HAS_INT` behind `if (zIFF1)` at assert
+    time, meaning an IRQ asserted while Z80 interrupts are masked is
+    dropped entirely. That works for single-core where IRQs are
+    asserted in lockstep with Z80 execution, but breaks dual-core
+    where core0 asserts VINT asynchronously. Under `MD_DUAL_CORE` the
+    patch always sets `CZ80_HAS_INT` on assert; `CHECK_INT` still
+    gates on `zIFF1` at dispatch time, matching real-hardware
+    level-sensitive behaviour. Only active in dual-core builds (which
+    are currently a parked WIP branch — see `ThumbyNES/dualboot.md`
+    and the `dual-core-wip` branch).
+
+14. **`pico/sound/sound.c`** — split `PsndGetSamples` into an inner
+    `PsndGetSamples_body(int y)` with the original render+writeSound+
+    PsndClear logic, and an outer `PsndGetSamples(int y)` wrapper
+    that under `MD_DUAL_CORE` dispatches the body to core1 via our
+    `md_dc_request_render` queue instead of running it on core0.
+    Single-core builds collapse the wrapper to just calling the body
+    directly (no runtime branch). Same pattern applied to `PsndDoFM`
+    / `PsndDoPSG` / `PsndDoDAC` — early-return on core0 under dual-
+    core so the whole sound path runs on core1. Currently only active
+    on the WIP dual-core branch.
+
+15. **`pico/pico_int.h`** — under `MD_DUAL_CORE`, `z80_int_assert()`
+    macro uses `HOLD_LINE` (auto-clear after Z80 services the IRQ)
+    on assert and no-ops the explicit clear. Upstream uses
+    `ASSERT_LINE` + `CLEAR_LINE` with the assumption that Z80
+    execution is in lockstep with the assert/clear pair. Dual-core
+    breaks that assumption. Paired with patch 13 above. Dual-core
+    WIP only.
+
+#### Build-time generated tables (moved to flash via `-DXXX_IN_FLASH`)
+
+Three CPU/sound tables are huge enough to matter for BSS even after
+the heap-allocation work above. They're now **precomputed at build
+time by host-side generators** in `tools/`, emitted as `const u8[]`
+C files linked into flash:
+
+- `FAME_JUMPTABLE_IN_FLASH` — the 256 KB FAME 68K opcode jumptable
+  (`pico/cpu/fame/famec.c`'s `JumpTable_ro[0x10000]`). Generated from
+  `tools/gen_md_fame_jumptable.c` via a `#include
+  "famec_jumptable_data.inc"` designated-initialiser dump. Without
+  this the table is built at every `PicoInit()` by walking the
+  `opcode_table[]` parser, burning ~220 KB of heap at session start.
+
+- `YM2612_TABLES_IN_FLASH` — 213 KB of YM2612 log-sine + DAC tables
+  (`ym_tl_tab` 213 K, `ym_tl_tab2` 6.6 K). Generator
+  `tools/gen_md_ym2612_tab.c`. Previously computed at `YM2612Init_()`
+  on heap.
+
+- `CZ80_SZHVC_IN_FLASH` — 256 KB of cz80 Z80 flag lookup tables
+  (`SZHVC_add`, `SZHVC_sub`, 128 KB each). Generator
+  `tools/gen_md_cz80_szhvc.c`. Previously computed at `Cz80_Init()`
+  on heap.
+
+All three generators run on the host compiler (`cc -O2`) during the
+CMake build. Output `.c` files land in `${CMAKE_BINARY_DIR}` and are
+added to the `picodrive` target's sources. Total flash cost: ~730 KB
+(this is why ThumbyNES outgrew the 1 MB ThumbyOne NES partition and
+needed `THUMBYONE_WITH_MD=ON` to grow it to 2 MB — see
+`ThumbyOne/common/slot_layout.h`).
+
+#### Dynamic IRAM for the Z80 dispatch loop
+
+`Cz80_Exec` (the hot 17 KB Z80 opcode dispatch loop) is the single
+hottest function in the emulator — called ~262× per scanline × 224
+scanlines per frame, reading opcode bytes from Z80 RAM and dispatching
+through a 256-entry jumptable. Running it from XIP flash thrashed the
+16 KB XIP cache on heavier carts; moving it to SRAM reclaimed ~2-3 ms
+/ frame on Sonic 2 but a static `.time_critical.md` placement would
+steal 17 KB permanently across all four emulator cores' BSS. So:
+
+16. **Custom flash section `.md_iram_pool`** in `device/md_memmap.ld`
+    (forked from pico-sdk's `memmap_default.ld`). `Cz80_Exec` is tagged
+    with `__attribute__((section(".md_iram_pool.Cz80_Exec")))` so it
+    lands in this section, adjacent to the pool start/end symbols
+    exported by the linker script.
+
+17. **`-Wl,--wrap=Cz80_Exec`** at link time. The linker renames direct
+    calls to `Cz80_Exec` (from macros in `pico_int.h` expanded at
+    `PicoSyncZ80` call sites) into `__wrap_Cz80_Exec`. Our thunk in
+    `device/md_iram.c` dispatches through a function pointer that's
+    initialised to `__real_Cz80_Exec` (flash) and repointed to a
+    heap-resident copy after `mdc_init`.
+
+18. **`md_iram_init()`** in `device/md_iram.c` (device-only) —
+    `malloc`s 17 KB from heap, `memcpy`s the pool bytes from flash,
+    issues a `dsb; isb` pair, and updates the function pointer to
+    `(heap_addr + offset) | 1` (Thumb bit). `md_iram_shutdown()`
+    resets the pointer to `__real_Cz80_Exec` first (in case of
+    re-entrant calls during teardown) and `free`s the buffer.
+
+This only costs heap while MD is the active emulator. Other cores
+(NES/SMS/GB) get the 17 KB back during their sessions. Cz80_Exec is
+a "perfect leaf" from a linker-relocation perspective — it has zero
+direct `bl` instructions (everything internal is macro-expanded or
+goes through `CPU->` function pointers), so the memcpy'd copy needs
+no relocation fixup.
+
+Attempted extending the pool to `YM2612UpdateOne_` + `chan_render` +
+`update_lfo_phase` + `memset32` (another 11 KB) but hit a consistent
++8 ms/frame regression (k=25 full-skip lock). Hypothesis unproven;
+rolled back. Pool stays at just `Cz80_Exec`.
+
+#### Runtime audio modes + adaptive frame pacing
+
+Not strictly vendor patches, but worth documenting alongside the
+above because they shape the runtime behaviour of the emulator:
+
+- `mdc_init(sample_rate)` honours `0` / `11025` / `22050`:
+    - `22050` (default, FULL) — YM2612 + PSG + Z80 all active.
+    - `11025` (HALF) — halves FM synthesis cost; `mdc_audio_pull`
+      zero-order-hold upsamples to 22050 for the PWM path.
+    - `0` (OFF) — strips `POPT_EN_FM | POPT_EN_PSG | POPT_EN_Z80`
+      from `PicoIn.opt`. Locks 50 PAL / 60 NTSC with zero audio path.
+  Runtime menu item in `device/md_run.c` chooses between them per-
+  cart (`md_cfg_t.audio_mode` → CFG_MAGIC `MDEX`).
+
+- `mdc_set_skip_render(int)` → sets `PicoIn.skipFrame`. Called each
+  frame in `device/md_run.c` from an adaptive catch-up heuristic: if
+  last frame's emulation time exceeded `FRAME_US`, skip VDP render
+  on this one. Caps at 2 consecutive skips. Saves ~6-8 ms on skipped
+  frames; locks 50 PAL on heavy Sonic 2 action scenes.
+
+- `md_core_rebuild_sx_lut()` in `src/md_core.c` — per-dx source-column
+  LUT for the line-scratch downsample, keyed on `(s_vw, s_vh,
+  scale_mode)`. Replaces ~57 k integer divs / frame. Also implements
+  the **aspect-preserving FILL mode** (scale-by-height, crop X sides)
+  which matches SMS's FILL behaviour; previous FILL was an axis-
+  independent stretch that squashed MD sprites horizontally.
 
 ## nofrendo/
 

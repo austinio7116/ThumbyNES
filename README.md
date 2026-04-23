@@ -4,13 +4,14 @@
 >
 > This repo remains the standalone build of ThumbyNES and the source of truth for the emulator itself — the code here is what ThumbyOne's NES slot compiles. Use this repo if you specifically want NES-only firmware, or to hack on the emulator code.
 
-A bare-metal **NES + Sega Master System + Game Gear + Game Boy (DMG + Color)**
-emulator firmware for the **TinyCircuits Thumby Color** (RP2350,
-128×128 RGB565 LCD, PWM audio, 520 KB SRAM, 16 MB flash).
+A bare-metal **NES + Sega Master System + Game Gear + Game Boy (DMG + Color)
++ Sega Mega Drive / Genesis** emulator firmware for the **TinyCircuits
+Thumby Color** (RP2350, 128×128 RGB565 LCD, PWM audio, 520 KB SRAM, 16 MB
+flash).
 
-Drop `.nes`, `.sms`, `.gg`, `.gb`, or `.gbc` ROMs onto the device over
-USB, browse them in a tabbed picker with thumbnail screenshots, play
-with sound. Per-ROM saves and **save states**, per-ROM and global
+Drop `.nes`, `.sms`, `.gg`, `.gb`, `.gbc`, `.md`, `.gen`, or `.bin` ROMs
+onto the device over USB, browse them in a tabbed picker with thumbnail
+screenshots, play with sound. Per-ROM saves and **save states**, per-ROM and global
 settings, in-game pause menu, idle sleep, fast-forward, palettes,
 in-game screenshot capture, live-pan read mode for the handhelds,
 **cluster-level FAT defragmenter with live cluster map**,
@@ -44,8 +45,8 @@ to the repo if you want to flash without setting up the toolchain.
 
 3. **Drop ROMs.** Plug the device into a host. It enumerates as a
    removable drive — copy any number of `.nes`, `.sms`, `.gg`, `.gb`,
-   or `.gbc` files into the root. Eject from the host. The device
-   flushes the cache and the picker rescans.
+   `.gbc`, `.md`, `.gen`, or `.bin` files into the root. Eject from the
+   host. The device flushes the cache and the picker rescans.
 
 4. **Pick + play.** Browse with the **D-pad**, shoulder buttons
    switch tabs, **A** to launch.
@@ -70,13 +71,14 @@ overlay; the picker itself only ever exits via launching a ROM.
 A **tab strip** runs across the top of the picker:
 
 ```
-[★ FAV] [NES] [SMS] [GB] [GG]
+[★ FAV] [NES] [SMS] [GB] [GG] [MD]
 ```
 
 Each tab shows a procedurally-drawn platform icon (controller for
 NES, cartridge for SMS, Game Boy silhouette for GB, handheld pill for
-GG, star for favorites) and the ROM count for that tab. Empty tabs
-are skipped automatically when stepping with the shoulder buttons.
+GG, 6-button pad silhouette for MD, star for favorites) and the ROM
+count for that tab. Empty tabs are skipped automatically when stepping
+with the shoulder buttons.
 
 Two views, swapped from the picker menu (`Display: HERO / LIST`):
 
@@ -202,13 +204,20 @@ for `name + 16` so the leading `/` and any sidecar suffix
 
 ### Cart inputs
 
-| Thumby button | NES | SMS | Game Gear | Game Boy |
-|---|---|---|---|---|
-| **A** (right face) | A | Button 2 | Button 2 | A |
-| **B** (left face)  | B | Button 1 | Button 1 | B |
-| **D-pad**          | D-pad | D-pad | D-pad | D-pad |
-| **LB**             | Select | — | — | Select |
-| **RB**             | Start | Pause | Start | Start |
+| Thumby button | NES | SMS | Game Gear | Game Boy | Mega Drive |
+|---|---|---|---|---|---|
+| **A** (right face) | A | Button 2 | Button 2 | A | B (jump/light attack) |
+| **B** (left face)  | B | Button 1 | Button 1 | B | A |
+| **D-pad**          | D-pad | D-pad | D-pad | D-pad | D-pad |
+| **LB**             | Select | — | — | Select | Mode |
+| **RB**             | Start | Pause | Start | Start | C (heavy attack) |
+| **LB + RB** (chord) | — | — | — | — | Start (pulse) |
+
+MD's **Start** is an LB+RB chord because MENU tap is reserved for
+scale-mode cycling (FIT / FILL / CROP). MENU+A still saves a screenshot,
+and MENU long-hold opens the in-game menu. The Mode button (mapped to
+LB) only does anything with 6-button ROMs and can be ignored for
+3-button titles.
 
 ### MENU chords during play
 
@@ -290,6 +299,26 @@ The 2× ceiling has plenty of headroom on most carts because the
 nofrendo / smsplus / minigb_apu cores leave their output well below
 ±32767. Particularly heavy SMS chiptunes can clip at the top of the
 range; back the slider off if you hear distortion.
+
+The **MD runner's Audio menu item** has three settings that trade
+synthesis cost for quality:
+
+- **FULL** (default) — YM2612 + PSG + Z80 all at 22050 Hz.
+  Reference quality, ~5 ms/frame of FM synthesis cost. Locks 50 PAL
+  with some help from adaptive VDP skip-render; NTSC carts typically
+  run at ~45 FPS.
+- **HALF** — YM2612 at 11025 Hz; samples upsampled via zero-order
+  hold in `mdc_audio_pull` for the 22050 Hz PWM path. Halves FM
+  cost (~2.5 ms reclaimed). Audible HF roll-off but musical — worth
+  trying on NTSC carts where the full path falls short.
+- **OFF** — all Z80 + FM + PSG disabled (`POPT_EN_*` stripped from
+  `PicoIn.opt` at `mdc_init` time). Completely silent, locks 50 PAL
+  or 60 NTSC with zero audio path cost. For twitchy gameplay where
+  maximum refresh beats hearing the music.
+
+Choice is per-cart; takes effect on **next launch** because the
+sample rate is baked into PicoDrive's `PsndRerate` resampler tables
+and the opt flags are checked at `PicoCartInsert` time.
 
 ---
 
@@ -412,6 +441,8 @@ The entire native frame is downscaled to fit the 128×128 display.
 | **SMS** | 256×192 | 128×96  | 16 px black bars top + bottom |
 | **Game Gear** | 160×144 | 128×128 | asymmetric 5:4 × 9:8, **fills the whole screen** |
 | **Game Boy** | 160×144 | 128×128 | asymmetric 5:4 × 9:8, **fills the whole screen** |
+| **Mega Drive (H40)** | 320×224 | 128×90 | 19 px black bars top + bottom, 2.5:1 aspect preserved |
+| **Mega Drive (H32)** | 256×224 | 128×90 | same letterbox — sprites appear slightly wider |
 
 With **BLEND** on (the default on every system) each output pixel
 blends the source pixels that cover its footprint — softer image,
@@ -433,18 +464,28 @@ Specifics per system:
 Toggle BLEND from the in-game menu — the row is enabled in FIT
 mode and greyed in CROP / SMS FILL where it has no meaning.
 
-### FILL (SMS only)
+### FILL (SMS + Mega Drive)
 
-A third MENU-tap cycle position between FIT and CROP, specific to
-the SMS runner. Fills the full 128×128 display with a 1.5× uniform
-area-weighted blit: the middle 192×192 of the native 256×192 frame
-is mapped to the screen, cropping 32 source columns off each side.
-Square pixels, no letterbox, and the cart keeps playing (unlike
-SMS CROP which pauses). The trade is visible — for games with
-action or HUD at the far edges (scoreboards, end-of-stage
-indicators) you'll lose some of it — so FIT / BLEND remain the
-defaults; FILL is there when you want the maximum playable screen
-area.
+A third MENU-tap cycle position between FIT and CROP, available on
+the SMS and MD runners. Fills the full 128×128 display with an
+aspect-preserving blit: the native frame is scaled so height=128,
+then the sides are cropped to 128 px. No letterbox, sprites stay
+proportional — the trade is that action or HUD at the far edges
+gets cropped off the visible area.
+
+- **SMS** — 1.5× uniform area-weighted blit of the middle 192×192 of
+  the 256×192 source (crops 32 src cols / side). The cart keeps
+  playing (unlike SMS CROP which pauses).
+- **Mega Drive** — scale factor 128/224 applied to both axes; for
+  H40 (320-wide) that shows a centred 224-col window (crops 48 src
+  cols / side); for H32 (256-wide) it crops 16 cols / side. Uses
+  the same `sx_lut` table as FIT with a different column mapping,
+  so the cost is identical.
+
+The trade is visible — for games with action or HUD at the far
+edges (scoreboards, end-of-stage indicators, lives counters) you'll
+lose some of it — so FIT / BLEND remain the defaults; FILL is
+there when you want the maximum playable screen area.
 
 FILL is always area-weighted blended; the BLEND toggle doesn't
 apply (there's no nearest-neighbour alternative offered). Game Gear
@@ -499,6 +540,23 @@ reports — no manual override needed in practice.
 ### Game Boy
 
 DMG runs at exactly 59.7275 Hz everywhere — no region switch.
+
+### Mega Drive / Genesis
+
+PicoDrive detects region from the ROM header's J/U/E/A string at
+offset `0x1F0`. The auto-detect preference order is **EU → US → JP**
+(`PicoIn.autoRgnOrder = 0x148`). PAL carts run at 50 Hz / 224-line
+V28 or 240-line V30; NTSC at 60 Hz. Header-less dumps fall back to
+the auto-order. No manual override is wired into the MD menu today
+— in practice `.md` files from no-intro include the correct region
+byte.
+
+**FPS note**: NTSC's 60 Hz target is tight — the per-frame budget is
+16.67 ms vs PAL's 20 ms, and the MD core generally sits at ~21-24 ms
+of work on busy scenes. PAL carts lock 50 FPS with adaptive VDP skip
+(see "Adaptive skip-render" below); NTSC carts typically run at
+~44-49 FPS in FULL audio. Try HALF or OFF audio mode, or overclock
+to 300 MHz, to close the gap.
 
 ---
 
@@ -849,16 +907,22 @@ GG + GB live-pan CROP keeps audio flowing.
 | nofrendo internal state (CPU/PPU/APU/mappers) | ~30 KB BSS |
 | smsplus internal state (CPU/VDP/PSG + LUTs)   | ~80 KB BSS |
 | peanut_gb gb_s (WRAM/VRAM/regs) + minigb_apu state | ~30 KB BSS |
+| picodrive residual BSS (after heap-reloc patches — see VENDORING) | ~26 KB BSS |
+| PicoDrive `PicoMem` (VRAM/CRAM/VSRAM/zram/ioports) | 140 KB heap (MD session) |
+| Cz80_Exec IRAM pool (memcpy'd from flash) | 17 KB heap (MD session) |
 | Per-session vidbuf (NES 65 KB / SMS 49 KB / GB 23 KB) | malloc'd in init |
+| MD line-scratch buffer (640 B) + LCD fb shared | 640 B BSS |
 | GB cart_ram (32 KB max)                        | malloc'd in init |
 | SMS cart.sram (32 KB) + vram (16 KB) + wram (8 KB) | smsplus heap |
+| MD cart SRAM (when present — Sonic 3, SOR2, etc.) | malloc'd in init |
 | Thumby Color framebuffer (128×128 RGB565)      | 32 KB BSS |
 | Menu backdrop snapshot (32 KB)                  | BSS, only used while menu is open |
 | Audio ring (4096 samples × 2 bytes)            | 8 KB BSS |
 | FatFs work area + flash disk write cache       | ~12 KB BSS |
 | Picker / favorites / cfg / view pref / defrag snapshot | ~10 KB BSS |
 | ROM (XIP-mapped from flash for everything ≥ 256 KB) | ≤ 8 MB |
-| **Free heap (typical session)** | **~330 KB** |
+| **Free heap (typical NES/SMS/GB session)** | **~330 KB** |
+| **Free heap (MD session — PicoMem + IRAM)** | **~170 KB** |
 
 Per-core source framebuffers were originally in BSS but are now
 malloc'd in each wrapper's `init()` and freed in `shutdown()`. Net
@@ -878,6 +942,42 @@ NES Final Fantasy (MMC1, 256 KB PRG), SMS Sonic the Hedgehog and
 Game Boy Tetris all run full speed at the default 250 MHz with audio
 glitch-free. Lighter carts can be clocked down via the per-cart or
 global Overclock setting to save power.
+
+**MD performance** (measured on Sonic 2, PAL, 300 MHz):
+
+| Audio mode | E (emul us) | FPS | Skipped/s |
+|---|---|---|---|
+| FULL      | 21–24 k | 50–51 (locked) | 0–25 |
+| HALF      | 19–22 k | 50–51 (locked) | 0–10 |
+| OFF       | ~14 k   | 50 (locked)     | 0 |
+
+MD's per-frame work is dominated by FAME 68K emulation + VDP
+rendering (~13.5 ms) and cz80 Z80 dispatch (~8.5 ms). Critical
+optimisations that got us to PAL lock:
+
+- **Cz80_Exec in dynamic IRAM** via `--wrap=Cz80_Exec` + the
+  `.md_iram_pool` flash section (see `vendor/VENDORING.md` patches
+  16-18). +2-3 ms reclaimed.
+- **Adaptive VDP skip-render** — if last frame's emulation time
+  overran the refresh budget, set `PicoIn.skipFrame=1` on the next
+  frame to let 68K + Z80 + audio emulate normally while the VDP
+  line composite + `FinalizeLine` bail early. Held at ≤ 2
+  consecutive skips so the display never freezes. +2-3 ms average.
+  Overlay shows `k<n>` = skips-per-second.
+- **sx/sx2 source-column LUT** in `md_core_scan_end` — replaces
+  ~57 k integer divs/frame with table reads, rebuilt only on
+  H32 ↔ H40 viewport changes.
+- **Packed-RGB565 2×2 blend** on the 320→128 downsample — GB-core
+  trick with the 0x07E0F81F expand-pack mask for one-add
+  channel-wise averaging.
+- **Mono audio** (`POPT_EN_STEREO` dropped) — speaker is mono
+  anyway, saves ~0.5 ms / frame.
+
+NTSC 60 Hz lock stays aspirational for now — the per-frame budget
+is only 16.67 ms vs our ~21-24 ms typical. Dual-core (Z80 + YM2612
+on core1) would get us there; attempted on the `dual-core-wip`
+branch but left unfinished (sound-routing issue we didn't crack
+before pivoting to the easier single-core wins above).
 
 ---
 
@@ -994,14 +1094,22 @@ ThumbyNES/
 | [smsplus](https://github.com/ducalex/retro-go) SMS / GG core | GPLv2 | retro-go @ commit `4ced120`, with the LUT decomposition + state-bridge patches |
 | [Peanut-GB](https://github.com/deltabeard/Peanut-GB) DMG + CGB core | MIT | [fhoedemakers fork](https://github.com/fhoedemakers/Peanut-GB) with `PEANUT_FULL_GBC_SUPPORT`, vendored verbatim |
 | [minigb_apu](https://github.com/baines/MiniGBS) Game Boy APU | MIT | via TinyCircuits Tiny Game Engine `gbemu/`, no patches |
+| [PicoDrive](https://github.com/notaz/picodrive) MD / Genesis core | LGPLv2 | notaz master @ `dd762b8`, heavily patched for Cortex-M33 + XIP flash + heap-allocated statics + IRAM dispatch loop. See `vendor/VENDORING.md` §picodrive for 18 individual patches. |
 | [FatFs](http://elm-chan.org/fsw/ff/) R0.15 | BSD-1-clause (ChaN) | from ThumbyP8 |
 | [Pemsa](https://github.com/egordorichev/pemsa) 3×5 font glyphs | MIT | transcribed |
 
 ThumbyNES is itself **GPLv2** to remain compatible with the nofrendo
-+ smsplus cores. Both retro-go cores live under `vendor/` with
-patches recorded in `vendor/VENDORING.md`. The peanut_gb + minigb_apu
-sources are vendored verbatim from the engine's GBEmu user-module
-(which itself wraps the upstream MIT projects).
++ smsplus cores. All three major vendored cores (nofrendo, smsplus,
+picodrive) live under `vendor/` with patches recorded in
+`vendor/VENDORING.md`. The peanut_gb + minigb_apu sources are vendored
+verbatim from the engine's GBEmu user-module (which itself wraps the
+upstream MIT projects). PicoDrive (LGPLv2) combines with our GPLv2
+main binary under the LGPL's static-linking carve-out.
+
+The MD core can be disabled at build time with `-DTHUMBYNES_WITH_MD=OFF`
+— nesrun_device drops to 643 KB (fits the backward-compatible 1 MB
+ThumbyOne NES partition). Default builds include MD and need the 2 MB
+partition layout (`ThumbyOne/common/pt_with_md.json`).
 
 ---
 
@@ -1014,6 +1122,15 @@ Explicit scope cuts to protect the RAM/CPU budget:
 - **No NES 2.0 extended-header support.**
 - **No ColecoVision / SG-1000.** smsplus supports them but we don't expose them.
 - **No YM2413 FM (SMS Japanese carts).** smsplus has it; off for now.
+- **No Mega-CD / 32X / SVP** (MD). The PicoDrive source is built with
+  `-DNO_32X`; CD sources are excluded from the build + stubbed;
+  Virtua Racing's SVP co-processor would need its own ARM-less
+  interpreter port. SVP sources compile as empty stubs.
+- **No YM2413 on MD** (the rare Japanese SMS-on-MD FM adapter —
+  excluded via `-DTHUMBY_YM2413_EXCLUDED`).
+- **No `draw2.c` alt renderer on MD** (the full-frame 320×240 renderer;
+  the default per-line `draw.c` path + our 128×128 line-scratch
+  downsample is what ships. Saves ~103 KB of BSS).
 - **No netplay / link cable.**
 - **No on-device cheats or Game Genie.**
 - **No PWM backlight dimming** (single-GPIO BL line on the Thumby Color).
@@ -1021,6 +1138,42 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.05 — Mega Drive / Genesis
+
+- **Mega Drive emulation** via vendored [PicoDrive](https://github.com/notaz/picodrive)
+  (LGPLv2, notaz master @ `dd762b8`). Drops `.md` / `.gen` / `.bin`
+  into the picker alongside NES/SMS/GB. Boots and plays most 1990-
+  era 3-button carts — Sonic 2, Streets of Rage 2, many more —
+  locked at 50 PAL on a 300 MHz overclock with full audio.
+- **New "Audio" in-game menu**: FULL / HALF / OFF per cart. HALF
+  halves YM2612 synthesis cost (11025 Hz + ZOH upsample); OFF
+  strips Z80 + FM + PSG entirely for maximum refresh. Replaces the
+  old per-cart Frameskip option (was universally worse).
+- **Adaptive VDP skip-render** — MD runner auto-skips rendering on
+  frames following a budget overrun, locking 50 FPS on heavy scenes
+  without visible stutter.
+- **Aspect-preserving FILL for MD** — matches SMS FILL's approach
+  (scale by height, crop sides) instead of the stretched default.
+  Sprites stay proportional.
+- **Dynamic IRAM for Cz80_Exec** — 17 KB Z80 dispatch loop memcpy'd
+  from flash to heap SRAM at `mdc_init`, freed at shutdown. Zero
+  BSS cost across sibling cores; ~2-3 ms / frame reclaimed.
+- **ThumbyOne integration** behind a new `THUMBYONE_WITH_MD` flag.
+  Default ON; grows the NES partition from 1 MB to 2 MB to hold
+  PicoDrive's ~850 KB of precomputed flash tables (FAME jumptable,
+  YM2612 log-sine, cz80 SZHVC). Shifts P8/DOOM/MPY partitions and
+  the shared FAT up by 1 MB. Backward-compatible build with
+  `-DTHUMBYONE_WITH_MD=OFF` retains the original 1 MB partition +
+  9.6 MB FAT and skips picodrive entirely.
+- **Known gaps** — Sonic 3 level load and Gunstar Heroes boot hang
+  on both device and host (PicoDrive core bug, not a ThumbyNES
+  regression). No Mega-CD, no 32X, no Virtua Racing SVP.
+- **Vendored PicoDrive patches**: 18 individual patches totalling
+  ~4.4 MB of BSS relocated out of static storage, Cortex-M33 Thumb-
+  bit fixes in cz80's function-map dispatcher, XIP-flash safety-op
+  suppression, FAME/YM2612/cz80 table generation pushed to build
+  time. Full catalogue in [`vendor/VENDORING.md`](vendor/VENDORING.md).
 
 ### v1.04
 
