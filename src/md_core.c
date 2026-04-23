@@ -20,6 +20,14 @@
  * picodrive's private include path). */
 void fm68k_shutdown(void);
 
+#ifdef MD_IRAM_DYNAMIC
+/* Dynamic IRAM infra in device/md_iram.c — memcpies hot MD functions
+ * from a flash pool into a heap buffer so they execute from SRAM
+ * without permanent BSS cost across cores. No-op on host. */
+extern int  md_iram_init(void);
+extern void md_iram_shutdown(void);
+#endif
+
 #ifdef MD_LINE_SCRATCH
 /* Device build: line-scratch mode. s_fb is a single-line buffer
  * (MDC_MAX_W shorts = 640 bytes). Each scanline PicoDrive draws
@@ -147,30 +155,37 @@ int mdc_init(int region, int sample_rate)
 
     PicoInit();
 
-    /* MD_DISABLE_Z80 / MD_DISABLE_FM — diagnostic build flags that
-     * drop Z80 dispatch or YM2612 synthesis respectively, so we can
-     * cost-isolate those paths against the FPS timer.
+    /* sample_rate == 0 is the runtime "silent mode" — the menu
+     * AUDIO=OFF picks it. We strip Z80 + FM + PSG from PicoIn.opt
+     * so none of those code paths execute. Locks 50 PAL / 60 NTSC
+     * with zero audio cost.
      *
      * Dropped POPT_EN_STEREO: Thumby has a single mono speaker, so
-     * L/R mixing is wasted — PicoDrive renders mono natively, and
-     * capture_audio shortens to a memcpy. Kept (cheap, no risk).
+     * L/R mixing is wasted — PicoDrive renders mono natively and
+     * capture_audio is a plain memcpy.
      *
      * ACC_SPRITES kept on: the fast-sprites path visibly changes
-     * priority handling on a few carts; leaving correctness-preserved
-     * accurate path in since the measured savings were negligible. */
-    PicoIn.opt = POPT_EN_PSG | POPT_ACC_SPRITES
-#ifndef MD_DISABLE_FM
-               | POPT_EN_FM
-#endif
-#ifndef MD_DISABLE_Z80
-               | POPT_EN_Z80
-#endif
-               ;
+     * priority handling on some carts; the measured savings were
+     * negligible. */
+    const bool silent = (sample_rate == 0);
+    PicoIn.opt = POPT_ACC_SPRITES
+               | (silent ? 0 : POPT_EN_PSG | POPT_EN_FM | POPT_EN_Z80);
+    /* PsndRerate uses PicoIn.sndRate to size its resampler tables.
+     * Keep it at a sane value even in silent mode — the POPT flags
+     * above prevent Z80/FM/PSG synthesis from actually running. */
+    if (silent) sample_rate = 22050;
     PicoIn.sndRate        = sample_rate;
     PicoIn.sndOut         = s_sndbuf;
     PicoIn.writeSound     = capture_audio;
     PicoIn.regionOverride = (unsigned short)region;
     PicoIn.autoRgnOrder   = 0x148;   /* prefer EU, then US, then JP */
+
+#ifdef MD_IRAM_DYNAMIC
+    /* Copy hot Cz80_Exec bytes from flash pool into heap-allocated
+     * SRAM, redirect __wrap_Cz80_Exec to point there. Fails open
+     * (stays in flash) if malloc fails. */
+    md_iram_init();
+#endif
 
     return 0;
 }
@@ -444,6 +459,19 @@ void mdc_set_buttons(uint16_t mask)
 
 int mdc_audio_pull(int16_t *out, int n)
 {
+    /* HALF audio mode: s_sample_rate == 11025 but PWM runs at
+     * 22050 — duplicate each source sample (zero-order hold).
+     * FULL / OFF modes: s_sample_rate == 22050, plain memcpy. */
+    if (s_sample_rate == 11025) {
+        int src_want  = n / 2;
+        int src_copy  = src_want < s_mixcount ? src_want : s_mixcount;
+        for (int i = 0; i < src_copy; i++) {
+            int16_t v = s_mixbuf[i];
+            out[i * 2 + 0] = v;
+            out[i * 2 + 1] = v;
+        }
+        return src_copy * 2;
+    }
     int copy = (n < s_mixcount) ? n : s_mixcount;
     if (copy > 0) memcpy(out, s_mixbuf, copy * sizeof(int16_t));
     return copy;
@@ -466,6 +494,9 @@ int mdc_load_state(const char *path)
 
 void mdc_shutdown(void)
 {
+#ifdef MD_IRAM_DYNAMIC
+    md_iram_shutdown();
+#endif
     if (s_loaded) {
         /* PicoCartUnload calls plat_munmap(Pico.rom), which in our
          * thumby_platform.c is backed by free(). For the XIP path we

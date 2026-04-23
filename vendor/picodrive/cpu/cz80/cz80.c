@@ -252,6 +252,10 @@ static inline unsigned char picodrive_read(unsigned short a)
 	CPU���s
 --------------------------------------------------------*/
 
+#ifdef MD_IRAM_DYNAMIC
+/* Runs from heap-copied SRAM via --wrap=Cz80_Exec. See device/md_iram.c. */
+__attribute__((section(".md_iram_pool.Cz80_Exec")))
+#endif
 INT32 Cz80_Exec(cz80_struc *CPU, INT32 cycles)
 {
 #if CZ80_USE_JUMPTABLE

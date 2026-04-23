@@ -373,6 +373,22 @@ target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH)
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb picodrive)
 
+# MD dynamic IRAM — Cz80_Exec is tagged into .md_iram_pool in flash
+# (see md_iram.ld) and memcpy'd to heap at mdc_init so it runs from
+# SRAM. Zero BSS cost across cores (heap-allocated only while MD is
+# active). Host builds stay in XIP flash.
+option(MD_IRAM_DYNAMIC "Dynamic IRAM for MD hot functions" ON)
+if (MD_IRAM_DYNAMIC)
+    target_compile_definitions(thumbynes_core PUBLIC MD_IRAM_DYNAMIC=1)
+    target_compile_definitions(picodrive      PUBLIC MD_IRAM_DYNAMIC=1)
+endif()
+
+#
+# Audio mode (FULL / HALF / OFF) is now a runtime menu item —
+# see the `Audio` choice in md_run.c's in-game menu. No compile
+# flag needed.
+#
+
 # ----------------------------------------------------------------------
 # nesrun_device — Phase 3 firmware: lobby + picker, no emulator yet.
 # ----------------------------------------------------------------------
@@ -419,6 +435,9 @@ set(NES_SRC_BASE
     fatfs/diskio.c
     ${NES_FATFS_LIB_SRC}
 )
+if (MD_IRAM_DYNAMIC)
+    list(APPEND NES_SRC_BASE md_iram.c)
+endif()
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_SRC_BASE
         nes_msc.c
@@ -455,6 +474,22 @@ endif()
 target_link_libraries(nesrun_device PRIVATE ${NES_LINK_BASE})
 pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
+
+if (MD_IRAM_DYNAMIC)
+    # --wrap routes direct bl / function-pointer assignments to each
+    # hot function through our thunks in md_iram.c, which dispatch
+    # via function pointers (flash initially, heap after mdc_init).
+    target_link_options(nesrun_device PRIVATE
+        -Wl,--wrap=Cz80_Exec
+        # YM2612UpdateOne_ / FinalizeLine555 wraps disabled for
+        # bisection — see md_iram.c for the thunks (still present
+        # but unused until wraps are re-enabled).
+    )
+    # Custom linker script adds the .md_iram_pool section in flash
+    # with __md_iram_pool_start / __md_iram_pool_end symbols that
+    # md_iram.c reads to memcpy the block into heap.
+    pico_set_linker_script(nesrun_device ${CMAKE_CURRENT_LIST_DIR}/md_memmap.ld)
+endif()
 
 if (THUMBYONE_SLOT_MODE)
     # Embedded in ThumbyOne's NES partition. See common/slot_layout.h

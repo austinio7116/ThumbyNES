@@ -121,11 +121,12 @@ static uint16_t read_md_buttons(void) {
 
 /* --- per-ROM cfg --------------------------------------------------- */
 
-/* CFG_MAGIC bumped to 0x4D444557 ('MDEW') when adding `blend`.
- * Older saves still load (we accept them under the read guard) but
- * won't have the blend bit set — so default is on. */
-#define CFG_MAGIC   0x4D444557u   /* 'MDEW' — was 'MDEV', added blend */
-#define CFG_MAGIC_V0 0x4D444556u  /* old sidecar accepted on load */
+/* CFG_MAGIC bumped to 0x4D444558 ('MDEX') — replaced `frameskip`
+ * field with `audio_mode` (FULL/HALF/OFF). Older MDEW saves still
+ * load but fall back to audio_mode=FULL. */
+#define CFG_MAGIC    0x4D444558u  /* 'MDEX' — audio_mode replaces frameskip */
+#define CFG_MAGIC_V1 0x4D444557u  /* 'MDEW' — frameskip-era */
+#define CFG_MAGIC_V0 0x4D444556u  /* 'MDEV' — pre-blend */
 
 #define VOL_MIN    0
 #define VOL_UNITY 15
@@ -133,23 +134,30 @@ static uint16_t read_md_buttons(void) {
 #define VOL_DEF  15
 
 typedef enum { SCALE_FIT = 0, SCALE_FILL = 1, SCALE_CROP = 2, SCALE_COUNT } scale_mode_t;
+/* Audio mode: runtime-selectable quality vs speed tradeoff.
+ *   FULL  = 22050 Hz YM2612/PSG synthesis — reference.
+ *   HALF  = 11025 Hz — halves FM synthesis cost (~2.5 ms), audible
+ *           HF roll-off but musical.
+ *   OFF   = no Z80 dispatch + no FM + no PSG — fastest (locks 50
+ *           PAL), completely silent. For twitchy action play. */
+typedef enum { AUDIO_FULL = 0, AUDIO_HALF = 1, AUDIO_OFF = 2, AUDIO_COUNT } audio_mode_t;
 
 typedef struct {
     uint32_t magic;
     uint8_t  scale_mode;
     uint8_t  show_fps;
     uint8_t  volume;
-    uint8_t  six_button;    /* 0 = 3-button pad, 1 = 6-button */
-    uint8_t  frameskip;     /* 0, 1, or 2 */
-    uint8_t  blend;         /* 0 = nearest, 1 = 2x2 packed-RGB565 blend */
+    uint8_t  six_button;     /* 0 = 3-button pad, 1 = 6-button */
+    uint8_t  audio_mode;     /* 0=FULL, 1=HALF, 2=OFF */
+    uint8_t  blend;          /* 0 = nearest, 1 = 2x2 packed-RGB565 blend */
     uint8_t  reserved[2];
-    uint16_t clock_mhz;     /* 0 = use global; otherwise per-cart override */
+    uint16_t clock_mhz;      /* 0 = use global; otherwise per-cart override */
     uint16_t _pad2;
 } md_cfg_t;
 
 static void cfg_load(const char *rom_name, scale_mode_t *scale,
                       bool *show_fps, int *volume, bool *six_btn,
-                      int *frameskip, bool *blend, int *clock_mhz) {
+                      int *audio_mode, bool *blend, int *clock_mhz) {
     (void)scale;   /* scale_mode not restored across launches, same as SMS. */
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
@@ -161,21 +169,26 @@ static void cfg_load(const char *rom_name, scale_mode_t *scale,
         f_close(&f);
         return;
     }
-    if (c.magic == CFG_MAGIC || c.magic == CFG_MAGIC_V0) {
+    if (c.magic == CFG_MAGIC || c.magic == CFG_MAGIC_V1 || c.magic == CFG_MAGIC_V0) {
         *show_fps = c.show_fps != 0;
         if (c.volume <= VOL_MAX) *volume = c.volume;
-        *six_btn   = c.six_button != 0;
-        if (c.frameskip <= 2) *frameskip = c.frameskip;
+        *six_btn  = c.six_button != 0;
         if (clock_mhz) *clock_mhz = c.clock_mhz;
-        /* blend field only valid on new-magic saves. V0 keeps default. */
-        if (c.magic == CFG_MAGIC && blend) *blend = c.blend != 0;
+        /* blend available from V1 onwards. audio_mode from CFG_MAGIC
+         * onwards; older saves inherit default (FULL). Old MDEW
+         * `frameskip` byte sits in the same offset as audio_mode —
+         * discard its value rather than mapping, since 0 (no skip)
+         * happens to == FULL which is safe anyway. */
+        if (c.magic != CFG_MAGIC_V0 && blend) *blend = c.blend != 0;
+        if (c.magic == CFG_MAGIC && audio_mode && c.audio_mode < AUDIO_COUNT)
+            *audio_mode = c.audio_mode;
     }
     f_close(&f);
 }
 
 static void cfg_save(const char *rom_name, scale_mode_t scale,
                       bool show_fps, int volume, bool six_btn,
-                      int frameskip, bool blend, int clock_mhz) {
+                      int audio_mode, bool blend, int clock_mhz) {
     (void)scale;
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".cfg");
@@ -184,7 +197,7 @@ static void cfg_save(const char *rom_name, scale_mode_t scale,
     md_cfg_t c = {
         .magic = CFG_MAGIC, .scale_mode = (uint8_t)SCALE_FIT,
         .show_fps = show_fps ? 1 : 0, .volume = (uint8_t)volume,
-        .six_button = six_btn ? 1 : 0, .frameskip = (uint8_t)frameskip,
+        .six_button = six_btn ? 1 : 0, .audio_mode = (uint8_t)audio_mode,
         .blend = blend ? 1 : 0, .reserved = {0,0},
         .clock_mhz = (uint16_t)clock_mhz, ._pad2 = 0,
     };
@@ -234,20 +247,31 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
     if (mmap_rc != 0) return -30 + mmap_rc;
 
-    if (mdc_init(MDC_REGION_AUTO, 22050) != 0) return -2;
-    if (mdc_load_rom_xip(rom_const, sz) != 0)  return -3;
-    battery_load(name);
-
+    /* Load the per-cart .cfg FIRST so we know the desired audio_mode
+     * before initialising PicoDrive — audio_mode controls sample
+     * rate (FULL/HALF) and opt flags (OFF disables Z80+FM+PSG). */
     int  volume       = VOL_DEF;
     bool show_fps     = false;
     bool fast_forward = false;
     bool six_button   = false;
-    int  frameskip    = 0;
+    int  audio_mode   = AUDIO_FULL;
     bool blend        = true;   /* default on; toggle for crispness */
     scale_mode_t scale_mode = SCALE_FIT;
     int  cart_clock_mhz = 0;
     cfg_load(name, &scale_mode, &show_fps, &volume, &six_button,
-             &frameskip, &blend, &cart_clock_mhz);
+             &audio_mode, &blend, &cart_clock_mhz);
+
+    /* Audio mode → sample rate + opt flags. FULL/HALF keep the full
+     * Z80+FM+PSG path at 22050/11025 Hz respectively. OFF passes
+     * sample_rate=0 which mdc_init interprets as "no audio" and
+     * masks out POPT_EN_Z80|POPT_EN_FM|POPT_EN_PSG. */
+    int sample_rate = (audio_mode == AUDIO_HALF) ? 11025
+                    : (audio_mode == AUDIO_OFF ) ? 0
+                    :                               22050;
+    if (mdc_init(MDC_REGION_AUTO, sample_rate) != 0) return -2;
+    if (mdc_load_rom_xip(rom_const, sz) != 0)        return -3;
+    battery_load(name);
+
     mdc_set_blend(blend ? 1 : 0);
     volume = nes_picker_global_volume();
     bool cfg_dirty = false;
@@ -398,7 +422,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             int v_fps   = show_fps ? 1 : 0;
             int v_6btn  = six_button ? 1 : 0;
             int v_blend = blend ? 1 : 0;
-            int v_skip  = frameskip;
+            int v_audio = audio_mode;
             int v_clock = 0;
             if (cart_clock_mhz == 125) v_clock = 1;
             if (cart_clock_mhz == 150) v_clock = 2;
@@ -408,7 +432,11 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
             static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz","300MHz" };
             static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250,     300 };
-            static const char * const skip_choices[]    = { "0", "1", "2" };
+            /* Audio mode choices. OFF disables Z80+FM+PSG entirely —
+             * caps 50 PAL / 60 NTSC with zero audio path cost. HALF
+             * runs YM2612 at 11025 Hz (upsampled ZOH in mdc_audio_pull)
+             * for ~2.5 ms savings + mild HF roll-off. */
+            static const char * const audio_choices[]   = { "FULL", "HALF", "OFF" };
 
             enum { ACT_NONE, ACT_SAVE_STATE, ACT_LOAD_STATE, ACT_QUIT };
 
@@ -443,9 +471,9 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .value_ptr = &v_6btn, .enabled = true },
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "BLEND",
                   .value_ptr = &v_blend, .enabled = true },
-                { .kind = NES_MENU_KIND_CHOICE, .label = "Frameskip",
-                  .value_ptr = &v_skip, .choices = skip_choices, .num_choices = 3,
-                  .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Audio",
+                  .value_ptr = &v_audio, .choices = audio_choices, .num_choices = 3,
+                  .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
                   .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 6,
                   .enabled = true, .suffix = "next launch" },
@@ -482,7 +510,12 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if ((bool)v_6btn != six_button)   { six_button   = (bool)v_6btn;cfg_dirty = true; }
             if ((bool)v_blend!= blend)        { blend        = (bool)v_blend;cfg_dirty = true;
                                                 mdc_set_blend(blend ? 1 : 0); }
-            if (v_skip != frameskip)          { frameskip    = v_skip;      cfg_dirty = true; }
+            if (v_audio != audio_mode)        { audio_mode   = v_audio;     cfg_dirty = true;
+                                                /* audio_mode takes effect on next launch — the
+                                                 * sample rate is baked into PicoDrive's PsndRerate
+                                                 * tables, and OFF requires masking opt flags pre-
+                                                 * PicoCartInsert. Persist to cfg and let the user
+                                                 * relaunch the ROM. */ }
             int new_mhz = clock_mhz_arr[v_clock];
             if (new_mhz != cart_clock_mhz) {
                 cart_clock_mhz = new_mhz;
@@ -552,10 +585,10 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         mdc_set_scale_target(fb, (int)scale_mode, vx, vy, vw, vh,
                               pan_x, pan_y);
 
-        /* Run frames. Frameskip = N means "render 1 of every (N+1)",
-         * but the 68K still emulates every frame for timing. */
+        /* Run frames. Fast-forward emulates 4× the usual count; all
+         * frames get rendered (the downsample is cheap enough). */
         uint32_t t_emu0 = time_us_32();
-        int frame_runs = fast_forward ? 4 : (1 + frameskip);
+        int frame_runs = fast_forward ? 4 : 1;
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
         unsaved_play_frames += frame_runs;
         uint32_t t_emu1 = time_us_32();
@@ -565,12 +598,16 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         {
             nes_lcd_wait_idle();
             if (show_fps) {
-                /* FPS | emulation us | present us | audio us, all on
-                 * one line. Phase sum ≈ 1e6/fps at steady state. */
+                /* FPS | audio tag | emulation us | present us | audio us.
+                 * Audio tag: empty=FULL, "h"=HALF, "m"=muted/OFF,
+                 * "F"=fast-forward. Phase sum ≈ 1e6/fps at steady state. */
+                const char *atag = fast_forward          ? "F"
+                                 : (audio_mode == AUDIO_HALF) ? "h"
+                                 : (audio_mode == AUDIO_OFF ) ? "m"
+                                 :                              "";
                 char ftxt[32];
                 snprintf(ftxt, sizeof(ftxt), "%d%s e%u p%u a%u",
-                         fps_show,
-                         fast_forward ? "F" : (frameskip ? "S" : ""),
+                         fps_show, atag,
                          (unsigned)phase_emu_show,
                          (unsigned)phase_pres_show,
                          (unsigned)phase_aud_show);
@@ -629,7 +666,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     battery_save(name);
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, six_button,
-                             frameskip, blend, cart_clock_mhz);
+                             audio_mode, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     mdc_shutdown();
     while (!gpio_get(BTN_MENU_GP)) sleep_ms(10);
