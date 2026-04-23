@@ -1,16 +1,22 @@
 /*
  * ThumbyNES — MD dynamic IRAM (device-only).
  *
- * Phase 1 (bisecting): ONLY Cz80_Exec wrapped + relocated. Tags on
- * YM2612UpdateOne_ / chan_render / memset32 / update_lfo_phase /
- * FinalizeLine555 / PicoDrawUpdateHighPal are still present in the
- * vendor source but their --wrap flags are commented out in the
- * CMakeLists for now — tagged functions live in the pool section
- * but callers still hit the flash copy (heap copy is dead).
+ * Hot MD functions live in a dedicated .md_iram_pool flash section
+ * (see device/md_memmap.ld + per-function section attributes in the
+ * vendored picodrive source). At mdc_init we malloc a heap buffer
+ * sized to the pool, memcpy the whole block, and repoint the --wrap
+ * thunks at the heap copy. Zero BSS cost across sibling cores.
  *
- * If this build loads cleanly, the bisection says the new wraps
- * are the crash trigger. If it still crashes, something else
- * changed (likely linker layout or pool contents).
+ * Current pool: Cz80_Exec (17 KB, leaf). Tried extending to the
+ * YM2612 group (UpdateOne_ + chan_render + update_lfo_phase +
+ * memset32, ~11 KB) but that caused a consistent +8 ms/frame
+ * regression (solid k=25 full-frameskip, versus the baseline of
+ * k=0-25 catching up only in heavy scenes). Hypothesis unproven
+ * but likely one of: heap cache-line thrash against Cz80's 17 KB,
+ * unaligned 32-bit accesses in chan_render's fast ops inner loop,
+ * or an interaction with PsndFMUpdate's function-pointer retarget
+ * that I haven't audited. Rolled back; --wrap=YM2612UpdateOne_ is
+ * no longer linked, and the section attributes are off.
  */
 
 #include <stdlib.h>

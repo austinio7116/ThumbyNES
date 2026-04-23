@@ -629,20 +629,22 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         {
             nes_lcd_wait_idle();
             if (show_fps) {
-                /* FPS | audio tag | emulation us | present us | audio us | skipped/s.
+                /* FPS | audio tag | emul us | present us | audio us | skipped/s | 68K PC.
                  * Audio tag: empty=FULL, "h"=HALF, "m"=muted/OFF, "F"=fast-fwd.
-                 * k<n> = frames/s where VDP render was skipped to catch up. */
+                 * k<n> = frames/s where VDP render was skipped to catch up.
+                 * pc = current 68K PC — useful for diagnosing hangs; a
+                 * stuck value means 68K is in a tight loop. */
+                extern unsigned int mdbg_get_pc(void);
                 const char *atag = fast_forward          ? "F"
                                  : (audio_mode == AUDIO_HALF) ? "h"
                                  : (audio_mode == AUDIO_OFF ) ? "m"
                                  :                              "";
-                char ftxt[40];
-                snprintf(ftxt, sizeof(ftxt), "%d%s e%u p%u a%u k%u",
+                char ftxt[48];
+                snprintf(ftxt, sizeof(ftxt), "%d%s e%u k%u pc%06x",
                          fps_show, atag,
                          (unsigned)phase_emu_show,
-                         (unsigned)phase_pres_show,
-                         (unsigned)phase_aud_show,
-                         (unsigned)skipped_show);
+                         (unsigned)skipped_show,
+                         mdbg_get_pc() & 0xffffff);
                 /* Wipe the 6-row strip under the text before redraw —
                  * prevents stale digits lingering when the string
                  * shrinks. */

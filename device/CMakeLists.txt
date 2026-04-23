@@ -481,9 +481,6 @@ if (MD_IRAM_DYNAMIC)
     # via function pointers (flash initially, heap after mdc_init).
     target_link_options(nesrun_device PRIVATE
         -Wl,--wrap=Cz80_Exec
-        # YM2612UpdateOne_ / FinalizeLine555 wraps disabled for
-        # bisection — see md_iram.c for the thunks (still present
-        # but unused until wraps are re-enabled).
     )
     # Custom linker script adds the .md_iram_pool section in flash
     # with __md_iram_pool_start / __md_iram_pool_end symbols that

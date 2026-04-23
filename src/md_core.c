@@ -268,16 +268,22 @@ int mdc_load_rom_xip(const uint8_t *data, size_t len)
     size_t off = strip_smd_header(data, len);
     size_t rom_len = len - off;
 
-    /* Borrow the XIP pointer — no copy. PicoCartInsert wants to stomp
-     * a 4-byte safety opcode at rom[romsize..romsize+3], which we
-     * can't do on XIP flash. Accept that the safety write falls on
-     * whatever is at offset romsize in flash (padding / next file);
-     * the 68K only ever fetches from there on runaway execution,
-     * which well-behaved carts don't do. */
+    /* Borrow the XIP pointer — no copy. Suppress PicoCartInsert's
+     * safety-op write (it wants to stomp 4 bytes past rom end at
+     * rom[romsize..romsize+3], but XIP flash is read-only and the
+     * write would either be silently dropped or — on some RP2350
+     * QMI configurations — bus-fault into HardFault. The op is
+     * only ever fetched on 68K runaway execution, which
+     * well-behaved carts don't do. */
+    extern int PicoCartSuppressSafetyOp;
+    PicoCartSuppressSafetyOp = 1;
+
     s_rom_copy = (uint8_t *)(data + off);
     s_owns_rom = false;
 
-    if (PicoCartInsert(s_rom_copy, (unsigned int)rom_len, NULL) != 0) {
+    int rc = PicoCartInsert(s_rom_copy, (unsigned int)rom_len, NULL);
+    PicoCartSuppressSafetyOp = 0;
+    if (rc != 0) {
         s_rom_copy = NULL;
         return -3;
     }
