@@ -153,12 +153,12 @@ int mdc_init(int region, int sample_rate)
      *
      * Dropped POPT_EN_STEREO: Thumby has a single mono speaker, so
      * L/R mixing is wasted — PicoDrive renders mono natively, and
-     * capture_audio shortens to a memcpy.
+     * capture_audio shortens to a memcpy. Kept (cheap, no risk).
      *
-     * Dropped POPT_ACC_SPRITES: accurate-sprites path handles priority
-     * corner cases (shadow/highlight + overlap) that are largely
-     * invisible after a 320→128 downsample. */
-    PicoIn.opt = POPT_EN_PSG
+     * ACC_SPRITES kept on: the fast-sprites path visibly changes
+     * priority handling on a few carts; leaving correctness-preserved
+     * accurate path in since the measured savings were negligible. */
+    PicoIn.opt = POPT_EN_PSG | POPT_ACC_SPRITES
 #ifndef MD_DISABLE_FM
                | POPT_EN_FM
 #endif
