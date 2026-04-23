@@ -38,6 +38,13 @@ static int16_t    s_pan_x, s_pan_y;
  * already in the dst row. */
 static int16_t    s_prev_dy_fit;
 static int16_t    s_prev_dy_fill;
+/* Per-dx source-column LUT. Replaces the `(dx * s_vw) / 128`
+ * integer div that happened 128 (blend: 256) times per scanline
+ * × ~224 scanlines = ~57 k divs/frame. uint16_t: H40 mode goes up
+ * to sx=317, won't fit in uint8_t. Rebuilt when s_vw changes. */
+static uint16_t   s_sx_lut[128];
+static uint16_t   s_sx2_lut[128];
+static int16_t    s_lut_vw;      /* cached s_vw the LUT was built for */
 #else
 /* Full 320x240 RGB565 frame. PicoDrive writes one scanline at a time
  * through DrawLineDest; we hand it a contiguous buffer and a row
@@ -113,27 +120,15 @@ static bool      s_loaded;
 static uint8_t  *s_rom_copy;
 
 /* PicoDrive calls writeSound at end-of-frame with length-in-bytes,
- * IMMEDIATELY before PsndClear wipes the buffer. We have to capture
- * the stereo samples here and downmix into s_mixbuf — reading
- * PicoIn.sndOut from the caller after PicoFrame returns gets zeros. */
+ * IMMEDIATELY before PsndClear wipes the buffer. PicoIn.opt no
+ * longer sets POPT_EN_STEREO so samples arrive as mono int16 —
+ * capture is a plain copy. */
 static void capture_audio(int len_bytes)
 {
-    int stereo = (PicoIn.opt & POPT_EN_STEREO) ? 1 : 0;
-    int n = len_bytes / (stereo ? 4 : 2);   /* bytes → stereo sample pairs */
+    int n = len_bytes / 2;                  /* bytes → mono samples */
     int cap = (int)(sizeof(s_mixbuf) / sizeof(s_mixbuf[0]));
     if (n > cap) n = cap;
-    if (stereo) {
-        for (int i = 0; i < n; i++) {
-            int32_t l = s_sndbuf[i * 2 + 0];
-            int32_t r = s_sndbuf[i * 2 + 1];
-            int32_t m = (l + r) >> 1;
-            if (m >  32767) m =  32767;
-            if (m < -32768) m = -32768;
-            s_mixbuf[i] = (int16_t)m;
-        }
-    } else {
-        memcpy(s_mixbuf, s_sndbuf, n * sizeof(int16_t));
-    }
+    memcpy(s_mixbuf, s_sndbuf, n * sizeof(int16_t));
     s_mixcount = n;
 }
 
@@ -154,8 +149,16 @@ int mdc_init(int region, int sample_rate)
 
     /* MD_DISABLE_Z80 / MD_DISABLE_FM — diagnostic build flags that
      * drop Z80 dispatch or YM2612 synthesis respectively, so we can
-     * cost-isolate those paths against the FPS timer. */
-    PicoIn.opt = POPT_EN_PSG | POPT_EN_STEREO | POPT_ACC_SPRITES
+     * cost-isolate those paths against the FPS timer.
+     *
+     * Dropped POPT_EN_STEREO: Thumby has a single mono speaker, so
+     * L/R mixing is wasted — PicoDrive renders mono natively, and
+     * capture_audio shortens to a memcpy.
+     *
+     * Dropped POPT_ACC_SPRITES: accurate-sprites path handles priority
+     * corner cases (shadow/highlight + overlap) that are largely
+     * invisible after a 320→128 downsample. */
+    PicoIn.opt = POPT_EN_PSG
 #ifndef MD_DISABLE_FM
                | POPT_EN_FM
 #endif
@@ -321,9 +324,25 @@ void mdc_set_scale_target(uint16_t *lcd_fb, int scale_mode,
     s_vx = (int16_t)vx; s_vy = (int16_t)vy;
     s_vw = (int16_t)vw; s_vh = (int16_t)vh;
     s_pan_x = (int16_t)pan_x; s_pan_y = (int16_t)pan_y;
+    /* Invalidate LUT so next scan callback rebuilds against this vw. */
+    s_lut_vw = -1;
 }
 
 void mdc_set_blend(int blend) { s_blend = blend ? 1 : 0; }
+
+/* Rebuild the sx/sx2 source-column LUTs for the current viewport
+ * width. Called on first scanline of each frame when s_vw has
+ * changed. Cheap: 128 muls + 128 divs on viewport change only. */
+static void md_core_rebuild_sx_lut(void) {
+    int vw = s_vw;
+    for (int dx = 0; dx < 128; dx++) {
+        int sx  = (dx * vw) / 128;
+        int sx2 = sx + 1; if (sx2 >= vw) sx2 = sx;
+        s_sx_lut[dx]  = (uint16_t)sx;
+        s_sx2_lut[dx] = (uint16_t)sx2;
+    }
+    s_lut_vw = (int16_t)vw;
+}
 
 /* Downsample one MD scanline (just drawn into s_line_scratch) into
  * the 128x128 LCD framebuffer. `line` is 0..223 (V28) or 0..239 (V30).
@@ -344,6 +363,9 @@ int md_core_scan_end(unsigned int line)
      * into 0..s_vh by subtracting s_vy. */
     int y_src = (int)line - s_vy;
     if (y_src < 0 || y_src >= s_vh) return 0;
+
+    /* Refresh sx LUT on H32 ↔ H40 viewport changes. */
+    if (s_vw != s_lut_vw) md_core_rebuild_sx_lut();
 
     const uint16_t *srow = s_line_scratch + s_vx;
 
@@ -376,9 +398,9 @@ int md_core_scan_end(unsigned int line)
              * maps to same dst row" case, just skip; first src line's
              * pixels stay in place. */
             if (blend_with_prev) return 0;
+            const uint16_t *sxl = s_sx_lut;
             for (int dx = 0; dx < 128; dx++) {
-                int sx = (dx * s_vw) / 128;
-                drow[dx] = srow[sx];
+                drow[dx] = srow[sxl[dx]];
             }
         } else {
             /* Packed RGB565 2x2 box blend. GB-core trick: expand each
@@ -389,11 +411,11 @@ int md_core_scan_end(unsigned int line)
              * averages all three channels simultaneously with one
              * 32-bit add + shift + AND, no per-channel extract. */
             const uint32_t MASK = 0x07E0F81Fu;
+            const uint16_t *sxl  = s_sx_lut;
+            const uint16_t *sxl2 = s_sx2_lut;
             for (int dx = 0; dx < 128; dx++) {
-                int sx = (dx * s_vw) / 128;
-                int sx2 = sx + 1; if (sx2 >= s_vw) sx2 = sx;
-                uint32_t ea = ((uint32_t)srow[sx]  | ((uint32_t)srow[sx]  << 16)) & MASK;
-                uint32_t eb = ((uint32_t)srow[sx2] | ((uint32_t)srow[sx2] << 16)) & MASK;
+                uint32_t ea = ((uint32_t)srow[sxl[dx]]  | ((uint32_t)srow[sxl[dx]]  << 16)) & MASK;
+                uint32_t eb = ((uint32_t)srow[sxl2[dx]] | ((uint32_t)srow[sxl2[dx]] << 16)) & MASK;
                 uint32_t avg = ((ea + eb) >> 1) & MASK;
                 if (blend_with_prev) {
                     uint16_t old_px = drow[dx];
