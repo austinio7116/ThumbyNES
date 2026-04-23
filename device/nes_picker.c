@@ -23,6 +23,20 @@
 #  include "thumbyone_settings.h"
 #  include "thumbyone_backlight.h"
 #  include "thumbyone_led.h"
+
+/* Live-apply plumbing for the Brightness slider in the picker menu.
+ * The menu runner invokes on_change after each LEFT/RIGHT step,
+ * which reads the menu-local v_bri through this pointer and pushes
+ * the new value to the backlight + LED immediately. */
+static int *s_live_bri_ptr;
+static void live_brightness_apply(void) {
+    if (!s_live_bri_ptr) return;
+    int v = *s_live_bri_ptr;
+    if (v < 0)   v = 0;
+    if (v > 255) v = 255;
+    thumbyone_backlight_set((uint8_t)v);
+    thumbyone_led_refresh();
+}
 #endif
 
 #include <limits.h>
@@ -3443,6 +3457,14 @@ int nes_picker_run(uint16_t *fb,
             /* ThumbyOne global brightness (0..255). */
             int v_bri  = thumbyone_settings_load_brightness();
             int old_bri = v_bri;
+            /* Live-apply brightness as the user drags the slider so
+             * the screen + LED track in real time. The menu runner
+             * fires on_change after every step; the callback reads
+             * v_bri via a file-scope pointer (cheap, the menu is
+             * modal so only one is active at a time). Commit to
+             * flash happens once on menu close — this is just the
+             * visible preview. */
+            s_live_bri_ptr = &v_bri;
 #endif
             int v_clock_mhz = nes_picker_global_clock_mhz();
             int v_clock = (v_clock_mhz == 125) ? 0
@@ -3537,7 +3559,8 @@ int nes_picker_run(uint16_t *fb,
                   .value_ptr = &v_vol, .min = 0, .max = VOL_LIMIT, .enabled = true },
 #ifdef THUMBYONE_SLOT_MODE
                 { .kind = NES_MENU_KIND_SLIDER, .label = "Brightness",
-                  .value_ptr = &v_bri, .min = 0, .max = 255, .enabled = true },
+                  .value_ptr = &v_bri, .min = 0, .max = 255, .enabled = true,
+                  .on_change = live_brightness_apply },
 #endif
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
                   .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
@@ -3571,24 +3594,24 @@ int nes_picker_run(uint16_t *fb,
 
             nes_menu_result_t r = nes_menu_run(fb, "PICKER", "settings",
                                                 items, sizeof(items) / sizeof(items[0]));
+#ifdef THUMBYONE_SLOT_MODE
+            /* Live-apply callback no longer valid once the menu closes. */
+            s_live_bri_ptr = NULL;
+#endif
 
             /* Apply value changes. */
             if (v_vol != nes_picker_global_volume()) {
                 nes_picker_global_set_volume(v_vol);
             }
 #ifdef THUMBYONE_SLOT_MODE
-            /* Brightness: write /.brightness + flush + apply PWM.
-             * Clamp before cast — the slider max is 255 so the int
-             * value always fits in uint8_t, but be defensive. After
-             * the backlight set, re-paint the front LED at the new
-             * slider value so it visibly tracks the screen. */
+            /* Brightness was already applied live via on_change; the
+             * commit here just persists it to the settings mirror so
+             * it survives reboot into any slot. */
             if (v_bri != old_bri) {
                 if (v_bri < 0)   v_bri = 0;
                 if (v_bri > 255) v_bri = 255;
                 thumbyone_settings_save_brightness((uint8_t)v_bri);
                 nes_flash_disk_flush();
-                thumbyone_backlight_set((uint8_t)v_bri);
-                thumbyone_led_refresh();
             }
 #endif
             int new_mhz = clock_mhz[v_clock];

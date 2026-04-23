@@ -300,19 +300,13 @@ int main(void) {
     nes_flash_disk_flush();
 
 #ifdef THUMBYONE_SLOT_MODE
-    /* Apply the ThumbyOne system-wide brightness (/.brightness on
-     * the shared FAT). Default is full-on if the file is absent;
-     * otherwise we honour whatever the lobby or a sibling slot's
-     * menu was last set to. Paint the front LED to match — green
-     * for "idle / in picker", same colour the lobby and MPY picker
-     * use, scaled by the same slider via thumbyone_led. */
-    {
-        extern uint8_t thumbyone_settings_load_brightness(void);
-        extern void thumbyone_backlight_set(uint8_t);
-        thumbyone_backlight_set(thumbyone_settings_load_brightness());
-        thumbyone_led_init();
-        thumbyone_led_set_rgb(0, 255, 0);
-    }
+    /* One-shot slot init: reads /.brightness from the shared
+     * settings mirror, drives the backlight PWM to that value, and
+     * paints the front LED idle green at the same scale. Replaces
+     * the per-slot open-coding of the same 4-step dance — every
+     * slot uses this single entry point so the "load honours the
+     * saved slider" contract holds everywhere. */
+    thumbyone_slot_init_brightness_and_led(true);
 #endif
 
 #ifndef THUMBYONE_SLOT_MODE

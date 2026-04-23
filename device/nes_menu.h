@@ -42,6 +42,15 @@ typedef struct {
     int               action_id;       /* ACTION — returned to caller */
     const char       *suffix;          /* optional trailing hint, e.g. "next launch" */
     const char       *info_text;       /* INFO — value column text (precomputed) */
+    /* Optional live-change callback for SLIDER / TOGGLE / CHOICE.
+     * Fired every time the menu mutates *value_ptr — i.e. on every
+     * LEFT/RIGHT press (slider step, choice cycle) and on every
+     * toggle flip. The callee sees the just-written value via
+     * *value_ptr and can apply it live (repaint LED, update
+     * backlight, etc.) without waiting for the menu to close.
+     * NULL means "apply on commit only", matching the pre-callback
+     * behaviour. */
+    void            (*on_change)(void);
 } nes_menu_item_t;
 
 typedef enum {
