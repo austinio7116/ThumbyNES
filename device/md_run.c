@@ -515,12 +515,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* Set up the line-scratch downsample target for this frame.
          * PicoDrive will write each MD scanline into md_core's 640-byte
          * scratch and our PicoScanEnd callback streams the downsample
-         * directly into `fb` (128x128 LCD) — no intermediate frame.
-         *
-         * Wait for the previous frame's DMA BEFORE letting PicoDrive
-         * touch `fb`; otherwise the scan callbacks race the in-flight
-         * transfer and the screen tears. */
-        nes_lcd_wait_idle();
+         * directly into `fb` (128x128 LCD) — no intermediate frame. */
         int vx, vy, vw, vh;
         mdc_viewport(&vx, &vy, &vw, &vh);
         /* Clear letterbox columns/rows once per frame (FIT/CROP). The
@@ -537,8 +532,10 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
         unsaved_play_frames += frame_runs;
 
-        /* Per-line callbacks have filled `fb`. Overlays + present. */
+        /* Per-line callbacks have filled `fb`. Wait for any in-flight
+         * DMA to drain, then overlay + present. */
         {
+            nes_lcd_wait_idle();
             if (show_fps) {
                 char ftxt[16];
                 snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,

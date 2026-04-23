@@ -323,18 +323,10 @@ void mdc_set_scale_target(uint16_t *lcd_fb, int scale_mode,
 
 void mdc_set_blend(int blend) { s_blend = blend ? 1 : 0; }
 
-/* Host builds don't have IRAM_ATTR; expand to nothing so md_core.c
- * stays portable. Device build defines it via -DIRAM_ATTR=... */
-#ifndef IRAM_ATTR
-#define IRAM_ATTR
-#endif
-
 /* Downsample one MD scanline (just drawn into s_line_scratch) into
  * the 128x128 LCD framebuffer. `line` is 0..223 (V28) or 0..239 (V30).
- * Called from PicoDrive's per-line callback.
- * Runs from RAM on device — called 224× per frame, saves the
- * ~50 ns/call XIP prefetch overhead. */
-IRAM_ATTR
+ * Called from PicoDrive's per-line callback. Ran an IRAM_ATTR
+ * variant — no FPS difference on Sonic 2, so this stays in XIP. */
 int md_core_scan_end(unsigned int line)
 {
     if (!s_lcd_fb) return 0;
@@ -387,25 +379,23 @@ int md_core_scan_end(unsigned int line)
                 drow[dx] = srow[sx];
             }
         } else {
-            /* 2x2-ish box blend using packed RGB565 trick (same
-             * mechanism as gb_run.c's exp565/lerp565p):
-             *   expand p  → (p | p<<16) & 0x07E0F81F
-             *   places R,B in low 16 and G in high 16 with gap bits
-             *   that absorb adds without channels bleeding.
-             * For 50/50 avg of two expanded words: (A+B)>>1 & mask.
-             * H: average src[sx] and src[sx+1] → new (expanded).
-             * V: if same dst row already drawn, average new with
-             *    what's already there (also expanded inline). */
+            /* Packed RGB565 2x2 box blend. GB-core trick: expand each
+             * pixel to 32 bits as (p | p<<16) & 0x07E0F81F — R (5) and
+             * B (5) end up in the low 16 bits with a gap bit each,
+             * G (6) sits in the top 16 bits with a gap bit. Adding two
+             * expanded pixels and shifting right by 1 (then masking)
+             * averages all three channels simultaneously with one
+             * 32-bit add + shift + AND, no per-channel extract. */
             const uint32_t MASK = 0x07E0F81Fu;
             for (int dx = 0; dx < 128; dx++) {
                 int sx = (dx * s_vw) / 128;
                 int sx2 = sx + 1; if (sx2 >= s_vw) sx2 = sx;
-                uint32_t ea = (srow[sx]  | ((uint32_t)srow[sx]  << 16)) & MASK;
-                uint32_t eb = (srow[sx2] | ((uint32_t)srow[sx2] << 16)) & MASK;
+                uint32_t ea = ((uint32_t)srow[sx]  | ((uint32_t)srow[sx]  << 16)) & MASK;
+                uint32_t eb = ((uint32_t)srow[sx2] | ((uint32_t)srow[sx2] << 16)) & MASK;
                 uint32_t avg = ((ea + eb) >> 1) & MASK;
                 if (blend_with_prev) {
                     uint16_t old_px = drow[dx];
-                    uint32_t eo = (old_px | ((uint32_t)old_px << 16)) & MASK;
+                    uint32_t eo = ((uint32_t)old_px | ((uint32_t)old_px << 16)) & MASK;
                     avg = ((avg + eo) >> 1) & MASK;
                 }
                 drow[dx] = (uint16_t)((avg | (avg >> 16)) & 0xFFFFu);
