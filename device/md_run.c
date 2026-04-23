@@ -269,6 +269,16 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  open_menu     = 0;
     bool exit_after    = false;
 
+    /* The scan callback only writes the active rect, so in FIT mode
+     * the letterbox rows stay whatever they were. `fb_needs_clear`
+     * forces a one-time full wipe on entry, after the menu closes
+     * (menu drew over fb), and on scale_mode changes (old mode's
+     * pixels outside the new active rect would otherwise linger).
+     * Writing the letterbox every frame was wasted work AND opened a
+     * tiny race with the still-in-flight DMA reading the top rows. */
+    bool fb_needs_clear = true;
+    bool prev_show_fps  = false;
+
     /* CROP pan (source coords). Centred default. */
     int pan_x = 96, pan_y = 48;
     int prev_a = 0;
@@ -348,6 +358,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     /* Short tap of MENU alone → cycle FIT/FILL/CROP. */
                     scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
                     cfg_dirty = true;
+                    fb_needs_clear = true;
                 }
                 menu_press_ms = 0;
                 menu_was_down = 0;
@@ -445,7 +456,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                                                 items, sizeof(items) / sizeof(items[0]));
 
             scale_mode_t new_scale = (scale_mode_t)v_scale;
-            if (new_scale != scale_mode) { scale_mode = new_scale; cfg_dirty = true; }
+            if (new_scale != scale_mode) { scale_mode = new_scale; cfg_dirty = true; fb_needs_clear = true; }
             if (v_vol != volume) {
                 volume = v_vol;
                 nes_picker_global_set_volume(v_vol);
@@ -499,6 +510,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
             next_frame = get_absolute_time();
             last_input_us = (uint64_t)time_us_64();
+            fb_needs_clear = true;       /* menu drew over fb */
         }
 
         /* Feed buttons; in CROP the cart gets no input while MENU held
@@ -518,11 +530,18 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
          * directly into `fb` (128x128 LCD) — no intermediate frame. */
         int vx, vy, vw, vh;
         mdc_viewport(&vx, &vy, &vw, &vh);
-        /* Clear letterbox columns/rows once per frame (FIT/CROP). The
-         * scanline callback only writes the active dest rect. */
-        if (scale_mode == SCALE_FIT)  memset(fb, 0, 128 * 19 * 2),
-                                       memset(fb + (19+90)*128, 0, 128*19*2);
-        else if (scale_mode == SCALE_CROP) memset(fb, 0, 128 * 128 * 2);
+
+        /* show_fps transitioned true→false in FIT: the last text sat
+         * in the letterbox and the scan callback won't erase it, so
+         * force a one-shot clear. */
+        if (prev_show_fps && !show_fps && scale_mode == SCALE_FIT)
+            fb_needs_clear = true;
+        prev_show_fps = show_fps;
+
+        if (fb_needs_clear) {
+            memset(fb, 0, 128 * 128 * 2);
+            fb_needs_clear = false;
+        }
         mdc_set_scale_target(fb, (int)scale_mode, vx, vy, vw, vh,
                               pan_x, pan_y);
 
@@ -540,6 +559,10 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 char ftxt[16];
                 snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
                          fast_forward ? " FF" : (frameskip ? " FS" : ""));
+                /* Wipe the 6-row strip under the text before redraw —
+                 * prevents stale digits lingering when the string
+                 * shrinks (e.g. "40 FS" → "40"). */
+                memset(fb + 5 * 128, 0, NES_FONT_CELL_H * 128 * 2);
                 nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
             }
             if (osd_text_ms > 0) {
