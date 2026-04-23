@@ -457,6 +457,11 @@ void mdc_set_buttons(uint16_t mask)
     PicoIn.pad[1] = 0;
 }
 
+void mdc_set_skip_render(int skip)
+{
+    PicoIn.skipFrame = skip ? 1 : 0;
+}
+
 int mdc_audio_pull(int16_t *out, int n)
 {
     /* HALF audio mode: s_sample_rate == 11025 but PWM runs at

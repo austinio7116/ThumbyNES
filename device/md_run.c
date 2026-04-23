@@ -322,6 +322,19 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     uint32_t phase_emu_acc  = 0, phase_pres_acc = 0, phase_aud_acc = 0;
     uint32_t phase_emu_show = 0, phase_pres_show = 0, phase_aud_show = 0;
 
+    /* Adaptive VDP-skip: if the previous frame overran the refresh
+     * budget, we skip the VDP render pass on the next one to catch
+     * up. 68K+Z80+audio continue normally — only the line composite
+     * + FinalizeLine are elided, saving ~6-8 ms. LCD holds last fb
+     * for one extra refresh, so at PAL 50 Hz a ~20 ms hold is
+     * usually imperceptible in action gameplay. */
+    uint32_t prev_emu_us    = 0;
+    uint32_t skip_streak    = 0;   /* cap consecutive skips so we don't freeze */
+    uint32_t skipped_count  = 0;   /* diagnostic: frames skipped in window */
+    uint32_t skipped_show   = 0;
+    const int  SKIP_BUDGET_US = (int)FRAME_US;      /* skip if we overran */
+    const int  SKIP_STREAK_MAX = 2;                 /* never skip > 2 in a row */
+
     while (!exit_after) {
         int menu_down = !gpio_get(BTN_MENU_GP);
         int lb_down = !gpio_get(BTN_LB_GP);
@@ -585,6 +598,23 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         mdc_set_scale_target(fb, (int)scale_mode, vx, vy, vw, vh,
                               pan_x, pan_y);
 
+        /* Adaptive skip-render decision — set before running the
+         * frame. Never skip under fast-forward (already running flat
+         * out) or when audio=OFF (we're at 50 FPS locked anyway). */
+        int skip_this = 0;
+        if (!fast_forward
+            && audio_mode != AUDIO_OFF
+            && (int)prev_emu_us > SKIP_BUDGET_US
+            && skip_streak < SKIP_STREAK_MAX)
+        {
+            skip_this = 1;
+            skip_streak++;
+            skipped_count++;
+        } else {
+            skip_streak = 0;
+        }
+        mdc_set_skip_render(skip_this);
+
         /* Run frames. Fast-forward emulates 4× the usual count; all
          * frames get rendered (the downsample is cheap enough). */
         uint32_t t_emu0 = time_us_32();
@@ -592,25 +622,27 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
         unsaved_play_frames += frame_runs;
         uint32_t t_emu1 = time_us_32();
+        prev_emu_us = t_emu1 - t_emu0;
 
         /* Per-line callbacks have filled `fb`. Wait for any in-flight
          * DMA to drain, then overlay + present. */
         {
             nes_lcd_wait_idle();
             if (show_fps) {
-                /* FPS | audio tag | emulation us | present us | audio us.
-                 * Audio tag: empty=FULL, "h"=HALF, "m"=muted/OFF,
-                 * "F"=fast-forward. Phase sum ≈ 1e6/fps at steady state. */
+                /* FPS | audio tag | emulation us | present us | audio us | skipped/s.
+                 * Audio tag: empty=FULL, "h"=HALF, "m"=muted/OFF, "F"=fast-fwd.
+                 * k<n> = frames/s where VDP render was skipped to catch up. */
                 const char *atag = fast_forward          ? "F"
                                  : (audio_mode == AUDIO_HALF) ? "h"
                                  : (audio_mode == AUDIO_OFF ) ? "m"
                                  :                              "";
-                char ftxt[32];
-                snprintf(ftxt, sizeof(ftxt), "%d%s e%u p%u a%u",
+                char ftxt[40];
+                snprintf(ftxt, sizeof(ftxt), "%d%s e%u p%u a%u k%u",
                          fps_show, atag,
                          (unsigned)phase_emu_show,
                          (unsigned)phase_pres_show,
-                         (unsigned)phase_aud_show);
+                         (unsigned)phase_aud_show,
+                         (unsigned)skipped_show);
                 /* Wipe the 6-row strip under the text before redraw —
                  * prevents stale digits lingering when the string
                  * shrinks. */
@@ -659,6 +691,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 phase_aud_show  = phase_aud_acc  / (uint32_t)fps_frames;
             }
             phase_emu_acc = phase_pres_acc = phase_aud_acc = 0;
+            skipped_show = skipped_count; skipped_count = 0;
             fps_show = fps_frames; fps_frames = 0;
             fps_window = get_absolute_time();
         }

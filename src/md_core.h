@@ -110,6 +110,16 @@ void mdc_set_blend(int blend);
 /* Set Player 1 controller mask (MDC_BTN_*). */
 void mdc_set_buttons(uint16_t mask);
 
+/* Skip the VDP rendering pass for the next frame. 68K, Z80, sound,
+ * DMA, timers etc. still emulate normally — only the scanline
+ * composite + FinalizeLine are skipped, which saves roughly the
+ * VDP share of the frame budget (~6-8 ms on Sonic 2). The LCD fb
+ * keeps last rendered frame's contents, so the display holds for
+ * one extra refresh. Use for adaptive catch-up when emulation has
+ * overrun the frame budget. Must be called BEFORE mdc_run_frame.
+ * Clears after the next frame; caller must re-set each time. */
+void mdc_set_skip_render(int skip);
+
 /* Pull n int16 mono samples produced by the most recent frame. Returns
  * the count actually written. PicoDrive produces (sndrate / fps)
  * samples per frame; the wrapper mixes the stereo stream to mono. */
