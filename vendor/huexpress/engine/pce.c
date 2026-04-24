@@ -196,11 +196,19 @@ int scroll = 0;
 signed char snd_vol[6][32];
 // cooked volume for each channel
 
-/* ThumbyNES: CD_track was gated behind #ifndef PCE_HUCARD_ONLY in an
- * earlier draft but pce.c has many non-gated references, so the
- * linker pulls it in unconditionally on host. Device-side strip of
- * the CD code is Phase 2 work (see PCE_PLAN.md §8). */
+/* ThumbyNES patch: CD_track holds per-track metadata for CD-ROM² /
+ * Super CD-ROM² carts. HuCards (our only supported format — see
+ * PCE_HUCARD_ONLY) never populate or read entries beyond index 0,
+ * because every caller is inside a `CD_emulation != 0` branch that
+ * HuCard boot never takes. Collapse to a single entry so the symbol
+ * still resolves but the 74 KB of static BSS goes away. Do NOT
+ * re-enable CD_emulation at runtime — the CD paths would write past
+ * the end of the array and corrupt adjacent BSS. */
+#ifdef PCE_HUCARD_ONLY
+Track CD_track[1];
+#else
 Track CD_track[0x100];
+#endif
 // Track
 // beg_min -> beginning in minutes since the begin of the CD(BCD)
 // beg_sec -> beginning in seconds since the begin of the CD(BCD)

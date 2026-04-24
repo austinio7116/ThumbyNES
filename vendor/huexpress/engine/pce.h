@@ -245,7 +245,11 @@ typedef struct {
 
 } Track;
 
+#ifdef PCE_HUCARD_ONLY
+extern Track CD_track[1];
+#else
 extern Track CD_track[0x100];
+#endif
 
 extern uchar nb_max_track;
 

@@ -131,6 +131,11 @@ void pce_cd_handle_write_1800(uint16 A, uchar V) { (void)A; (void)V; }
 int fill_HCD_info(char *name) { (void)name; return 0; }
 void HCD_shutdown(void) {}
 
+/* POSIX stubs referenced by pce.c::TrashPCE (which our wrapper never
+ * actually calls). Pico SDK libc has no rmdir / system so we satisfy
+ * the linker with no-ops. */
+int rmdir(const char *path) { (void)path; return 0; }
+
 /* pce.h declares `extern char *log_filename` (pointer, not array). */
 char *log_filename = NULL;
 
