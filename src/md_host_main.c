@@ -101,21 +101,43 @@ int main(int argc, char **argv)
     const Uint32 frame_ms   = 1000 / target_fps;
     Uint32       next_tick  = SDL_GetTicks();
 
+    const char *fb_dump_path = getenv("MDHOST_FB_DUMP");
+    const int   max_frames   = getenv("MDHOST_MAX_FRAMES")
+                               ? atoi(getenv("MDHOST_MAX_FRAMES")) : 0;
+    /* Peak non-black tracking — guards against the final-frame
+     * snapshot landing on a fade/transition and looking "stuck on
+     * black" when the game was actually rendering content earlier.
+     * Sampled every 60 frames (~1s at 60Hz) so the cost is trivial
+     * even at the 320x224 worst case. */
+    long peak_nonblack = 0, peak_total = 0;
+    int  peak_frame    = 0;
+    /* MDHOST_AUTO_START: synthesise a START-button pulse on a slow
+     * cycle so the headless compat sweep advances past Sega-logo /
+     * title / mode-select screens into actual gameplay. Active after
+     * frame 60 (let the cart finish its splash sequence first), then
+     * presses START for 8 frames every 48-frame cycle (~0.8s real) —
+     * a press-release pattern, not a hold, so games that latch on
+     * just-pressed advance reliably. */
+    const int   auto_start   = getenv("MDHOST_AUTO_START")
+                               ? atoi(getenv("MDHOST_AUTO_START")) : 0;
+
     bool running = true;
     int frame = 0;
     while (running) {
         if (++frame % 120 == 0) { fprintf(stderr, "frame %d\n", frame); fflush(stderr); }
-        if (getenv("MDHOST_MAX_FRAMES")) {
-            int mx = atoi(getenv("MDHOST_MAX_FRAMES"));
-            if (mx && frame >= mx) running = false;
-        }
+        if (max_frames && frame >= max_frames) running = false;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) running = false;
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) running = false;
         }
 
-        mdc_set_buttons(poll_buttons());
+        uint16_t btns = poll_buttons();
+        if (auto_start && frame > 60) {
+            int phase = (frame - 60) % 48;
+            if (phase < 8) btns |= MDC_BTN_START;
+        }
+        mdc_set_buttons(btns);
         mdc_run_frame();
 
         /* Re-sample the viewport every frame — VDP can switch between
@@ -123,6 +145,26 @@ int main(int argc, char **argv)
         mdc_viewport(&vx, &vy, &vw, &vh);
 
         const uint16_t *fb = mdc_framebuffer();
+
+        if (frame % 60 == 0 && fb && vw > 0 && vh > 0) {
+            long nb = 0, tot = 0;
+            for (int yy = vy; yy < vy + vh; ++yy) {
+                const uint16_t *row = fb + yy * MDC_MAX_W;
+                for (int xx = vx; xx < vx + vw; ++xx) {
+                    if (row[xx] != 0) ++nb;
+                    ++tot;
+                }
+            }
+            /* Compare nb/tot vs peak_nonblack/peak_total without div. */
+            if (peak_total == 0
+                || (long long)nb * peak_total
+                   > (long long)peak_nonblack * tot) {
+                peak_nonblack = nb;
+                peak_total    = tot;
+                peak_frame    = frame;
+            }
+        }
+
         SDL_Rect src = { vx, vy, vw, vh };
         SDL_UpdateTexture(tex, NULL, fb, MDC_MAX_W * sizeof(uint16_t));
         SDL_RenderClear(ren);
@@ -136,6 +178,47 @@ int main(int argc, char **argv)
         Uint32 now = SDL_GetTicks();
         if ((Sint32)(next_tick - now) > 0) SDL_Delay(next_tick - now);
         else next_tick = now;
+    }
+
+    /* Final-frame analysis for batch compat testing: dump the raw
+     * RGB565 framebuffer and print a summary line that the test
+     * driver can grep for. Non-black count is computed across the
+     * active viewport only — borders are always background colour
+     * but tell us nothing about whether the game booted. */
+    {
+        const uint16_t *fb_final = mdc_framebuffer();
+        int fvx, fvy, fvw, fvh;
+        mdc_viewport(&fvx, &fvy, &fvw, &fvh);
+        long nonblack = 0, total = 0;
+        if (fb_final && fvw > 0 && fvh > 0) {
+            for (int yy = fvy; yy < fvy + fvh; ++yy) {
+                const uint16_t *row = fb_final + yy * MDC_MAX_W;
+                for (int xx = fvx; xx < fvx + fvw; ++xx) {
+                    if (row[xx] != 0) ++nonblack;
+                    ++total;
+                }
+            }
+        }
+        if (fb_dump_path && fb_final) {
+            FILE *df = fopen(fb_dump_path, "wb");
+            if (df) {
+                fwrite(fb_final, sizeof(uint16_t),
+                       (size_t)MDC_MAX_W * MDC_MAX_H, df);
+                fclose(df);
+            } else {
+                fprintf(stderr, "fb dump: fopen %s failed\n", fb_dump_path);
+            }
+        }
+        double peak_pct = peak_total
+            ? (100.0 * (double)peak_nonblack / (double)peak_total) : 0.0;
+        printf("MDHOST_SUMMARY frames=%d viewport=%dx%d@(%d,%d) "
+               "refresh=%d nonblack=%ld total=%ld pct=%.1f "
+               "peak_pct=%.1f peak_frame=%d\n",
+               frame, fvw, fvh, fvx, fvy, mdc_refresh_rate(),
+               nonblack, total,
+               total ? (100.0 * (double)nonblack / (double)total) : 0.0,
+               peak_pct, peak_frame);
+        fflush(stdout);
     }
 
     mdc_shutdown();
