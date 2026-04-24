@@ -136,7 +136,7 @@ system-wide settings, current device status, and one-shot actions:
 |---|---|---|
 | Resume | Action | close the overlay |
 | Volume | Slider 0..30 | global master volume — see [Audio](#audio) below |
-| Overclock | Choice | global system clock: 125 / 150 / 200 / 250 / 300 MHz, takes effect on next launch |
+| Overclock | Choice | global system clock: 125 / 150 / 200 / 250 MHz, takes effect on next launch |
 | Display | Choice HERO / LIST | swaps the picker layout |
 | Sort | Choice ALPHA / FAVS / SIZE | favs-first puts your starred carts on top, size sorts descending |
 | Battery | Info row | live percent + voltage; flips to `CHRG` when external power is detected; bar strip shows level |
@@ -297,7 +297,7 @@ is shared:
 | BLEND | NES, SMS | toggle 2×2 box-average smoothing |
 | Palette | NES (6 choices), GB (6 choices) | per-cart |
 | Region | NES | NTSC ↔ PAL — takes effect on the next launch |
-| Overclock | all | per-cart override: `global` or 125/150/200/250/300 MHz, takes effect on the next launch |
+| Overclock | all | per-cart override: `global` or 125/150/200/250 MHz, takes effect on the next launch |
 | Quit to picker | all | exit the cart |
 
 The menu controls (inside the overlay):
@@ -369,8 +369,14 @@ The system clock is configurable across five values:
 | **125 MHz** | Lowest power; may struggle to hit 60 fps on heavier NES / SMS carts |
 | **150 MHz** | RP2350 stock-ish |
 | **200 MHz** | |
-| **250 MHz** | Default; matches the v1.0–1.03 fixed clock |
-| **300 MHz** | Extra headroom for the v1.04 GB / GBC / GG coverage-blend scaler on dense carts. Uses the default core voltage — if a specific cart shows instability at 300, step down to 250. |
+| **250 MHz** | Default and current maximum; matches the v1.0–1.03 fixed clock |
+
+> **300 MHz removed in v1.07.** The previous option caused occasional
+> crashes that were hard to recover from — the device could also
+> crash on launch once the setting was saved, requiring USB-MSC to
+> delete `/.global` or the per-cart `.cfg` to get going again. Saved
+> configs still referencing 300 MHz are clamped on load and silently
+> fall back to 250 MHz; no user action required.
 
 Two scopes:
 
@@ -378,7 +384,7 @@ Two scopes:
   applies to any cart that doesn't have a per-cart override.
 - **Per-cart** (in-game menu → Overclock) — written to the cart's
   `.cfg` as a `clock_mhz` field. The first choice is `global` which
-  clears the override; the others (125/150/200/250/300) pin that
+  clears the override; the others (125/150/200/250) pin that
   specific cart to that exact clock.
 
 Resolution order at launch time: **per-cart override → global →
@@ -632,8 +638,7 @@ byte.
 16.67 ms vs PAL's 20 ms, and the MD core generally sits at ~21-24 ms
 of work on busy scenes. PAL carts lock 50 FPS with adaptive VDP skip
 (see "Adaptive skip-render" below); NTSC carts typically run at
-~44-49 FPS in FULL audio. Try HALF or OFF audio mode, or overclock
-to 300 MHz, to close the gap.
+~44-49 FPS in FULL audio. Try HALF or OFF audio mode to close the gap.
 
 ---
 
@@ -865,7 +870,7 @@ no-op (preview shows `0 mv`, zero cluster writes).
 
 | | |
 |---|---|
-| **MCU** | RP2350 dual-core Cortex-M33 @ 125 / 150 / 200 / 250 / 300 MHz |
+| **MCU** | RP2350 dual-core Cortex-M33 @ 125 / 150 / 200 / 250 MHz |
 | **Display** | 128×128 RGB565, GC9107 LCD over SPI + DMA |
 | **Audio** | 9-bit PWM on GP23 @ 22050 Hz sample rate, hardware IRQ-driven ring buffer |
 | **Storage** | 12 MB FAT16 volume on internal QSPI flash, exposed as USB MSC |
@@ -1020,7 +1025,7 @@ Game Boy Tetris all run full speed at the default 250 MHz with audio
 glitch-free. Lighter carts can be clocked down via the per-cart or
 global Overclock setting to save power.
 
-**MD performance** (measured on Sonic 2, PAL, 300 MHz):
+**MD performance** (measured on Sonic 2, PAL, 250 MHz):
 
 | Audio mode | E (emul us) | FPS | Skipped/s |
 |---|---|---|---|
@@ -1216,6 +1221,63 @@ Explicit scope cuts to protect the RAM/CPU budget:
 
 ## Changelog
 
+### v1.07 — defrag overhaul, MD B-stuck fix, 300 MHz removed
+
+- **MD pad B stuck on second cart load — fixed.** PicoDrive's
+  pad-port handler keeps cycle-deadline latencies as file-scope
+  statics that `PicoInit` doesn't reset, so the second cart's first
+  pad read saw stale absolute deadlines from the previous run and
+  flipped bit 4 of the pad input — exactly MD pad B when TH=1.
+  Symptoms: Cannon Fodder firing constantly, Sonic ignoring the
+  first jump press, every cart that polls B affected. Fix: new
+  `PicoMemReset()` in `vendor/picodrive/pico/memory.c` clears the
+  latency arrays and defensively resets `port_readers[]`; called
+  from `mdc_init()` right after `PicoInit()`. Documented as patch
+  21 in `VENDORING.md`.
+
+- **300 MHz overclock removed.** The 300 MHz entry in the picker's
+  global Overclock row and every per-cart Overclock menu (NES / SMS
+  / GB / GG / MD) has been dropped after field reports of rare
+  crashes that were hard to recover from — a crash on next launch
+  with 300 MHz saved to `/.global` or a per-cart `.cfg` would hang
+  the device on the affected cart, forcing a USB-MSC config-file
+  delete to get booting again. Saved configs still referencing 300
+  MHz are clamped on load and silently fall back to 250 MHz; no
+  user action needed. Max overclock is now 250 MHz.
+
+- **Defragmenter overhaul.** The cluster-level defragmenter had a
+  cliff on near-full volumes: when no block-shift subset could
+  place every fragmented file contiguously, the planner fell into a
+  degenerate "all files unplaceable" state that looked in the
+  preview like the disk would be wiped (it wasn't — phase 3b
+  preserved chains — but the UI was alarming and no progress was
+  made).
+    - **Pack-left fallback (`<PACK>` slot).** Stepping RIGHT past
+      K=500 on the weighting slider now selects a size-DESC
+      pack-from-cluster-0 planner that guarantees a complete layout.
+      More writes, but always reaches `frag: 0` if the volume
+      physically has room. Also fires automatically when the
+      block-subset planner finds no valid configuration.
+    - **Stay-in-place marking for unplaceable files.** Clusters of
+      files the planner couldn't place used to read as "free after"
+      in the preview's max-free-run, overstating the post-defrag
+      contiguous space. Now annotated in `target_owner` so the
+      preview matches reality and phase 3a skips the pointless
+      round-trip write.
+    - **Orphan-cluster reclaim.** The defensive orphan pinning (FAT
+      entries marked used that no file in `ctx->files[]` owns) is
+      now re-verified by a full-FS walk with a 256-dir queue,
+      independent of the analyzer's own cap. Any cluster that no
+      directory entry references anywhere on the volume is un-
+      pinned and its FAT entry zeroed by the rebuild — a built-in
+      `chkdsk` pass that reclaims leaked metadata from dirty USB-
+      MSC disconnects. Preview shows `rclm:N(Xk)` in green.
+    - **Analyzer BFS cap raised** (`CLD_MAX_DIRS` 32 → 128) so deep
+      asset trees can't silently miss files and synthesise pins.
+    - **Preview palette 15 → 32 colours**, with every red-adjacent
+      hue removed so the pinned-cluster indicator (red) is always
+      visually unique.
+
 ### v1.06 — Mega Drive compat + pan chord
 
 - **Mega Drive compatibility — 27/41 to 41/41 in our test set.** A
@@ -1243,7 +1305,7 @@ Explicit scope cuts to protect the RAM/CPU budget:
   (LGPLv2, notaz master @ `dd762b8`). Drops `.md` / `.gen` / `.bin`
   into the picker alongside NES/SMS/GB. Boots and plays most 1990-
   era 3-button carts — Sonic 2, Streets of Rage 2, many more —
-  locked at 50 PAL on a 300 MHz overclock with full audio.
+  locked at 50 PAL on a 250 MHz overclock with full audio.
 - **New "Audio" in-game menu**: FULL / HALF / OFF per cart. HALF
   halves YM2612 synthesis cost (11025 Hz + ZOH upsample); OFF
   strips Z80 + FM + PSG entirely for maximum refresh. Replaces the
@@ -1298,6 +1360,7 @@ Explicit scope cuts to protect the RAM/CPU budget:
   125/150/200/250 MHz choices. Both the global Overclock row in the
   picker menu and the per-cart Overclock in each in-game menu now
   offer it. Default stays at 250 MHz.
+  _(Removed in v1.07 — see the changelog below.)_
 
 ### v1.03
 

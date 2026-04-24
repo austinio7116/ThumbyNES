@@ -45,6 +45,9 @@
 #ifdef THUMBYNES_WITH_MD
 #include "md_run.h"
 #endif
+#ifdef THUMBYNES_WITH_PCE
+#include "pce_run.h"
+#endif
 
 #ifdef THUMBYONE_SLOT_MODE
 #include "thumbyone_led.h"
@@ -387,8 +390,11 @@ int main(void) {
             default:          per_cart = sms_run_clock_override(roms[sel].name); break;
             }
             int target = per_cart ? per_cart : nes_picker_global_clock_mhz();
+            /* Upper bound 250 (was 400): 300 MHz removed for
+             * stability. Cart cfgs with cart_clock_mhz=300 still saved
+             * from an earlier build are clamped here. */
             if (target != current_clock_mhz
-                && target >= 50 && target <= 400) {
+                && target >= 50 && target <= 250) {
                 set_sys_clock_khz((uint32_t)target * 1000u, true);
                 nes_lcd_init();
                 nes_audio_pwm_init();
@@ -405,6 +411,9 @@ int main(void) {
         case ROM_SYS_GB:  rc = gb_run_rom (&roms[sel], fb); break;
 #ifdef THUMBYNES_WITH_MD
         case ROM_SYS_MD:  rc = md_run_rom (&roms[sel], fb); break;
+#endif
+#ifdef THUMBYNES_WITH_PCE
+        case ROM_SYS_PCE: rc = pce_run_rom(&roms[sel], fb); break;
 #endif
         default:          rc = sms_run_rom(&roms[sel], fb); break;
         }

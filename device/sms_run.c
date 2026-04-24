@@ -598,10 +598,11 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (cart_clock_mhz == 150) v_clock = 2;
             if (cart_clock_mhz == 200) v_clock = 3;
             if (cart_clock_mhz == 250) v_clock = 4;
-            if (cart_clock_mhz == 300) v_clock = 5;
+            /* 300 MHz removed for stability — saved configs with 300
+             * fall back to "global" (v_clock=0) silently. */
 
-            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz","300MHz" };
-            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250,     300 };
+            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
+            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
 
             enum { ACT_NONE, ACT_SAVE_STATE, ACT_LOAD_STATE, ACT_QUIT };
 
@@ -640,7 +641,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 { .kind = NES_MENU_KIND_TOGGLE, .label = "BLEND",
                   .value_ptr = &v_blend, .enabled = (scale_mode == SCALE_FIT) },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
-                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 6,
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
                   .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
                   .enabled = true, .action_id = ACT_QUIT },

@@ -250,6 +250,9 @@ int nes_picker_scan(nes_rom_entry *out, int max) {
         else if (strcasecmp(info.fname + L - 4, ".bin") == 0) sys = ROM_SYS_MD;
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".md")  == 0) sys = ROM_SYS_MD;
 #endif
+#ifdef THUMBYNES_WITH_PCE
+        else if (strcasecmp(info.fname + L - 4, ".pce") == 0) sys = ROM_SYS_PCE;
+#endif
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gb")  == 0) sys = ROM_SYS_GB;
         else if (L >= 3 && strcasecmp(info.fname + L - 3, ".gg")  == 0) sys = ROM_SYS_GG;
         else continue;
@@ -502,24 +505,19 @@ static void draw_cluster_map(uint16_t *fb, const char *active_file_tag) {
         f_closedir(&dir);
     }
 
-    /* Distinct-hue palette (15 colours + slate-for-free). Picked so
-     * adjacent files read as clearly different blocks. */
-    static const uint16_t file_palette[15] = {
-        0x07FF,  /* cyan */
-        0xFFE0,  /* yellow */
-        0x07E0,  /* green */
-        0xF81F,  /* magenta */
-        0xFD20,  /* orange */
-        0xAFE5,  /* mint */
-        0x87FF,  /* light blue */
-        0xFB56,  /* salmon */
-        0x5E7F,  /* sky */
-        0xFCE0,  /* gold */
-        0xA8F4,  /* lavender */
-        0x6E7D,  /* teal */
-        0xFA28,  /* coral */
-        0xBE5B,  /* pale green */
-        0xEF7E,  /* ivory */
+    /* Distinct-hue palette (32 colours + slate-for-free). Deliberately
+     * avoids any near-red hues so files never visually collide with the
+     * pinned-cluster indicator (COL_ERR = 0xF800). Every slot with a
+     * high R channel (0xF8xx / 0xFBxx etc.) has mid-to-high G or B so
+     * it reads as orange/salmon/pink rather than red. */
+    static const uint16_t file_palette[32] = {
+        0x07FF, 0xFFE0, 0x07E0, 0xF81F, 0xFD20,
+        0xAFE5, 0x87FF, 0xFB56, 0x5E7F, 0xFCE0,
+        0xA8F4, 0x6E7D, 0x34BF, 0xBE5B, 0xEF7E,
+        0x001F, 0x801F, 0xC81F, 0x7FE0, 0x03BF,
+        0x045F, 0x0280, 0x63FF, 0x9FE0, 0x9A3F,
+        0xCC1F, 0x07EB, 0x601F, 0xFFA0, 0x45FF,
+        0xFD60, 0x4408,
     };
     const uint16_t FREE_COLOR = 0x10A2;    /* dark slate */
 
@@ -537,7 +535,7 @@ static void draw_cluster_map(uint16_t *fb, const char *active_file_tag) {
                 color = FREE_COLOR;
             } else {
                 uint8_t id = cluster_owner[first_cluster];
-                color = file_palette[(id - 1) % 15];
+                color = file_palette[(id - 1) % 32];
             }
             fb_rect(fb, MAP_X + co * CELL_W, MAP_Y + r * CELL_H,
                     CELL_W, CELL_H, color);
@@ -1016,7 +1014,11 @@ enum {
      * and free'd on exit. 2000 × 24 B = 48 KB during defrag, 0
      * permanent SRAM. */
     CLD_MAX_FILES        = 2000,
-    CLD_MAX_DIRS         = 32,
+    /* Raised from 32 to 128 — user hit pins on a simple FS (few
+     * folders, no long filenames) where 32 shouldn't have been close.
+     * Rules out BFS cap as a silent source of orphans. Cost: ~24 KB
+     * temporary during analyze (queue entry = 192 B + 4 B). */
+    CLD_MAX_DIRS         = 128,
     /* Defrag-local path buffer size. Must be large enough for the
      * deepest nested path on the shared FAT — e.g.
      * /games/<longname>/assets/sprites/<longname>.bmp which can
@@ -1064,6 +1066,24 @@ typedef struct {
 
 #define CLD_BIT_GET(arr, i)  ((arr)[(i) >> 3] & (1u << ((i) & 7)))
 #define CLD_BIT_SET(arr, i)  ((arr)[(i) >> 3] |= (uint8_t)(1u << ((i) & 7)))
+#define CLD_BIT_CLR(arr, i)  ((arr)[(i) >> 3] &= (uint8_t)~(1u << ((i) & 7)))
+
+/* Pin-owner diagnostics — when the orphan scan pins clusters, we
+ * re-walk the whole filesystem to attach a filename to every pinned
+ * cluster we can find. Pins that no file claims are true FAT leaks
+ * (dirty-shutdown residue or an analyzer bug) and get labelled as
+ * "ORPHAN". Populated by cld_scan_pin_owners, consumed by the
+ * preview's rotating pin-name line. */
+#define CLD_MAX_PIN_NAMES 64
+typedef struct {
+    DWORD cluster;               /* cluster index (0-based, = fat_c - 2) */
+    char  name[CLD_PATH_MAX];    /* "" if no owner found — show as ORPHAN */
+} cld_pin_name_t;
+static cld_pin_name_t *s_pin_names = NULL;
+static int             s_n_pin_names = 0;
+static int             s_pin_display_idx = 0;   /* 0 = summary slot, 1..N = names */
+static int             s_n_reclaimed   = 0;     /* orphans un-pinned this pass */
+static uint32_t        s_reclaimed_kb  = 0;     /* total size of reclaimed orphans */
 
 /* Walk a FAT16 chain starting at `sclust`, invoking cb(cluster) for each
  * cluster in the chain. Stops on EOF / bad entry / chain longer than the
@@ -1154,9 +1174,14 @@ static void cld_cb_set_owner(DWORD clst, void *arg) {
  * toward fewer writes (low K) or more free-space consolidation
  * (high K). Log-ish scale so a single step makes a visible
  * difference across the spectrum. Default starts mid-range. */
-static const int s_plan_k_values[] = { 0, 1, 2, 3, 5, 8, 13, 25, 50, 100, 200, 500 };
+/* Final sentinel (-1) past the last numeric K routes to
+ * cld_plan_pack_left instead of the block-subset optimizer — the
+ * guaranteed-layout last resort when even K=500 can't reach
+ * frag_after=0 on a near-full volume. Preview shows <PACK>. */
+static const int s_plan_k_values[] = { 0, 1, 2, 3, 5, 8, 13, 25, 50, 100, 200, 500, -1 };
 #define CLD_PLAN_K_COUNT ((int)(sizeof(s_plan_k_values) / sizeof(s_plan_k_values[0])))
 #define CLD_PLAN_K_DEFAULT_IDX 4   /* K=5 */
+#define CLD_PLAN_K_IS_PACK_LEFT(v) ((v) < 0)
 static int s_plan_k_idx = CLD_PLAN_K_DEFAULT_IDX;
 
 
@@ -1471,6 +1496,249 @@ static void cld_apply_mask(cld_ctx_t *ctx, const cld_layout_t *layout,
     }
 }
 
+/* Re-walk the filesystem (with a generous directory queue, independent
+ * of the main analyzer's cap) and try to attach a filename to every
+ * pinned cluster. For each file/subdir encountered, we walk its FAT
+ * chain and, whenever we land on a cluster the orphan scan already
+ * pinned, record the file's path in the corresponding s_pin_names[]
+ * entry. Anything still unlabeled at the end is a TRUE orphan —
+ * cluster marked in-use by the FAT but claimed by no directory entry
+ * anywhere on the volume. Populates s_pin_names / s_n_pin_names. */
+#define CLD_DIAG_MAX_DIRS 256
+static void cld_scan_pin_owners(cld_ctx_t *ctx) {
+    /* Free any previous scan's buffer. */
+    if (s_pin_names) { free(s_pin_names); s_pin_names = NULL; }
+    s_n_pin_names = 0;
+    s_pin_display_idx = 0;
+
+    int n_pins = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) n_pins++;
+    }
+    if (n_pins == 0) return;
+
+    int cap = (n_pins < CLD_MAX_PIN_NAMES) ? n_pins : CLD_MAX_PIN_NAMES;
+    s_pin_names = (cld_pin_name_t *)calloc((size_t)cap, sizeof(cld_pin_name_t));
+    if (!s_pin_names) return;
+    s_n_pin_names = cap;
+
+    int p = 0;
+    for (DWORD c = 0; c < ctx->n_clust && p < cap; c++) {
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) {
+            s_pin_names[p].cluster = c;
+            s_pin_names[p].name[0] = 0;
+            p++;
+        }
+    }
+
+    typedef struct { char path[CLD_PATH_MAX]; } scan_q_t;
+    scan_q_t *q = (scan_q_t *)malloc((size_t)CLD_DIAG_MAX_DIRS * sizeof(scan_q_t));
+    if (!q) return;
+    int q_head = 0, q_tail = 0;
+    strncpy(q[0].path, "/", CLD_PATH_MAX - 1);
+    q[0].path[CLD_PATH_MAX - 1] = 0;
+    q_tail = 1;
+
+    static uint8_t fat_sec[512];
+
+    while (q_head < q_tail) {
+        char cur[CLD_PATH_MAX];
+        strncpy(cur, q[q_head++].path, CLD_PATH_MAX - 1);
+        cur[CLD_PATH_MAX - 1] = 0;
+
+        DIR d;
+        FILINFO info;
+        if (f_opendir(&d, cur) != FR_OK) continue;
+        while (f_readdir(&d, &info) == FR_OK) {
+            if (info.fname[0] == 0) break;
+            if (info.fname[0] == '.'
+                && (info.fname[1] == 0
+                    || (info.fname[1] == '.' && info.fname[2] == 0))) {
+                continue;
+            }
+            char full[CLD_PATH_MAX];
+            if (cur[0] == '/' && cur[1] == 0)
+                snprintf(full, sizeof(full), "/%s", info.fname);
+            else
+                snprintf(full, sizeof(full), "%s/%s", cur, info.fname);
+
+            DWORD sclust = 0;
+            if (info.fattrib & AM_DIR) {
+                DIR subd;
+                if (f_opendir(&subd, full) != FR_OK) continue;
+                sclust = subd.obj.sclust;
+                f_closedir(&subd);
+                if (q_tail < CLD_DIAG_MAX_DIRS) {
+                    strncpy(q[q_tail].path, full, CLD_PATH_MAX - 1);
+                    q[q_tail].path[CLD_PATH_MAX - 1] = 0;
+                    q_tail++;
+                }
+            } else {
+                FIL probe;
+                if (f_open(&probe, full, FA_READ) != FR_OK) continue;
+                sclust = probe.obj.sclust;
+                f_close(&probe);
+            }
+            if (sclust < 2 || sclust >= g_fs.n_fatent) continue;
+
+            DWORD clst = sclust;
+            LBA_t cached = (LBA_t)-1;
+            int safety = (int)ctx->n_clust + 1;
+            while (clst >= 2 && clst < g_fs.n_fatent && safety-- > 0) {
+                DWORD ci = clst - 2;
+                if (ci < ctx->n_clust
+                    && CLD_BIT_GET(ctx->pinned_bits, ci)) {
+                    for (int i = 0; i < s_n_pin_names; i++) {
+                        if (s_pin_names[i].cluster == ci
+                            && s_pin_names[i].name[0] == 0) {
+                            strncpy(s_pin_names[i].name, full,
+                                    CLD_PATH_MAX - 1);
+                            s_pin_names[i].name[CLD_PATH_MAX - 1] = 0;
+                            break;
+                        }
+                    }
+                }
+                DWORD eb = clst * 2;
+                DWORD es = eb / 512;
+                DWORD eo = eb % 512;
+                LBA_t lba = (LBA_t)g_fs.fatbase + es;
+                if (lba != cached) {
+                    if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) break;
+                    cached = lba;
+                }
+                uint16_t next = (uint16_t)fat_sec[eo]
+                              | ((uint16_t)fat_sec[eo + 1] << 8);
+                if (next == 0xFFFF || next < 2) break;
+                clst = next;
+            }
+        }
+        f_closedir(&d);
+    }
+    free(q);
+
+    /* Reclaim true orphans. Any s_pin_names[] entry with no filename
+     * is a cluster the whole-FS walk proved nobody references. The
+     * defensive pin from the orphan scan was there in case we missed
+     * some file's dir entry — but the full walk shows no such entry
+     * exists. Un-pin so the planners can place files into the cluster
+     * and phase 3b zeros the FAT entry (memset to 0, no preservation
+     * pass touches it). Real storage reclaimed. */
+    s_n_reclaimed  = 0;
+    s_reclaimed_kb = 0;
+    for (int i = 0; i < s_n_pin_names; i++) {
+        if (s_pin_names[i].name[0] != 0) continue;
+        DWORD ci = s_pin_names[i].cluster;
+        if (ci >= ctx->n_clust) continue;
+        if (!CLD_BIT_GET(ctx->pinned_bits, ci)) continue;
+        CLD_BIT_CLR(ctx->pinned_bits, ci);
+        s_n_reclaimed++;
+    }
+    s_reclaimed_kb = (uint32_t)(((uint64_t)s_n_reclaimed * ctx->bpc) / 1024);
+}
+
+/* After a planner finishes, any file it couldn't place still lives
+ * on the disk — phase 3b preserves the existing FAT chain for files
+ * with target_sclust==0. Mark their current clusters as "stays here"
+ * in target_owner (copy current ownership into target) so:
+ *   (a) the preview's max_free_after stops counting those clusters
+ *       as free space that will magically appear after defrag,
+ *   (b) phase 3a's cycle sort sees current==target and skips them,
+ *       saving a read+write round-trip per stay-in-place cluster. */
+static void cld_mark_unplaceable_stay(cld_ctx_t *ctx) {
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (ctx->target_owner[c] != 0) continue;
+        uint32_t owner = ctx->current_owner[c];
+        if (owner == 0) continue;
+        int fidx = (int)((owner >> 16) - 1);
+        if (fidx < 0 || fidx >= ctx->n_files) continue;
+        if (ctx->files[fidx].target_sclust != 0) continue;
+        ctx->target_owner[c] = owner;
+    }
+}
+
+/* Pack-left fallback planner. Invoked when cld_plan_block_search
+ * can't find a valid block-subset configuration (e.g. a fragmented
+ * file larger than the biggest single free run). Ignores the current
+ * layout entirely: sorts files by size DESC (current_sclust ASC as
+ * stability tiebreak) and streams them into the leftmost available
+ * clusters, routing around pinned ones via cld_find_clear_range.
+ *
+ * On a healthy volume pinned_bits is empty (the orphan scan in
+ * cld_analyze only pins FAT entries whose owning file the BFS missed,
+ * which shouldn't happen at CLD_MAX_FILES=2000). In that case this
+ * degenerates to "walk a cursor, hand out contiguous ranges" and
+ * every file ends up contiguous. When pins do exist, the planner
+ * routes around them; any file larger than the biggest inter-pin
+ * gap keeps target_sclust=0 so phase 3b preserves its existing chain.
+ *
+ * Write cost is not minimized — this is the guaranteed-outcome
+ * fallback, not the minimum-moves path. */
+static int cld_plan_pack_left(cld_ctx_t *ctx) {
+    int n_files = ctx->n_files;
+
+    /* Build a pinned-cluster list in the same shape cld_find_clear_range
+     * expects. On a healthy volume this list is empty. */
+    int n_pinned = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) n_pinned++;
+    }
+    DWORD *pinned = NULL;
+    if (n_pinned > 0) {
+        pinned = (DWORD *)malloc((size_t)n_pinned * sizeof(DWORD));
+        if (!pinned) return -1;
+        int p = 0;
+        for (DWORD c = 0; c < ctx->n_clust; c++) {
+            if (CLD_BIT_GET(ctx->pinned_bits, c)) pinned[p++] = c;
+        }
+    }
+    cld_layout_t layout = {0};
+    layout.pinned_list = pinned;
+    layout.n_pinned    = n_pinned;
+
+    /* Sorted index: size DESC, then current_sclust ASC. */
+    int *sorted = (int *)malloc((size_t)(n_files + 1) * sizeof(int));
+    if (!sorted) { free(pinned); return -1; }
+    for (int i = 0; i < n_files; i++) sorted[i] = i;
+    for (int i = 1; i < n_files; i++) {
+        int      key    = sorted[i];
+        uint32_t key_sz = ctx->files[key].n_clusters;
+        DWORD    key_sc = ctx->files[key].current_sclust;
+        int j = i - 1;
+        while (j >= 0) {
+            uint32_t sz = ctx->files[sorted[j]].n_clusters;
+            DWORD    sc = ctx->files[sorted[j]].current_sclust;
+            bool shift = (sz < key_sz) || (sz == key_sz && sc > key_sc);
+            if (!shift) break;
+            sorted[j + 1] = sorted[j];
+            j--;
+        }
+        sorted[j + 1] = key;
+    }
+
+    memset(ctx->target_owner, 0, ctx->n_clust * sizeof(uint32_t));
+    for (int f = 0; f < n_files; f++) ctx->files[f].target_sclust = 0;
+
+    DWORD cursor = 0;
+    for (int s = 0; s < n_files; s++) {
+        int f = sorted[s];
+        uint32_t nc = ctx->files[f].n_clusters;
+        if (nc == 0) continue;
+        DWORD t = cld_find_clear_range(&layout, ctx->n_clust, cursor, nc);
+        if (t >= ctx->n_clust) continue;   /* leave target_sclust = 0 */
+        ctx->files[f].target_sclust = t + 2;
+        for (uint32_t j = 0; j < nc; j++) {
+            ctx->target_owner[t + j] =
+                ((uint32_t)(f + 1) << 16) | (j & 0xFFFF);
+        }
+        cursor = t + nc;
+    }
+
+    free(sorted);
+    free(pinned);
+    cld_mark_unplaceable_stay(ctx);
+    return 0;
+}
+
 /* Main block-search planner. */
 static int cld_plan_block_search(cld_ctx_t *ctx) {
     cld_layout_t layout = {0};
@@ -1612,10 +1880,15 @@ static int cld_plan_block_search(cld_ctx_t *ctx) {
 
     if (have_best) {
         cld_apply_mask(ctx, &layout, bt_best, ft_best);
+        cld_mark_unplaceable_stay(ctx);
     } else {
-        /* Degenerate: no valid config. Treat all as unplaceable. */
-        memset(ctx->target_owner, 0, ctx->n_clust * sizeof(uint32_t));
-        for (int f = 0; f < ctx->n_files; f++) ctx->files[f].target_sclust = 0;
+        /* No valid block-subset configuration — typically a fragmented
+         * file bigger than any free run at every tested mask. Fall back
+         * to pack-left: size-DESC stream from cluster 0, guaranteed to
+         * produce a complete layout on pin-free volumes and degrades
+         * gracefully when pins exist. (Pack-left calls the stay-in-place
+         * fixup internally, so no second call needed here.) */
+        cld_plan_pack_left(ctx);
     }
 
     (void)best_moves; (void)best_free; (void)best_mask; (void)best_score;
@@ -1623,6 +1896,16 @@ static int cld_plan_block_search(cld_ctx_t *ctx) {
     free(bt_cur); free(ft_cur); free(bt_best); free(ft_best);
     cld_layout_free(&layout);
     return 0;
+}
+
+/* Dispatch to the planner matching the current K setting. K >= 0
+ * picks block-subset search with that weight; K < 0 (sentinel at the
+ * end of s_plan_k_values) forces pack-left as a guaranteed layout. */
+static int cld_plan_dispatch(cld_ctx_t *ctx) {
+    if (CLD_PLAN_K_IS_PACK_LEFT(s_plan_k_values[s_plan_k_idx])) {
+        return cld_plan_pack_left(ctx);
+    }
+    return cld_plan_block_search(ctx);
 }
 
 /* Score the current plan: (unplaceable files, cluster writes,
@@ -1863,12 +2146,15 @@ static int cld_analyze(cld_ctx_t *ctx) {
         }
     }
 
-    /* Block-subset search planner: enumerate every block-shift
-     * configuration (up to 2^16 subsets, greedy hill-climb above
-     * that), score each by (moves − K × free_gain + P × regression),
-     * pick the winner. Writes ctx->target_owner and
-     * ctx->files[].target_sclust directly. */
-    return cld_plan_block_search(ctx);
+    /* Diagnostic: attach filenames to every pinned cluster (or mark
+     * ORPHAN if no file claims them) so the preview can show the user
+     * exactly what's gating pack-left's contiguity. */
+    cld_scan_pin_owners(ctx);
+
+    /* Route to the block-subset optimizer or the pack-left fallback
+     * based on the current K setting. Either writes ctx->target_owner
+     * and ctx->files[].target_sclust directly. */
+    return cld_plan_dispatch(ctx);
 }
 
 /* Execute-phase overlay. Renders the live cluster state from
@@ -1889,10 +2175,14 @@ static void cld_draw_execute_overlay(uint16_t *fb, const cld_ctx_t *ctx,
         MAP_COLS = 60, MAP_ROWS = 40,
         N_CELLS = MAP_COLS * MAP_ROWS,
     };
-    static const uint16_t palette[15] = {
+    static const uint16_t palette[32] = {
         0x07FF, 0xFFE0, 0x07E0, 0xF81F, 0xFD20,
         0xAFE5, 0x87FF, 0xFB56, 0x5E7F, 0xFCE0,
-        0xA8F4, 0x6E7D, 0xFA28, 0xBE5B, 0xEF7E,
+        0xA8F4, 0x6E7D, 0x34BF, 0xBE5B, 0xEF7E,
+        0x001F, 0x801F, 0xC81F, 0x7FE0, 0x03BF,
+        0x045F, 0x0280, 0x63FF, 0x9FE0, 0x9A3F,
+        0xCC1F, 0x07EB, 0x601F, 0xFFA0, 0x45FF,
+        0xFD60, 0x4408,
     };
     const uint16_t FREE_COLOR = 0x10A2;
 
@@ -1926,7 +2216,7 @@ static void cld_draw_execute_overlay(uint16_t *fb, const cld_ctx_t *ctx,
                     break;
                 }
             }
-            uint16_t color = (fidx >= 0) ? palette[fidx % 15] : FREE_COLOR;
+            uint16_t color = (fidx >= 0) ? palette[fidx % 32] : FREE_COLOR;
             fb_rect(fb, MAP_X + co * CELL_W, MAP_Y + r * CELL_H,
                     CELL_W, CELL_H, color);
         }
@@ -1961,10 +2251,14 @@ static void cld_draw_map_small(uint16_t *fb, const uint32_t *owner_map,
      * which fits three 8 px stat lines + prompt. Each cell covers
      * n_clust / 1020 clusters (~10 on a 9788-cluster volume). */
     enum { COLS = 60, ROWS = 17, CELL = 2, X0 = 4, N_CELLS = COLS * ROWS };
-    static const uint16_t palette[15] = {
+    static const uint16_t palette[32] = {
         0x07FF, 0xFFE0, 0x07E0, 0xF81F, 0xFD20,
         0xAFE5, 0x87FF, 0xFB56, 0x5E7F, 0xFCE0,
-        0xA8F4, 0x6E7D, 0xFA28, 0xBE5B, 0xEF7E,
+        0xA8F4, 0x6E7D, 0x34BF, 0xBE5B, 0xEF7E,
+        0x001F, 0x801F, 0xC81F, 0x7FE0, 0x03BF,
+        0x045F, 0x0280, 0x63FF, 0x9FE0, 0x9A3F,
+        0xCC1F, 0x07EB, 0x601F, 0xFFA0, 0x45FF,
+        0xFD60, 0x4408,
     };
     /* Border */
     fb_rect(fb, X0 - 1, y_top - 1, COLS * CELL + 2, ROWS * CELL + 2, 0x4208);
@@ -1993,8 +2287,11 @@ static void cld_draw_map_small(uint16_t *fb, const uint32_t *owner_map,
                 }
             }
             uint16_t color;
-            if (fidx >= 0)      color = palette[fidx % 15];
-            else if (pinned)    color = 0x632C;   /* pinned subdir */
+            if (fidx >= 0)      color = palette[fidx % 32];
+            else if (pinned)    color = COL_ERR;  /* orphan pin — red so
+                                                   * it's unmissable; on
+                                                   * a healthy volume no
+                                                   * red appears at all */
             else                color = 0x10A2;   /* free */
             fb_rect(fb, X0 + co * CELL, y_top + r * CELL, CELL, CELL, color);
         }
@@ -2062,6 +2359,15 @@ static void cld_show_preview(const cld_ctx_t *ctx, uint16_t *fb,
     CLD_FMT_KB(free_a, free_a_kb);
     #undef CLD_FMT_KB
 
+    /* Count pinned clusters — these are the ONLY source of mid-volume
+     * gaps in pack-left's output, so flag them so the user knows why
+     * a pack isn't fully contiguous. Healthy volume => 0. */
+    int pin_c = 0;
+    for (DWORD c = 0; c < ctx->n_clust; c++) {
+        if (CLD_BIT_GET(ctx->pinned_bits, c)) pin_c++;
+    }
+    uint32_t pin_kb = (uint32_t)(((uint64_t)pin_c * ctx->bpc) / 1024);
+
     char line1[40];
     snprintf(line1, sizeof(line1), "frag: %d -> %d", frag_before, frag_after);
     nes_font_draw(fb, line1,
@@ -2073,18 +2379,39 @@ static void cld_show_preview(const cld_ctx_t *ctx, uint16_t *fb,
     nes_font_draw(fb, line2,
                    (FB_W - nes_font_width(line2)) / 2, 107, COL_HIGHLT);
 
-    /* Cost line — how much flash wear this plan commits to. */
+    /* Cost + pin/reclaim indicator — single static line. */
     char line3[40];
-    snprintf(line3, sizeof(line3), "cost: %d writes", moves_planned);
+    uint16_t line3_col = COL_DIM;
+    if (pin_c > 0 && s_n_reclaimed > 0) {
+        snprintf(line3, sizeof(line3), "cost:%d pin:%d rclm:%d",
+                 moves_planned, pin_c, s_n_reclaimed);
+        line3_col = COL_ERR;
+    } else if (pin_c > 0) {
+        snprintf(line3, sizeof(line3), "cost:%d pin:%d(%luk)",
+                 moves_planned, pin_c, (unsigned long)pin_kb);
+        line3_col = COL_ERR;
+    } else if (s_n_reclaimed > 0) {
+        snprintf(line3, sizeof(line3), "cost:%d rclm:%d(%luk)",
+                 moves_planned, s_n_reclaimed,
+                 (unsigned long)s_reclaimed_kb);
+        line3_col = COL_HIGHLT;
+    } else {
+        snprintf(line3, sizeof(line3), "cost: %d writes", moves_planned);
+    }
     nes_font_draw(fb, line3,
-                   (FB_W - nes_font_width(line3)) / 2, 114, COL_DIM);
+                   (FB_W - nes_font_width(line3)) / 2, 114, line3_col);
 
     /* K-weight indicator — user-adjustable with LEFT/RIGHT. Lower K
      * biases toward fewer writes, higher K toward more free-space
-     * consolidation. */
+     * consolidation. The sentinel past the last numeric value routes
+     * to the pack-left planner, labelled <PACK>. */
     char line4[40];
-    snprintf(line4, sizeof(line4), "<K=%d> A=go B=x",
-             s_plan_k_values[s_plan_k_idx]);
+    if (CLD_PLAN_K_IS_PACK_LEFT(s_plan_k_values[s_plan_k_idx])) {
+        snprintf(line4, sizeof(line4), "<PACK> A=go B=x");
+    } else {
+        snprintf(line4, sizeof(line4), "<K=%d> A=go B=x",
+                 s_plan_k_values[s_plan_k_idx]);
+    }
     nes_font_draw(fb, line4,
                    (FB_W - nes_font_width(line4)) / 2, 121, COL_HIGHLT);
 
@@ -2473,7 +2800,7 @@ int nes_picker_defrag_compact(uint16_t *fb) {
         if (new_idx >= CLD_PLAN_K_COUNT) new_idx = CLD_PLAN_K_COUNT - 1;
         if (new_idx != s_plan_k_idx) {
             s_plan_k_idx = new_idx;
-            cld_plan_block_search(&ctx);
+            cld_plan_dispatch(&ctx);
         }
     }
     if (!apply) {
@@ -2499,6 +2826,11 @@ cleanup:
     free(ctx.done_bits);
     free(ctx.buf_a);
     free(ctx.buf_b);
+    if (s_pin_names) { free(s_pin_names); s_pin_names = NULL; }
+    s_n_pin_names = 0;
+    s_pin_display_idx = 0;
+    s_n_reclaimed  = 0;
+    s_reclaimed_kb = 0;
     return rc;
 }
 
@@ -2736,6 +3068,7 @@ static void name_no_ext(char *dst, size_t dstsz, const char *src) {
                 || strcasecmp(dst + L - 4, ".sms") == 0
                 || strcasecmp(dst + L - 4, ".gbc") == 0
                 || strcasecmp(dst + L - 4, ".gen") == 0
+                || strcasecmp(dst + L - 4, ".pce") == 0
                 || strcasecmp(dst + L - 4, ".bin") == 0)) {
         dst[L - 4] = 0;
     } else if (L >= 3 && (strcasecmp(dst + L - 3, ".gg") == 0
@@ -2756,6 +3089,8 @@ static void format_meta(char *out, size_t outsz, const nes_rom_entry *e) {
                                                  (unsigned long)(e->size / 1024));
     else if (e->system == ROM_SYS_MD ) snprintf(out, outsz, "MD   %luK  %s",
                                                  (unsigned long)(e->size / 1024), region);
+    else if (e->system == ROM_SYS_PCE) snprintf(out, outsz, "PCE  %luK",
+                                                 (unsigned long)(e->size / 1024));
     else if (e->mapper == 0xFF)        snprintf(out, outsz, "??   %luK  %s",
                                                  (unsigned long)(e->size / 1024), region);
     else                               snprintf(out, outsz, "m%d   %luK  %s",
@@ -2782,7 +3117,11 @@ static int g_volume_cached = -1;
 static int g_clock_cached  = -1;
 
 static int valid_clock_mhz(int m) {
-    return m == 125 || m == 150 || m == 200 || m == 250 || m == 300;
+    /* 300 MHz removed: caused crashes on at least some units, hard
+     * to recover from without USB-deleting /.global. Saved configs
+     * that still have 300 fail this check on load and fall back to
+     * CLOCK_DEFAULT_MHZ (250). */
+    return m == 125 || m == 150 || m == 200 || m == 250;
 }
 
 static void global_load(void) {
@@ -2891,7 +3230,8 @@ void nes_picker_global_set_clock_mhz(int mhz) {
 #define TAB_GB  3
 #define TAB_GG  4
 #define TAB_MD  5
-#define TAB_COUNT 6
+#define TAB_PCE 6
+#define TAB_COUNT 7
 
 #define SORT_ALPHA 0   /* case-insensitive name */
 #define SORT_FAV   1   /* favorites first, then alpha */
@@ -2976,6 +3316,7 @@ static int build_view(const nes_rom_entry *entries, int n_entries,
         case TAB_GB : if (entries[i].system != ROM_SYS_GB ) continue; break;
         case TAB_GG : if (entries[i].system != ROM_SYS_GG ) continue; break;
         case TAB_MD : if (entries[i].system != ROM_SYS_MD ) continue; break;
+        case TAB_PCE: if (entries[i].system != ROM_SYS_PCE) continue; break;
         }
         view[n++] = i;
     }
@@ -3006,6 +3347,7 @@ static void tab_counts(const nes_rom_entry *e, int n, int counts[TAB_COUNT]) {
         else if (e[i].system == ROM_SYS_GB ) counts[TAB_GB ]++;
         else if (e[i].system == ROM_SYS_GG ) counts[TAB_GG ]++;
         else if (e[i].system == ROM_SYS_MD ) counts[TAB_MD ]++;
+        else if (e[i].system == ROM_SYS_PCE) counts[TAB_PCE]++;
     }
 }
 
@@ -3015,7 +3357,8 @@ static void tab_counts(const nes_rom_entry *e, int n, int counts[TAB_COUNT]) {
 
 static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUNT]) {
     static const uint8_t icon_for[TAB_COUNT] = {
-        ICON_SYS_STAR, ICON_SYS_NES, ICON_SYS_SMS, ICON_SYS_GB, ICON_SYS_GG, ICON_SYS_MD,
+        ICON_SYS_STAR, ICON_SYS_NES, ICON_SYS_SMS, ICON_SYS_GB,
+        ICON_SYS_GG,   ICON_SYS_MD,  ICON_SYS_PCE,
     };
     /* 6 tabs in 128 px = 21 px each (loses 2 px on the right edge,
      * which is fine — we treat it as overscan). */
@@ -3470,8 +3813,7 @@ int nes_picker_run(uint16_t *fb,
             int v_clock = (v_clock_mhz == 125) ? 0
                         : (v_clock_mhz == 150) ? 1
                         : (v_clock_mhz == 200) ? 2
-                        : (v_clock_mhz == 250) ? 3
-                        : (v_clock_mhz == 300) ? 4 : 3;
+                        : (v_clock_mhz == 250) ? 3 : 3;
 
             /* Storage info — read once when the menu opens. Under
              * ThumbyOne slot mode, format via the shared helper so
@@ -3538,12 +3880,12 @@ int nes_picker_run(uint16_t *fb,
 #endif
 
             char about_text[24];
-            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.06");
+            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.07");
 
             static const char * const view_choices[]  = { "HERO", "LIST" };
             static const char * const sort_choices[]  = { "ALPHA", "FAVS", "SIZE" };
-            static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz", "300MHz" };
-            static const int          clock_mhz[]     = {  125,      150,      200,      250,      300 };
+            static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz" };
+            static const int          clock_mhz[]     = {  125,      150,      200,      250 };
 
             /* ACT_LOBBY is only offered when compiled into ThumbyOne
              * (standalone NES has nothing to fall back to). The
@@ -3563,7 +3905,7 @@ int nes_picker_run(uint16_t *fb,
                   .on_change = live_brightness_apply },
 #endif
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
-                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 4,
                   .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Display",
                   .value_ptr = &v_view, .choices = view_choices, .num_choices = 2,

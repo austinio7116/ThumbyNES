@@ -495,10 +495,11 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (cart_clock_mhz == 150) v_clock = 2;
             if (cart_clock_mhz == 200) v_clock = 3;
             if (cart_clock_mhz == 250) v_clock = 4;
-            if (cart_clock_mhz == 300) v_clock = 5;
+            /* 300 MHz removed for stability — saved configs with 300
+             * fall back to "global" (v_clock=0) silently. */
 
-            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz","300MHz" };
-            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250,     300 };
+            static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
+            static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
             /* Audio mode choices. OFF disables Z80+FM+PSG entirely —
              * caps 50 PAL / 60 NTSC with zero audio path cost. HALF
              * runs YM2612 at 11025 Hz (upsampled ZOH in mdc_audio_pull)
@@ -542,7 +543,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .value_ptr = &v_audio, .choices = audio_choices, .num_choices = 3,
                   .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Overclock",
-                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 6,
+                  .value_ptr = &v_clock, .choices = clock_choices, .num_choices = 5,
                   .enabled = true, .suffix = "next launch" },
                 { .kind = NES_MENU_KIND_ACTION, .label = "Quit to picker",
                   .enabled = true, .action_id = ACT_QUIT },
