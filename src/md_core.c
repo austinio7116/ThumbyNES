@@ -614,38 +614,7 @@ size_t   mdc_battery_size(void) { return (size_t)(Pico.sv.end - Pico.sv.start + 
 static size_t mdc_bridge_read(void *p, size_t sz, size_t n, void *file) {
     return thumby_state_read(p, sz, n, (thumby_state_io_t *)file);
 }
-/* Per-call progress — ping PicoStateProgressCB so the LCD shows how
- * many areaWrite calls landed before any hang. state_save does two
- * bare header writes (8-byte "PicoSEXT", 4-byte ver) before the first
- * chunk-level CHECKED_WRITE, so healthy early sequence is
- *   W1 #0008, W2 #0004, then chunk-callback 'Saving.. M68K state'.
- * If we hang after 'stage: PicoStateFP' with NO W1 message, the
- * hang is in the buf2 = malloc(CHUNK_LIMIT_W) of state_save before
- * the first areaWrite. If we see W1 but not W2, the first f_write
- * hung. And so on. */
-static int mdc_bridge_write_count;
 static size_t mdc_bridge_write(void *p, size_t sz, size_t n, void *file) {
-    extern void (*PicoStateProgressCB)(const char *str);
-    mdc_bridge_write_count++;
-    if (PicoStateProgressCB) {
-        char msg[24];
-        static const char hex[] = "0123456789ABCDEF";
-        unsigned total = (unsigned)(sz * n);
-        int i = 0;
-        msg[i++]='b'; msg[i++]='r'; msg[i++]=':'; msg[i++]=' ';
-        msg[i++]='W';
-        int c = mdc_bridge_write_count;
-        if (c >= 100) msg[i++] = '0' + (c/100)%10;
-        if (c >= 10)  msg[i++] = '0' + (c/10)%10;
-        msg[i++] = '0' + c%10;
-        msg[i++]=' '; msg[i++]='#';
-        msg[i++]= hex[(total >> 12) & 0xf];
-        msg[i++]= hex[(total >>  8) & 0xf];
-        msg[i++]= hex[(total >>  4) & 0xf];
-        msg[i++]= hex[(total      ) & 0xf];
-        msg[i] = '\0';
-        PicoStateProgressCB(msg);
-    }
     return thumby_state_write(p, sz, n, (thumby_state_io_t *)file);
 }
 static size_t mdc_bridge_eof(void *file) {
@@ -661,24 +630,12 @@ int mdc_save_state(const char *path)
 {
     if (!path || !s_loaded) return -1;
 #ifdef THUMBY_STATE_BRIDGE
-    /* Stage-level progress. The chunk-level PicoStateProgressCB only
-     * fires once we're inside state_save's chunk loop; if the hang is
-     * BEFORE the first chunk (e.g. f_open, PicoStateFP entry,
-     * state_save's SekFinishIdleDet, the "PicoSEXT" header write) we
-     * need earlier visibility. Poke the same global callback at each
-     * stage boundary so the LCD shows the last completed stage. */
-    extern void (*PicoStateProgressCB)(const char *str);
-    void (*cb)(const char *) = PicoStateProgressCB;
-    if (cb) cb("stage: open");
     thumby_state_io_t *io = thumby_state_open(path, "wb");
-    if (!io) { if (cb) cb("stage: open failed"); return -1; }
-    if (cb) cb("stage: PicoStateFP");
+    if (!io) return -1;
     int rc = PicoStateFP(io, 1,
                          mdc_bridge_read, mdc_bridge_write,
                          mdc_bridge_eof,  mdc_bridge_seek);
-    if (cb) cb("stage: close");
     thumby_state_close(io);
-    if (cb) cb("stage: done");
     return rc;
 #else
     return PicoState(path, 1);   /* 1 = save */
@@ -689,18 +646,12 @@ int mdc_load_state(const char *path)
 {
     if (!path || !s_loaded) return -1;
 #ifdef THUMBY_STATE_BRIDGE
-    extern void (*PicoStateProgressCB)(const char *str);
-    void (*cb)(const char *) = PicoStateProgressCB;
-    if (cb) cb("stage: open");
     thumby_state_io_t *io = thumby_state_open(path, "rb");
-    if (!io) { if (cb) cb("stage: open failed"); return -1; }
-    if (cb) cb("stage: PicoStateFP");
+    if (!io) return -1;
     int rc = PicoStateFP(io, 0,
                          mdc_bridge_read, mdc_bridge_write,
                          mdc_bridge_eof,  mdc_bridge_seek);
-    if (cb) cb("stage: close");
     thumby_state_close(io);
-    if (cb) cb("stage: done");
     return rc;
 #else
     return PicoState(path, 0);   /* 0 = load */
