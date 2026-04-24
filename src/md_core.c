@@ -131,6 +131,10 @@ unsigned short mdbg_read_rom_u16(unsigned int a) {
 extern volatile unsigned int md_dbg_vdp_writes;
 unsigned int    mdbg_get_vdp_writes(void){ return md_dbg_vdp_writes; }
 
+unsigned int    mdbg_get_vdp_status_word(void) {
+    return (unsigned int)Pico.video.status;
+}
+
 static int16_t   s_sndbuf[2048];    /* stereo int16, ~735 samples/frame @ 22050/60 */
 static int16_t   s_mixbuf[1024];    /* mono int16 after downmix */
 static int       s_mixcount;
@@ -157,6 +161,18 @@ int mdc_init(int region, int sample_rate)
     s_loaded   = false;
     s_mixcount = 0;
     s_sample_rate = sample_rate;
+
+#ifdef MD_SP_GUARD
+    {
+        const char *trap = getenv("MD_TRAP_PC");
+        extern volatile unsigned int md_dbg_trap_pc_dump;
+        if (trap) {
+            md_dbg_trap_pc_dump = (unsigned int)strtoul(trap, 0, 16);
+        }
+        fprintf(stderr, "MD_TRAP_PC env=%s -> md_dbg_trap_pc_dump=0x%x\n",
+                trap ? trap : "(unset)", md_dbg_trap_pc_dump);
+    }
+#endif
 
 #ifndef MD_LINE_SCRATCH
     if (!s_fb) {
@@ -583,12 +599,24 @@ int mdc_save_state(const char *path)
 {
     if (!path || !s_loaded) return -1;
 #ifdef THUMBY_STATE_BRIDGE
+    /* Stage-level progress. The chunk-level PicoStateProgressCB only
+     * fires once we're inside state_save's chunk loop; if the hang is
+     * BEFORE the first chunk (e.g. f_open, PicoStateFP entry,
+     * state_save's SekFinishIdleDet, the "PicoSEXT" header write) we
+     * need earlier visibility. Poke the same global callback at each
+     * stage boundary so the LCD shows the last completed stage. */
+    extern void (*PicoStateProgressCB)(const char *str);
+    void (*cb)(const char *) = PicoStateProgressCB;
+    if (cb) cb("stage: open");
     thumby_state_io_t *io = thumby_state_open(path, "wb");
-    if (!io) return -1;
+    if (!io) { if (cb) cb("stage: open failed"); return -1; }
+    if (cb) cb("stage: PicoStateFP");
     int rc = PicoStateFP(io, 1,
                          mdc_bridge_read, mdc_bridge_write,
                          mdc_bridge_eof,  mdc_bridge_seek);
+    if (cb) cb("stage: close");
     thumby_state_close(io);
+    if (cb) cb("stage: done");
     return rc;
 #else
     return PicoState(path, 1);   /* 1 = save */
@@ -599,12 +627,18 @@ int mdc_load_state(const char *path)
 {
     if (!path || !s_loaded) return -1;
 #ifdef THUMBY_STATE_BRIDGE
+    extern void (*PicoStateProgressCB)(const char *str);
+    void (*cb)(const char *) = PicoStateProgressCB;
+    if (cb) cb("stage: open");
     thumby_state_io_t *io = thumby_state_open(path, "rb");
-    if (!io) return -1;
+    if (!io) { if (cb) cb("stage: open failed"); return -1; }
+    if (cb) cb("stage: PicoStateFP");
     int rc = PicoStateFP(io, 0,
                          mdc_bridge_read, mdc_bridge_write,
                          mdc_bridge_eof,  mdc_bridge_seek);
+    if (cb) cb("stage: close");
     thumby_state_close(io);
+    if (cb) cb("stage: done");
     return rc;
 #else
     return PicoState(path, 0);   /* 0 = load */
