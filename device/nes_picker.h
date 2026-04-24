@@ -40,6 +40,7 @@
 #define ROM_SYS_GG   2
 #define ROM_SYS_GB   3
 #define ROM_SYS_MD   4   /* Sega Mega Drive / Genesis — .md/.bin/.gen */
+#define ROM_SYS_PCE  5   /* PC Engine / TurboGrafx-16 HuCard — .pce */
 
 typedef struct {
     char     name[NES_PICKER_NAME_MAX];   /* base file name in / */

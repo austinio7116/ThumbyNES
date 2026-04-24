@@ -242,11 +242,43 @@ target_compile_definitions(peanut_gb PUBLIC PEANUT_FULL_GBC_SUPPORT=1)
 target_compile_options(peanut_gb PRIVATE -Wno-implicit-fallthrough -Wno-unused-function -Wno-unused-variable)
 
 # ----------------------------------------------------------------------
+# Vendored HuExpress (GPLv2 — see vendor/VENDORING.md)
+#   PC Engine / TurboGrafx-16 HuCard-only. CD, Arcade Card, SuperGrafx,
+#   netplay, SDL OSD, debugger all trimmed from the tree.
+#   XBUF render path (220 KB) keeps the host build simple; device build
+#   will eventually require PCE_SCANLINE_RENDER — see PCE_PLAN.md §5.
+# ----------------------------------------------------------------------
+set(HUEXPRESS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/huexpress)
+
+file(GLOB HUEXPRESS_ENGINE_SRC CONFIGURE_DEPENDS ${HUEXPRESS_DIR}/engine/*.c)
+
+add_library(huexpress STATIC
+    ${HUEXPRESS_ENGINE_SRC}
+    ${HUEXPRESS_DIR}/thumby_platform.c
+)
+target_include_directories(huexpress PUBLIC
+    ${HUEXPRESS_DIR}/engine
+    ${HUEXPRESS_DIR}/includes
+)
+target_compile_definitions(huexpress PUBLIC
+    THUMBY_BUILD         # swaps ESP-IDF headers for thumby_platform.h
+    LSB_FIRST=1          # H6280 endianness
+    FINAL_RELEASE=1      # drop debug printf/tracing blocks
+    PCE_HUCARD_ONLY      # strips CD_track (74 KB BSS) and PCM buffer (64 KB heap)
+)
+target_compile_options(huexpress PRIVATE
+    -Wno-unused-function -Wno-unused-variable
+    -Wno-unused-but-set-variable -Wno-implicit-fallthrough
+    -Wno-sign-compare -Wno-incompatible-pointer-types
+)
+
+# ----------------------------------------------------------------------
 # ThumbyNES runtime glue
 # ----------------------------------------------------------------------
-add_library(thumbynes STATIC src/nes_core.c src/sms_core.c src/gb_core.c src/md_core.c)
+add_library(thumbynes STATIC
+    src/nes_core.c src/sms_core.c src/gb_core.c src/md_core.c src/pce_core.c)
 target_include_directories(thumbynes PUBLIC src)
-target_link_libraries(thumbynes PUBLIC nofrendo smsplus peanut_gb picodrive)
+target_link_libraries(thumbynes PUBLIC nofrendo smsplus peanut_gb picodrive huexpress)
 
 # ----------------------------------------------------------------------
 # Phase 0 bench harness
@@ -262,6 +294,9 @@ target_link_libraries(gbbench PRIVATE thumbynes)
 
 add_executable(mdbench src/md_bench_main.c)
 target_link_libraries(mdbench PRIVATE thumbynes)
+
+add_executable(pcebench src/pce_bench_main.c)
+target_link_libraries(pcebench PRIVATE thumbynes)
 
 # XIP-borrow variant of mdbench — mmap(PROT_READ) then mdc_load_rom_xip.
 # Reproduces the device's read-only ROM scenario so device-only crashes
@@ -294,7 +329,9 @@ if(SDL2_FOUND)
     target_link_libraries(gbhost PRIVATE thumbynes SDL2::SDL2)
     add_executable(mdhost src/md_host_main.c)
     target_link_libraries(mdhost PRIVATE thumbynes SDL2::SDL2)
-    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost + gbhost + mdhost")
+    add_executable(pcehost src/pce_host_main.c)
+    target_link_libraries(pcehost PRIVATE thumbynes SDL2::SDL2)
+    message(STATUS "ThumbyNES: SDL2 found, building neshost + smshost + gbhost + mdhost + pcehost")
 else()
     # Older SDL2 cmake configs don't export the SDL2:: target.
     find_path(SDL2_INCLUDE_DIR SDL.h PATH_SUFFIXES SDL2)
@@ -312,7 +349,10 @@ else()
         add_executable(mdhost src/md_host_main.c)
         target_include_directories(mdhost PRIVATE ${SDL2_INCLUDE_DIR})
         target_link_libraries(mdhost PRIVATE thumbynes ${SDL2_LIBRARY})
-        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost + gbhost + mdhost")
+        add_executable(pcehost src/pce_host_main.c)
+        target_include_directories(pcehost PRIVATE ${SDL2_INCLUDE_DIR})
+        target_link_libraries(pcehost PRIVATE thumbynes ${SDL2_LIBRARY})
+        message(STATUS "ThumbyNES: SDL2 (manual) found, building neshost + smshost + gbhost + mdhost + pcehost")
     else()
         message(STATUS "ThumbyNES: SDL2 not found, skipping neshost / smshost / gbhost")
     endif()

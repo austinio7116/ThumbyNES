@@ -60,6 +60,19 @@ if (DEFINED THUMBYONE_WITH_MD AND NOT THUMBYONE_WITH_MD)
 endif()
 
 # ----------------------------------------------------------------------
+# PC Engine / TurboGrafx-16 (HuExpress)
+#
+# HuCard-only. Off by default — Phase 1 scaffolding only; the device
+# build can't allocate HuExpress's 220 KB XBUF, so PCE_SCANLINE_RENDER
+# must land first (see PCE_PLAN.md §5). Flipping this ON before the
+# scanline renderer is plumbed will link fine but OOM on first frame.
+# ----------------------------------------------------------------------
+option(THUMBYNES_WITH_PCE "Build PC Engine / TurboGrafx (HuExpress) into ThumbyNES" OFF)
+if (DEFINED THUMBYONE_WITH_PCE AND NOT THUMBYONE_WITH_PCE)
+    set(THUMBYNES_WITH_PCE OFF)
+endif()
+
+# ----------------------------------------------------------------------
 # Vendored Nofrendo NES core (GPLv2 — see vendor/VENDORING.md)
 # ----------------------------------------------------------------------
 set(NOFRENDO_DIR ${NES_ROOT}/vendor/nofrendo)
@@ -375,10 +388,49 @@ target_link_options(picodrive INTERFACE
 )
 endif()  # THUMBYNES_WITH_MD — picodrive block
 
+# ----------------------------------------------------------------------
+# Vendored HuExpress PC Engine core (GPLv2 — see vendor/VENDORING.md)
+#
+# Only built when THUMBYNES_WITH_PCE is ON. The engine tree is already
+# trimmed to HuCard-only (CD, Arcade Card, SuperGrafx, SDL OSD,
+# netplay, debugger all removed) — see vendor/huexpress/.
+# ----------------------------------------------------------------------
+if (THUMBYNES_WITH_PCE)
+    set(HUEXPRESS_DIR ${NES_ROOT}/vendor/huexpress)
+    file(GLOB HUEXPRESS_ENGINE_SRC CONFIGURE_DEPENDS ${HUEXPRESS_DIR}/engine/*.c)
+
+    add_library(huexpress STATIC
+        ${HUEXPRESS_ENGINE_SRC}
+        ${HUEXPRESS_DIR}/thumby_platform.c
+    )
+    target_include_directories(huexpress PUBLIC
+        ${HUEXPRESS_DIR}/engine
+        ${HUEXPRESS_DIR}/includes
+    )
+    target_compile_definitions(huexpress PUBLIC
+        THUMBY_BUILD
+        LSB_FIRST=1
+        FINAL_RELEASE=1
+        PCE_HUCARD_ONLY
+        # TODO: once the scanline renderer is plumbed, flip this on:
+        # PCE_SCANLINE_RENDER
+        # Map IRAM_ATTR so h6280's dispatcher runs from SRAM — same
+        # trick as nofrendo.
+        "IRAM_ATTR=__attribute__((section(\".time_critical.pce\")))"
+    )
+    target_compile_options(huexpress PRIVATE
+        -O3
+        -Wno-array-bounds -Wno-format -Wno-unused-parameter
+        -Wno-unused-function -Wno-unused-variable
+        -Wno-unused-but-set-variable -Wno-implicit-fallthrough
+        -Wno-sign-compare -Wno-incompatible-pointer-types
+        -fno-strict-aliasing
+    )
+endif()
+
 # Cross-platform glue lives outside the device directory; build it
-# here as a small static lib. md_core.c only compiled when MD is
-# enabled — it pulls in PicoDrive headers that don't exist when
-# the picodrive target above is skipped.
+# here as a small static lib. md_core.c / pce_core.c only compiled
+# when their respective cores are enabled.
 set(THUMBYNES_CORE_SRC
     ${NES_ROOT}/src/nes_core.c
     ${NES_ROOT}/src/sms_core.c
@@ -387,6 +439,9 @@ set(THUMBYNES_CORE_SRC
 if (THUMBYNES_WITH_MD)
     list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/md_core.c)
 endif()
+if (THUMBYNES_WITH_PCE)
+    list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/pce_core.c)
+endif()
 add_library(thumbynes_core STATIC ${THUMBYNES_CORE_SRC})
 target_include_directories(thumbynes_core PUBLIC
     ${NES_ROOT}/src
@@ -394,6 +449,11 @@ target_include_directories(thumbynes_core PUBLIC
 )
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
+
+if (THUMBYNES_WITH_PCE)
+    target_compile_definitions(thumbynes_core PUBLIC THUMBYNES_WITH_PCE=1)
+    target_link_libraries(thumbynes_core PUBLIC huexpress)
+endif()
 
 if (THUMBYNES_WITH_MD)
     target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH THUMBYNES_WITH_MD=1)
@@ -466,6 +526,9 @@ if (THUMBYNES_WITH_MD)
     if (MD_IRAM_DYNAMIC)
         list(APPEND NES_SRC_BASE md_iram.c)
     endif()
+endif()
+if (THUMBYNES_WITH_PCE)
+    list(APPEND NES_SRC_BASE pce_run.c)
 endif()
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_SRC_BASE

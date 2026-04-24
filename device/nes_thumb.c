@@ -153,6 +153,18 @@ static void icon_md(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
     fill_rect(fb, x + 2 * s, y + 5 * s, 4 * s, s, 0x0000);
 }
 
+static void icon_pce(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
+    /* PC Engine HuCard: a thin credit-card-shape cartridge standing
+     * vertically, with a small contact strip at the bottom edge. */
+    int w = 6 * s, h = 10 * s;
+    int x = cx - w / 2, y = cy - h / 2;
+    fill_rect(fb, x, y, w, h, fg);
+    /* connector pads at the bottom */
+    fill_rect(fb, x + s, y + h - s, w - 2 * s, s, 0x0000);
+    /* horizontal label stripe near the top */
+    fill_rect(fb, x + s, y + 2 * s, w - 2 * s, s, 0x0000);
+}
+
 static void icon_star(uint16_t *fb, int cx, int cy, int s, uint16_t fg) {
     /* 5-point star, blocky. We use a fixed 9×9 pattern at scale `s`. */
     static const uint8_t star[9][9] = {
@@ -182,6 +194,7 @@ void nes_thumb_icon(uint16_t *fb, int x, int y, uint8_t which, uint16_t tint) {
     case ICON_SYS_GB:   icon_gb  (fb, cx, cy, 1, tint); break;
     case ICON_SYS_GG:   icon_gg  (fb, cx, cy, 1, tint); break;
     case ICON_SYS_MD:   icon_md  (fb, cx, cy, 1, tint); break;
+    case ICON_SYS_PCE:  icon_pce (fb, cx, cy, 1, tint); break;
     case ICON_SYS_STAR: icon_star(fb, cx, cy, 1, tint); break;
     }
 }
@@ -195,8 +208,9 @@ void nes_thumb_placeholder(uint16_t *fb, int x, int y, int size, uint8_t system)
         [ROM_SYS_GG]  = 0x0204, /* dim teal */
         [ROM_SYS_GB]  = 0x1A40, /* dim olive — nods to the LCD green */
         [ROM_SYS_MD]  = 0x1082, /* dim slate blue — nods to the MD */
+        [ROM_SYS_PCE] = 0x2001, /* dim maroon — nods to the PC Engine */
     };
-    uint16_t panel = (system <= ROM_SYS_MD) ? panel_for[system] : 0x18C3;
+    uint16_t panel = (system <= ROM_SYS_PCE) ? panel_for[system] : 0x18C3;
     fill_rect(fb, x, y, size, size, panel);
     rect_outline(fb, x, y, size, size, 0x4208);
 

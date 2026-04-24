@@ -474,3 +474,86 @@ build. Any such patches are listed below as they happen.
    itself; however, old `.sta` files made before the patch still
    hang SMB on load because they don't contain the missing state.
    Re-save on the patched firmware to get working saves.
+
+
+## huexpress/
+
+PC Engine / TurboGrafx-16 HuCard emulation core. Vendored from the
+ODROID-GO port of Hu-Go! / HuExpress (fifth core after nofrendo,
+smsplus, peanut_gb, and picodrive).
+
+- Upstream: https://github.com/pelle7/odroid-go-pcengine-huexpress
+- Commit pinned: `d6a84fd2928aaf704668ad2bee94e93c120d74e2`
+- Original author: HuExpress / Hu-Go! authors (Zeograd et al.),
+  ESP-IDF port by pelle7 et al.
+- License: GPLv2 (see `huexpress/COPYING`)
+
+Only the core emulation is vendored. The following upstream
+directories / files were **not** imported:
+
+- `pcengine-go/main/` — ODROID-GO main loop + ESP-IDF glue
+- `pcengine-go/components/odroid-go-common/` — ODROID hardware layer
+- `pcengine-go/components/huexpress/PCEngine.cpp`, `huexpress.cpp`,
+  `huexpressd.c`, `huexpress.rdef`, `SConscript`, `utils.c`,
+  `view_inf.c`, `view_zp.c`, `osd_*_cd.c`, `osd_sdl_*.c`,
+  `osd_keyboard.c`, `iniconfig.c`, `zipmgr.c` — SDL / Haiku / BSD /
+  Linux frontends, INI config, zip loader, netplay, keyboard
+  bindings, Linux CD-ROM driver, CD audio mixer
+- `engine/cd.c`, `pcecd.c`, `hcd.c`, `lsmp3.c`, `ogglength.c` — CD
+  emulation, MP3 decoder, OGG length helper (CD is out of scope for
+  v1; see PCE_PLAN.md §10)
+- `engine/debug.c`, `dis.c`, `bp.c`, `cheat.c`, `edit_ram.c` —
+  in-core debugger, disassembler, breakpoint manager, memory editor
+- `engine/trans_fx.c`, `subs_eagle.c` — desktop scaler effects
+- `includes/PCEngine.h`, `globals.h`, `huexpressd.h`, `iniconfig.h`,
+  `interf.h`, `osd_*.h`, `utils.h`, `view_*.h`, `zipmgr.h` —
+  matching headers for removed .c files
+
+### Patches applied
+
+1. **`includes/myadd.h`** — guarded the two ESP-IDF
+   `#include "esp_system.h"` / `#include "../../odroid/odroid_debug.h"`
+   lines behind `#ifdef THUMBY_BUILD`, pulling
+   `thumby_platform.h` instead. The feature flags and V3 inline set
+   are unchanged. Also guarded `MY_GFX_AS_TASK` / `MY_SND_AS_TASK`
+   (which assume FreeRTOS) behind the same macro.
+
+2. **`includes/thumby_platform.h`** — new file that defines the
+   ESP-IDF placement attributes (`DRAM_ATTR`, `IRAM_ATTR`,
+   `WORD_ALIGNED_ATTR`, `IROM_ATTR`, `EXT_RAM_ATTR`) as no-ops,
+   stubs `QueueHandle_t` + task handles to `void*`, makes the
+   `odroid_debug_perf_*` macros no-ops, and provides inline
+   `htons`/`ntohs`/`htonl`/`ntohl` so the engine doesn't need
+   `<netinet/in.h>`. Mirrors the `thumby_platform.c/h` pattern used
+   by picodrive.
+
+3. **`engine/sys_dep.h`** — wrapped `#include <netinet/in.h>` in
+   `#ifndef THUMBY_BUILD`. The device toolchain has no BSD sockets.
+
+4. **`engine/pce.c`** — `Track CD_track[0x100]` (~74 KB BSS) wrapped
+   in `#ifndef PCE_HUCARD_ONLY`. HuCard-only builds have no CD track
+   table, so the array is pure waste. The CD code paths that
+   reference it are dead when `CD_emulation != 1` and no callers run
+   them from the HuCard boot path.
+
+5. **`engine/hard_pce.c`** — `hard_pce->PCM` allocation (64 KB for
+   CD ADPCM playback) reduced to a 4-byte placeholder under
+   `PCE_HUCARD_ONLY`, mirroring the idiom the ODROID-GO port
+   already applied to `ac_extra_mem` and `cd_extra_mem`. The pointer
+   stays non-NULL so unused CD fallback paths don't deref NULL.
+
+### Pending work (see PCE_PLAN.md §5, §8)
+
+- **Scanline render mode** — upstream has the `MY_VIDEO_MODE_SCANLINES`
+  macro scaffolded across `gfx.h`, `gfx_render_lines.h`,
+  `gfx_Loop6502.h`, `sprite_RefreshLine.h`. Currently the core
+  allocates a 220 KB XBUF render buffer, which won't fit in the
+  device's 520 KB SRAM alongside the other cores. Enabling scanline
+  mode is tracked in task #12 and gated by `PCE_SCANLINE_RENDER` in
+  `pce_core.c`; `THUMBYNES_WITH_PCE=ON` is unsafe on-device until
+  this is plumbed.
+
+- **Save-state format** — HuExpress has no portable serialisation.
+  Will write a `THPE` format (magic + hard_pce + RAM + VRAM + Pal +
+  SPRAM + IO) and route through `thumby_state_bridge.h` like the
+  other cores.
