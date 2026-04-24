@@ -15,10 +15,19 @@
 #include "pico/pico_types.h"
 #include "pico/pico.h"
 #include "pico/pico_int.h"
+#include "pico/state.h"
 /* fm68k_shutdown() for device heap release. Prototype inline to avoid
  * pulling in the full FAME header (which wants `cpu/fame/fame.h` on
  * picodrive's private include path). */
 void fm68k_shutdown(void);
+
+#ifdef THUMBY_STATE_BRIDGE
+/* Device build: PicoDrive's state.c opens files via libc fopen which
+ * doesn't exist on bare metal. Route file I/O through the same
+ * FatFs-backed shim nofrendo/smsplus/peanut_gb all use for their
+ * save states. Host build keeps the libc stdio path inside PicoState. */
+#  include "thumby_state_bridge.h"
+#endif
 
 #ifdef MD_IRAM_DYNAMIC
 /* Dynamic IRAM infra in device/md_iram.c — memcpies hot MD functions
@@ -298,6 +307,21 @@ void mdc_run_frame(void)
 {
     if (!s_loaded) return;
 
+#ifdef MD_SP_GUARD
+    /* Arm the SP-leak guard after a short warmup. Cart init typically
+     * loads its real SSP within the first dozen instructions; arming
+     * after frame 8 (~140 ms) leaves room for the cart to set up its
+     * stack but still catches genuine post-init SP corruption. */
+    extern volatile unsigned int md_sp_check_armed;
+    static int s_sp_warmup_frames = 0;
+    if (s_sp_warmup_frames < 8) {
+        md_sp_check_armed = 0;
+        s_sp_warmup_frames++;
+    } else {
+        md_sp_check_armed = 1;
+    }
+#endif
+
     /* writeSound callback (capture_audio) runs inside PicoFrame and
      * fills s_mixbuf / s_mixcount before PicoDrive's own PsndClear
      * wipes PicoIn.sndOut. */
@@ -531,16 +555,60 @@ int mdc_audio_pull(int16_t *out, int n)
 uint8_t *mdc_battery_ram (void) { return Pico.sv.data ? (uint8_t *)Pico.sv.data : NULL; }
 size_t   mdc_battery_size(void) { return (size_t)(Pico.sv.end - Pico.sv.start + 1); }
 
+#ifdef THUMBY_STATE_BRIDGE
+/* Bridge callback shims. thumby_state_bridge's read/write return the
+ * fread/fwrite-style item count; PicoStateFP wants size_t return and
+ * passes void* for the file handle. Signatures already match, but we
+ * can't cast function pointers that take different concrete handle
+ * types through an intermediate without a warning, so wrap. eof isn't
+ * exposed by the bridge — fake it by returning 0 (PicoDrive's state
+ * code only calls eof on gzip-compressed streams and our files are
+ * plain-binary). */
+static size_t mdc_bridge_read(void *p, size_t sz, size_t n, void *file) {
+    return thumby_state_read(p, sz, n, (thumby_state_io_t *)file);
+}
+static size_t mdc_bridge_write(void *p, size_t sz, size_t n, void *file) {
+    return thumby_state_write(p, sz, n, (thumby_state_io_t *)file);
+}
+static size_t mdc_bridge_eof(void *file) {
+    (void)file;
+    return 0;
+}
+static int mdc_bridge_seek(void *file, long off, int whence) {
+    return thumby_state_seek((thumby_state_io_t *)file, off, whence);
+}
+#endif
+
 int mdc_save_state(const char *path)
 {
     if (!path || !s_loaded) return -1;
+#ifdef THUMBY_STATE_BRIDGE
+    thumby_state_io_t *io = thumby_state_open(path, "wb");
+    if (!io) return -1;
+    int rc = PicoStateFP(io, 1,
+                         mdc_bridge_read, mdc_bridge_write,
+                         mdc_bridge_eof,  mdc_bridge_seek);
+    thumby_state_close(io);
+    return rc;
+#else
     return PicoState(path, 1);   /* 1 = save */
+#endif
 }
 
 int mdc_load_state(const char *path)
 {
     if (!path || !s_loaded) return -1;
+#ifdef THUMBY_STATE_BRIDGE
+    thumby_state_io_t *io = thumby_state_open(path, "rb");
+    if (!io) return -1;
+    int rc = PicoStateFP(io, 0,
+                         mdc_bridge_read, mdc_bridge_write,
+                         mdc_bridge_eof,  mdc_bridge_seek);
+    thumby_state_close(io);
+    return rc;
+#else
     return PicoState(path, 0);   /* 0 = load */
+#endif
 }
 
 void mdc_shutdown(void)
