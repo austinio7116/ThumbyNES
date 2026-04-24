@@ -264,6 +264,83 @@
 extern volatile unsigned int md_dbg_trap_pc;
 extern volatile unsigned int md_dbg_trap_d1;
 extern volatile unsigned int md_dbg_trap_hit;
+#ifdef MD_SP_GUARD
+/* SP-leak detector — see thumby_platform.c. The ring buffer captures the
+ * PC + opcode + post-execution SP for the last 32 dispatches; when A7
+ * leaves the RAM range, dump the trail and abort. The check fires AFTER
+ * the previous opcode handler returns and BEFORE we fetch+dispatch the
+ * next, so the "last entry in the ring" is the opcode that broke SP. */
+struct md_sp_trace { unsigned int pc; unsigned short opcode; unsigned int sp; };
+extern struct md_sp_trace md_sp_ring[32];
+extern unsigned int md_sp_ring_idx;
+extern void md_sp_check_fail(unsigned int cur_pc,
+                             unsigned int sp_now,
+                             unsigned int d0, unsigned int d1,
+                             unsigned int a0, unsigned int a1,
+                             unsigned int a6);
+extern void md_sp_check_fail_a(unsigned int cur_pc,
+                               unsigned int a2, unsigned int a3,
+                               unsigned int a4, unsigned int a5);
+/* PC trap — set md_dbg_trap_pc_dump to a 24-bit 68K address (or its
+ * full 32-bit form) and the FIRST dispatch landing on it dumps the
+ * trace ring and aborts. Lets gdb examine what JSR/JMP/RTS landed
+ * the cart on a deadlock loop. 0 disables. */
+extern volatile unsigned int md_dbg_trap_pc_dump;
+#define NEXT \
+    do { \
+        u32 _pc_now = (u32)((uintptr_t)PC - BasePC); \
+        /* SP must stay in MD's RAM mirror range (0xE00000-0xFFFFFF) when
+         * masked to 24-bit addressing. The 68K stores all 32 bits of An
+         * but only the low 24 reach the address bus — values like
+         * 0xFFFFBDC4 (high bits set, low 24 = 0xFFBDC4) are valid SP
+         * pointers into RAM mirror. Mask before checking.
+         *
+         * PC must stay out of the cart header area (0x000100-0x0001FF) —
+         * a wild branch landing there means a corrupted return / vector. */ \
+        { \
+            extern volatile unsigned int md_dbg_first_header_pc; \
+            unsigned int _sp_lo24 = ctx->areg[7].D & 0xFFFFFFu; \
+            unsigned int _sp_hi   = _sp_lo24 >> 16; \
+            int _bad = (_sp_hi < 0xE0u); \
+            if (!_bad && _pc_now >= 0x100u && _pc_now < 0x200u \
+                && !md_dbg_first_header_pc) { \
+                md_dbg_first_header_pc = _pc_now; \
+                _bad = 1; \
+            } \
+            if (md_dbg_trap_pc_dump \
+                && ((_pc_now & 0xFFFFFFu) == (md_dbg_trap_pc_dump & 0xFFFFFFu))) { \
+                extern volatile unsigned int md_dbg_trap_visits; \
+                extern void md_dbg_trap_log(unsigned int visit, \
+                                            unsigned int a5); \
+                md_dbg_trap_visits++; \
+                if (md_dbg_trap_visits <= 8 \
+                    || md_dbg_trap_visits == 100 \
+                    || md_dbg_trap_visits == 10000) { \
+                    md_dbg_trap_log(md_dbg_trap_visits, ctx->areg[5].D); \
+                } \
+            } \
+            if (_bad) { \
+                md_sp_check_fail_a(_pc_now, \
+                                   ctx->areg[2].D, ctx->areg[3].D, \
+                                   ctx->areg[4].D, ctx->areg[5].D); \
+                md_sp_check_fail(_pc_now, ctx->areg[7].D, \
+                                 ctx->dreg[0].D, ctx->dreg[1].D, \
+                                 ctx->areg[0].D, ctx->areg[1].D, \
+                                 ctx->areg[6].D); \
+            } \
+        } \
+        if (_pc_now == md_dbg_trap_pc && !md_dbg_trap_hit) { \
+            md_dbg_trap_d1 = ctx->dreg[1].D; \
+            md_dbg_trap_hit = 1; \
+        } \
+        FETCH_WORD(Opcode); \
+        md_sp_ring[md_sp_ring_idx & 31].pc     = _pc_now; \
+        md_sp_ring[md_sp_ring_idx & 31].opcode = Opcode; \
+        md_sp_ring[md_sp_ring_idx & 31].sp     = ctx->areg[7].D; \
+        md_sp_ring_idx++; \
+        JumpTable[Opcode](ctx); \
+    } while (ctx->io_cycle_counter > 0);
+#else
 #define NEXT \
     do { \
         u32 _pc_now = (u32)((uintptr_t)PC - BasePC); \
@@ -274,6 +351,7 @@ extern volatile unsigned int md_dbg_trap_hit;
         FETCH_WORD(Opcode); \
         JumpTable[Opcode](ctx); \
     } while (ctx->io_cycle_counter > 0);
+#endif
 
 #define RET(A) { \
     ctx->io_cycle_counter -= (A);  \

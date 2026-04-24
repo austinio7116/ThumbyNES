@@ -358,6 +358,19 @@ above because they shape the runtime behaviour of the emulator:
   which matches SMS's FILL behaviour; previous FILL was an axis-
   independent stretch that squashed MD sprites horizontally.
 
+19. **`pico/state.c`** — state_save / state_load's first heap op is
+    `buf2 = malloc(CHUNK_LIMIT_W)` (18 KB). That deadlocked inside
+    newlib's malloc mid-cart on the device — heap fragmentation plus
+    the allocator mutex combined into a hang rather than a NULL
+    return. Patched both functions to reuse an externally-provided
+    scratch pointer (`mdc_state_scratch`) when non-NULL, falling back
+    to `malloc` only when the pointer is missing (host build, or if
+    the init-time alloc failed). Matching `free()` calls at both `out:`
+    labels skip the static buffer. `src/md_core.c` provisions a 4 KB
+    scratch in `mdc_init` — big enough for every serializer we
+    actually use (YM2612 ~800 B is the peak) and small enough not to
+    squeeze out PicoInit or cart load.
+
 ## nofrendo/
 
 NES emulation core. Vendored from the **retro-go** project's `retro-core/components/nofrendo` directory.

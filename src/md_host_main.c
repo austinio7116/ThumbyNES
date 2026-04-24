@@ -180,6 +180,20 @@ int main(int argc, char **argv)
         else next_tick = now;
     }
 
+#ifdef MD_SP_GUARD
+    /* If a trap PC was set, surface the visit count at exit so we can
+     * tell "stuck inside" (count = 1) from "outer loop re-enters" (count
+     * grows linearly with frames). */
+    {
+        extern volatile unsigned int md_dbg_trap_visits;
+        extern volatile unsigned int md_dbg_trap_pc_dump;
+        if (md_dbg_trap_pc_dump) {
+            fprintf(stderr, "MDHOST_TRAP visits=%u (trap_pc=0x%06x)\n",
+                    md_dbg_trap_visits, md_dbg_trap_pc_dump);
+        }
+    }
+#endif
+
     /* Final-frame analysis for batch compat testing: dump the raw
      * RGB565 framebuffer and print a summary line that the test
      * driver can grep for. Non-black count is computed across the

@@ -258,6 +258,77 @@ void md_dbg_log_odd_branch(unsigned int site_pc, unsigned int target)
     md_dbg_odd_count = n + 1;
 }
 
+/* ------------ SP-leak detector (host debug only) -----------------------
+ * NEXT macro in famec.c records every dispatched opcode in a 32-entry
+ * ring and asserts A7 stays in RAM (0xFF0000-0xFFFFFF). When SP leaves
+ * RAM, md_sp_check_fail dumps the trail and abort()s so gdb catches the
+ * exact culprit instruction. Compiled in only when MD_SP_GUARD is set. */
+#ifdef MD_SP_GUARD
+#include <stdio.h>
+#include <stdlib.h>
+struct md_sp_trace { unsigned int pc; unsigned short opcode; unsigned int sp; };
+struct md_sp_trace md_sp_ring[32];
+unsigned int md_sp_ring_idx;
+/* Disarmed at startup — cart vectors often declare bogus SSPs (Lemmings,
+ * Kick Off 3, F1, Cannon Fodder all have SSP=0 or 0x01000000) and rely
+ * on the first MOVE.L #realsp,A7 of init code running before any push.
+ * mdc_run_frame arms the guard after a warmup grace period so we only
+ * trip on REAL post-init SP corruption, not boot-vector "garbage". */
+volatile unsigned int md_sp_check_armed = 0;
+volatile unsigned int md_dbg_first_header_pc;
+volatile unsigned int md_dbg_trap_pc_dump;  /* set via env or gdb to PC-trap */
+volatile unsigned int md_dbg_trap_visits;   /* count of times trap PC dispatched */
+
+void md_dbg_trap_log(unsigned int visit, unsigned int a5)
+{
+    extern unsigned int mdbg_get_vdp_status_word(void);
+    unsigned int vsr = mdbg_get_vdp_status_word();
+    fprintf(stderr,
+        "TRAP visit#%u  A5=0x%08x  Pico.video.status=0x%08x  "
+        "(SR_DMA=bit1=%d, PVS_CPUWR=bit18=%d, PVS_DMAFILL=bit20=%d, PVS_DMABG=bit21=%d)\n",
+        visit, a5, vsr,
+        (vsr >> 1) & 1, (vsr >> 18) & 1, (vsr >> 20) & 1, (vsr >> 21) & 1);
+}
+
+void md_sp_check_fail_a(unsigned int cur_pc, unsigned int a2,
+                        unsigned int a3, unsigned int a4, unsigned int a5)
+{
+    if (!md_sp_check_armed) return;
+    fprintf(stderr,
+        "  A2=%08x A3=%08x A4=%08x A5=%08x\n", a2, a3, a4, a5);
+}
+
+void md_sp_check_fail(unsigned int cur_pc,
+                      unsigned int sp_now,
+                      unsigned int d0, unsigned int d1,
+                      unsigned int a0, unsigned int a1,
+                      unsigned int a6)
+{
+    if (!md_sp_check_armed) return;
+    md_sp_check_armed = 0; /* one-shot */
+    extern unsigned int mdbg_get_vdp_status_word(void);
+    unsigned int vsr = mdbg_get_vdp_status_word();
+    fprintf(stderr,
+        "\n*** MD_SP_GUARD: A7 left RAM ***\n"
+        "  current 68K PC : 0x%08x\n"
+        "  A7 (SP)        : 0x%08x  (must satisfy (sp & 0xFF0000) == 0xFF0000)\n"
+        "  D0=%08x D1=%08x A0=%08x A1=%08x A6=%08x\n"
+        "  Pico.video.status = 0x%04x (SR_DMA=bit1=%d, SR_VINT=bit7=%d)\n"
+        "  Last 32 dispatched opcodes (oldest first):\n",
+        cur_pc, sp_now, d0, d1, a0, a1, a6,
+        vsr, (vsr >> 1) & 1, (vsr >> 7) & 1);
+    for (int i = 0; i < 32; i++) {
+        unsigned int k = (md_sp_ring_idx + i) & 31;
+        fprintf(stderr,
+            "    %2d  PC=0x%06x  OP=0x%04x  SP=0x%08x\n",
+            i, md_sp_ring[k].pc & 0xFFFFFF,
+            md_sp_ring[k].opcode, md_sp_ring[k].sp);
+    }
+    fflush(stderr);
+    abort();
+}
+#endif
+
 /* ------ Video mode change callback ----------------------------------- */
 /* PicoDrive calls this whenever the VDP switches between H32/H40 or
  * between 28-row and 30-row modes. The device/host frontend uses it to
