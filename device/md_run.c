@@ -547,6 +547,33 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (r.kind == NES_MENU_ACTION) {
                 switch (r.action_id) {
                 case ACT_SAVE_STATE: {
+                    /* MD state dumps ~150 KB (RAM 64K + VRAM 64K + Z80 +
+                     * VDP + PSG + FM tables). The flash-disk cache only
+                     * holds 32 KB, so an "evict mid-save" loop fires
+                     * dozens of 70 ms flash-sector commits inline — the
+                     * screen looks frozen for 2..4 s with no feedback.
+                     *
+                     * Two-step fix:
+                     *   1. Flush the cache BEFORE the save so it starts
+                     *      empty — 32 KB of headroom soaks the first
+                     *      chunks without triggering any commits.
+                     *   2. Paint a "saving state" banner and push the
+                     *      framebuffer to the LCD so the user sees
+                     *      progress instead of an apparent hang.
+                     * The remaining flash commits happen in the
+                     * post-save flush; the user then sees "state saved"
+                     * (or "save fail") on the final OSD update. */
+                    nes_flash_disk_flush();
+                    {
+                        const char *txt = "saving state";
+                        int tw = nes_font_width(txt);
+                        memset(fb + 58 * 128, 0, NES_FONT_CELL_H * 128 * 2);
+                        nes_font_draw(fb, txt, (128 - tw) / 2, 60, 0xFFE0);
+                        nes_lcd_wait_idle();
+                        nes_lcd_present(fb);
+                        nes_lcd_wait_idle();
+                    }
+
                     int rc = mdc_save_state(sta_path);
                     nes_flash_disk_flush();
                     snprintf(osd_text, sizeof(osd_text),
@@ -555,6 +582,20 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     break;
                 }
                 case ACT_LOAD_STATE: {
+                    /* Smaller concern on load — reads stream straight
+                     * from XIP flash without mid-read commits — but
+                     * still show progress so a slow RAM rehydrate
+                     * doesn't look frozen either. */
+                    {
+                        const char *txt = "loading state";
+                        int tw = nes_font_width(txt);
+                        memset(fb + 58 * 128, 0, NES_FONT_CELL_H * 128 * 2);
+                        nes_font_draw(fb, txt, (128 - tw) / 2, 60, 0xFFE0);
+                        nes_lcd_wait_idle();
+                        nes_lcd_present(fb);
+                        nes_lcd_wait_idle();
+                    }
+
                     int rc = mdc_load_state(sta_path);
                     snprintf(osd_text, sizeof(osd_text),
                               rc == 0 ? "state loaded" : "load fail");
