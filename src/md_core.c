@@ -143,6 +143,16 @@ static bool      s_loaded;
 /* We malloc and own the ROM buffer handed to PicoCartInsert. */
 static uint8_t  *s_rom_copy;
 
+/* Pre-allocated scratch buffer for state.c's malloc calls in
+ * state_save (CHUNK_LIMIT_W = 18772) and state_load (CHUNK_LIMIT_R
+ * = 0x10960 = 68448). Sized for the larger of the two so one
+ * buffer covers both paths. Exported so state.c's patched malloc
+ * can find it. Alloc happens in mdc_init, while the heap is still
+ * pristine; the runtime heap state mid-cart is what deadlocked
+ * newlib's malloc in the save path. */
+#define MDC_STATE_SCRATCH_SIZE 0x10960
+uint8_t *mdc_state_scratch = NULL;
+
 /* PicoDrive calls writeSound at end-of-frame with length-in-bytes,
  * IMMEDIATELY before PsndClear wipes the buffer. PicoIn.opt no
  * longer sets POPT_EN_STEREO so samples arrive as mono int16 —
@@ -180,6 +190,20 @@ int mdc_init(int region, int sample_rate)
         if (!s_fb) return -1;
     }
 #endif
+
+    /* Pre-allocate the state-save scratch buffer at init time while
+     * the heap is still pristine. state.c's state_save does
+     *   buf2 = malloc(CHUNK_LIMIT_W)  // 18772 bytes
+     * as its first heap op, which under our tight-SRAM MD runtime
+     * deadlocked in newlib's malloc after FAME / PicoDrive had
+     * chewed through the heap mid-cart. Our vendor patch in
+     * state.c (see VENDORING.md) reuses mdc_state_scratch when
+     * it's non-NULL, avoiding any runtime alloc during save/load. */
+    if (!mdc_state_scratch) {
+        mdc_state_scratch = (uint8_t *)malloc(MDC_STATE_SCRATCH_SIZE);
+        /* Non-fatal if this fails — state_save/load will fall back
+         * to malloc() if mdc_state_scratch stays NULL. */
+    }
 
     PicoInit();
 

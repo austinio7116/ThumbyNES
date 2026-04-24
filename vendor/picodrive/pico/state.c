@@ -234,9 +234,20 @@ static int state_save(void *file)
   int retval = -1;
   int len;
 
-  buf2 = malloc(CHUNK_LIMIT_W);
-  if (buf2 == NULL)
-    return -1;
+  /* THUMBYNES PATCH: newlib malloc deadlocks mid-cart on the device
+   * when called from the save-state path (heap exhaustion + mutex
+   * interaction). Use a pre-allocated scratch buffer if md_core
+   * installed one at init-time. See md_core.c:mdc_state_scratch. */
+  {
+    extern unsigned char *mdc_state_scratch;
+    if (mdc_state_scratch) {
+      buf2 = mdc_state_scratch;
+    } else {
+      buf2 = malloc(CHUNK_LIMIT_W);
+      if (buf2 == NULL)
+        return -1;
+    }
+  }
 
   areaWrite("PicoSEXT", 1, 8, file);
   areaWrite(&ver, 1, 4, file);
@@ -376,8 +387,13 @@ static int state_save(void *file)
   retval = 0;
 
 out:
-  if (buf2 != NULL)
-    free(buf2);
+  /* THUMBYNES PATCH: don't free the pre-allocated scratch — it's
+   * owned by md_core and reused across save/load calls. */
+  {
+    extern unsigned char *mdc_state_scratch;
+    if (buf2 != NULL && buf2 != mdc_state_scratch)
+      free(buf2);
+  }
   return retval;
 }
 
@@ -436,9 +452,19 @@ static int state_load(void *file)
   memset(buff_s68k, 0, sizeof(buff_s68k));
   memset(buff_z80, 0, sizeof(buff_z80));
 
-  buf = malloc(CHUNK_LIMIT_R);
-  if (buf == NULL)
-    return -1;
+  /* THUMBYNES PATCH: reuse the pre-allocated md_core scratch if
+   * present — same rationale as state_save (see above). The scratch
+   * is sized for CHUNK_LIMIT_R so it covers load's buffer too. */
+  {
+    extern unsigned char *mdc_state_scratch;
+    if (mdc_state_scratch) {
+      buf = mdc_state_scratch;
+    } else {
+      buf = malloc(CHUNK_LIMIT_R);
+      if (buf == NULL)
+        return -1;
+    }
+  }
 
   g_read_offs = 0;
   CHECKED_READ(8, header);
@@ -651,7 +677,12 @@ readend:
   retval = 0;
 
 out:
-  free(buf);
+  /* THUMBYNES PATCH: don't free the pre-allocated scratch. */
+  {
+    extern unsigned char *mdc_state_scratch;
+    if (buf != NULL && buf != mdc_state_scratch)
+      free(buf);
+  }
   return retval;
 }
 
