@@ -401,6 +401,27 @@ above because they shape the runtime behaviour of the emulator:
     EMUBackup/ corpus. No host/device divergence — FAME_BIG_ENDIAN
     is set on both LE-relative-to-68K targets.
 
+21. **`pico/memory.c`** — `padTHLatency[3]` and `padTLLatency[3]` are
+    file-scope statics that store absolute `SekCyclesDone()` values
+    (set when the cart writes the pad control register and consumed
+    in `port_read` via `CYCLES_GE`). PicoInit memsets struct Pico so
+    SekCyclesDone restarts at ~0 on each cart load — but these
+    statics keep the previous cart's huge cycle counts.
+    `CYCLES_GE(0, 999999)` then evaluates as signed-false, so
+    `port_read` flips bit 4 of the pad input via `in ^= 0x10`. Bit
+    4 happens to be MD pad **B** when TH=1, so the cart sees B as
+    held until SekCyclesDone catches up — Cannon Fodder fires
+    constantly, Sonic ignores the first jump press. New
+    `PicoMemReset()` clears both arrays + defensively resets
+    `port_readers[]` to `{3btn, 3btn, nothing}`. Called from
+    `mdc_init` after `PicoInit`.
+
+    Bug only manifests on second-and-later cart loads within the
+    same slot session (picker → cart → picker → cart). A full slot
+    reload (cart → in-game-menu → "Back to lobby" → re-enter slot)
+    re-zeros BSS at chain-image boot, masking the bug — which is
+    why fresh-boot launches always work.
+
 ## nofrendo/
 
 NES emulation core. Vendored from the **retro-go** project's `retro-core/components/nofrendo` directory.

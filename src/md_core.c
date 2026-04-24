@@ -214,6 +214,15 @@ int mdc_init(int region, int sample_rate)
     }
 
     PicoInit();
+    /* PicoInit memsets struct Pico but not memory.c's file-scope
+     * padTHLatency / padTLLatency / port_readers statics. Stale TH/TL
+     * latency values from a previous cart make the new cart's first
+     * pad reads see bit 4 (MD B) flipped to "held" until SekCyclesDone
+     * catches up. Explicit reset here. See VENDORING patch 21. */
+    {
+        extern void PicoMemReset(void);
+        PicoMemReset();
+    }
 
     /* sample_rate == 0 is the runtime "silent mode" — the menu
      * AUDIO=OFF picks it. We strip Z80 + FM + PSG from PicoIn.opt

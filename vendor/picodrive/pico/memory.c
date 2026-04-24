@@ -493,6 +493,28 @@ static port_read_func *port_readers[3] = {
 static int padTHLatency[3];
 static int padTLLatency[3];
 
+/* ThumbyNES: padTHLatency / padTLLatency are file-scope statics that
+ * track absolute SekCyclesDone() values. PicoInit memsets struct Pico
+ * so SekCyclesDone() restarts at ~0 on each cart load — but these
+ * statics keep the previous cart's huge cycle counts. CYCLES_GE then
+ * evaluates `(int)(0 - 999999) >= 0` as FALSE, so port_read's TH-mask
+ * bit (0x40) is suppressed AND port_read's TL bit (0x10) gets flipped
+ * via `in ^= 0x10` for the first ~999999 cycles of the new cart. The
+ * TL flip presents as MD pad bit 4 (B button) reading as held until
+ * SekCyclesDone() catches up — Cannon Fodder fires constantly,
+ * Sonic's jump only registers on release-edge, etc. Reset them here
+ * via PicoMemReset(), called by our mdc_init wrapper. port_readers
+ * also gets cycled back to its defaults defensively, in case a
+ * previous cart selected mouse / 6btn / team. */
+void PicoMemReset(void)
+{
+  memset(padTHLatency, 0, sizeof(padTHLatency));
+  memset(padTLLatency, 0, sizeof(padTLLatency));
+  port_readers[0] = read_pad_3btn;
+  port_readers[1] = read_pad_3btn;
+  port_readers[2] = read_nothing;
+}
+
 static NOINLINE u32 port_read(int i)
 {
   u32 data_reg = PicoMem.ioports[i + 1];
