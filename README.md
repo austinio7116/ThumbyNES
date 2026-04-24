@@ -212,12 +212,17 @@ for `name + 16` so the leading `/` and any sidecar suffix
 | **LB**             | Select | — | — | Select | **Start** |
 | **RB**             | Start | Pause | Start | Start | C (heavy attack) |
 
-MD's **Start** is simply **LB** — held works for "press START to continue"
-prompts, and tap dismisses level-clear screens. MENU tap is reserved for
-scale-mode cycling (FIT / FILL / CROP). MENU+A still saves a screenshot,
-and MENU long-hold opens the in-game menu. 6-button sub-mode (X/Y/Z/MODE)
-stays available via the in-game toggle for any future rebind; by default
-it stays off and those bits are stripped so carts read a plain 3-button pad.
+MD's **Start** is **LB** — but on MD specifically, START fires on
+RELEASE (a tap, not the press) so that holding LB can engage the
+[CROP / FILL pan chord](#md-pan-chord-lb--d-pad) below without
+spuriously hitting Start. Held LB still works for "press START to
+continue" prompts via the release pulse, and tap-dismiss of
+level-clear screens behaves as expected. MENU tap is reserved for
+scale-mode cycling (FIT / FILL / CROP). MENU+A still saves a
+screenshot, and MENU long-hold opens the in-game menu. 6-button
+sub-mode (X/Y/Z/MODE) stays available via the in-game toggle for
+any future rebind; by default it stays off and those bits are
+stripped so carts read a plain 3-button pad.
 
 ### MENU chords during play
 
@@ -230,7 +235,34 @@ in-game menu (open with MENU long-hold) instead.
 | **MENU long hold** (≥ 500 ms, no chord) | Open the **in-game menu** |
 | **MENU + A** | Save a screenshot (32×32 + 64×64 sidecars) |
 | **MENU + dpad** *(GG / GB only)* | Pan the live CROP viewport while the cart keeps running |
-| **D-pad** *(MD CROP only, no MENU)* | Pan the CROP viewport. The cart keeps running but doesn't see directional input; face buttons / Start / C still reach it. |
+
+### MD pan chord (LB + d-pad)
+
+In CROP and FILL modes, **hold LB and press a d-pad direction** to
+pan the source viewport while the cart keeps running. CROP gets
+full XY pan (the 128×128 window slides anywhere inside the cart's
+native 320×224 / 256×224 frame); FILL gets left/right pan within
+the centre crop (Y always fills the screen). Pan offsets persist
+across pan sessions until the cart unloads.
+
+While the chord is active:
+
+- The cart sees no d-pad input — the d-pad is yours, for panning.
+- LB → MD START is suppressed so the game never sees a Start press
+  during a pan move.
+- Face buttons (A, B, RB → C) still reach the cart, so action games
+  keep responding to the rest of the input. Useful for "see the
+  HUD off-screen / dialog box / map / minimap" while you keep
+  jumping or punching.
+
+On release of LB:
+
+- If no pan motion happened during the hold, START pulses to the
+  cart for a few frames so a "tap LB" still acts as Start. (This
+  is what lets LB feel like a normal Start button when you're not
+  panning.)
+- If you panned during the hold, the START pulse is swallowed so
+  chord exit doesn't accidentally pause the game.
 
 ### At boot
 
@@ -386,13 +418,29 @@ core state to a single `<rom>.sta` sidecar via the in-game menu's
 | **nofrendo** | full machine state via its `state_save` / `state_load` | uses an `SNSS`-format file written through the FatFs bridge |
 | **smsplus** | full machine state via its `system_save_state` / `system_load_state` | same FatFs bridge |
 | **peanut_gb** | `struct gb_s` + `minigb_apu_ctx` (~17 KB) | direct memcpy with a `'GBCS'` header (magic / version / size); function pointers re-attached on load |
+| **PicoDrive (MD)** | full PicoDrive `PicoStateFP` chunked serializer (~130–200 KB per slot) | same FatFs bridge; routes `state_save` / `state_load`'s internal mallocs through a 4 KB scratch buffer pre-allocated at `mdc_init` (see below) |
 
-Both retro-go cores use libc stdio internally for the save/load
-calls. On the device build the relevant `fopen` / `fwrite` / `fread`
-/ `fseek` / `fclose` calls in `state.c` are remapped to a tiny FatFs
-shim (`device/thumby_state_bridge.[ch]`) via a top-of-file `#ifdef
+The retro-go cores and PicoDrive both use libc stdio internally for
+the save/load calls. On the device build the relevant `fopen` /
+`fwrite` / `fread` / `fseek` / `fclose` calls in their `state.c`
+files are remapped to a tiny FatFs shim
+(`device/thumby_state_bridge.[ch]`) via a top-of-file `#ifdef
 THUMBY_STATE_BRIDGE` block. The host build still uses real stdio
 without any change.
+
+**MD save-state malloc fix (v1.06):** PicoDrive's `state_save` /
+`state_load` internally `malloc`s a chunk-staging buffer
+(`CHUNK_LIMIT_W`/`R` upper bounds are conservative for Mega-CD /
+32X — neither built here — but those bounds are 18 KB and 68 KB
+respectively). On a plain MD cart the largest chunk that actually
+runs is `YM2612PicoStateSave3`, which writes ~800 bytes. By the
+time the in-game menu fires, the runtime heap has fragmented past
+the point where newlib can satisfy a 70 KB request, and save state
+hung silently inside the first malloc. The fix is to pre-allocate
+a 4 KB scratch buffer at `mdc_init` (while the heap is pristine)
+and route `state.c`'s `malloc(size)` calls to it via the bridge.
+4 KB is comfortable headroom for the largest plain-MD chunk and
+small enough that the alloc always succeeds at init.
 
 When the menu is open the runner is fully paused — frame, audio and
 input are all suspended — so saves and loads are atomic relative to
@@ -488,6 +536,14 @@ edges (scoreboards, end-of-stage indicators, lives counters) you'll
 lose some of it — so FIT / BLEND remain the defaults; FILL is
 there when you want the maximum playable screen area.
 
+On **Mega Drive** specifically you can shift the centre crop left
+or right while the cart keeps running: hold **LB + ←/→** to pan
+the X window within the source frame's full 320 / 256 columns.
+Useful for peeking at HUD elements that the centre crop hides on
+either edge. The pan offset persists until cart unload. See
+[MD pan chord](#md-pan-chord-lb--d-pad) for the full chord
+behaviour.
+
 FILL is always area-weighted blended; the BLEND toggle doesn't
 apply (there's no nearest-neighbour alternative offered). Game Gear
 doesn't expose FILL in the cycle (its existing FIT already fills
@@ -507,14 +563,20 @@ picture. Three flavours:
   game**. **MENU + dpad** pans the viewport while held. Designed
   for the handhelds where reading menus while the cart breathes is
   the point.
-- **Pan-override CROP** (MD): tap MENU to enter CROP. The cart keeps
-  running — we can't cleanly pause PicoDrive's 68K/Z80/VDP pipeline
-  mid-frame — but the **D-pad always pans the viewport** and the
-  cart sees no directional input while CROP is active. Face buttons
-  (A/B), Start (LB), and C (RB) still reach the cart so it continues
-  to progress. Designed for the MD's much-larger-than-128px native
-  frame where pan is essential to read HUDs or signage that live
-  outside the centred 128-col window.
+- **Play-while-cropped CROP** (MD, *new in 1.06*): tap MENU to
+  enter CROP. The cart keeps running — we can't cleanly pause
+  PicoDrive's 68K/Z80/VDP pipeline mid-frame — and the d-pad goes
+  to the cart by default so the game stays fully playable in the
+  cropped view. Hold **LB** to engage the pan chord: while LB is
+  held the d-pad pans the source viewport instead, and LB → MD
+  START is suppressed so you don't accidentally pause. Release LB
+  with no pan motion → START pulses (so a tap LB still acts as
+  Start); release after panning → START is swallowed. Designed for
+  the MD's much-larger-than-128px native frame where reading HUDs
+  / signage / minimaps off the centred crop is the point. *(Prior
+  to 1.06 the d-pad always panned the CROP viewport in MD —
+  releasing the cart's d-pad input permanently. The chord change
+  restores normal play in CROP.)*
 
 The CROP pan range is whatever the source frame allows: NES has 128
 horizontal × 112 vertical of slack, SMS has 128 × 64, GB and GG both
@@ -1148,6 +1210,27 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.06 — Mega Drive compat + pan chord
+
+- **Mega Drive compatibility — 27/41 to 41/41 in our test set.** A
+  long-standing bug in the vendored PicoDrive 68K core mis-handled
+  code fetched from cart RAM (a common pattern: games copy small
+  routines to RAM for DMA waits, music callbacks, jump tables).
+  Newly-playable carts include Xenon 2, Castle of Illusion, FIFA /
+  FIFA 98, Cannon Fodder, Gunstar Heroes, Brian Lara Cricket 96,
+  Theme Park (was a hard crash), Rock n' Roll Racing, Sonic &
+  Knuckles, Street Fighter II SCE, Thunder Force IV. No regressions.
+- **MD save / load state — fixed.** Save state in the in-game menu
+  used to silently hang on most carts; now works reliably across
+  the library.
+- **CROP / FILL pan chord — hold LB + d-pad.** Pans the source
+  viewport without losing game control. CROP gets full XY pan;
+  FILL adds left/right pan within the aspect-preserving centre
+  crop. **LB → MD START now fires on release** so a tap still acts
+  as START and the chord never accidentally pauses on chord exit.
+  Replaces the always-on CROP pan from 1.05 (which permanently
+  stole the d-pad from cart input).
 
 ### v1.05 — Mega Drive / Genesis
 

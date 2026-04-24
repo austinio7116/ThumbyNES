@@ -371,6 +371,36 @@ above because they shape the runtime behaviour of the emulator:
     actually use (YM2612 ~800 B is the peak) and small enough not to
     squeeze out PicoInit or cart load.
 
+20. **`cpu/fame/fame.h` + `cpu/fame/famec.c` + `pico/memory.c`** —
+    per-bank fetch endianness for FAME's PC pipeline. ROM is stored
+    raw big-endian (XIP from flash on device, malloc'd buffer on
+    host); WRAM is stored host-native u16 layout (so 68K data reads
+    via `MAKE_68K_ROM_READ16` are a single native u16 access). FAME's
+    fetch macros (`FETCH_WORD` / `FETCH_LONG` / `FETCH_SWORD` /
+    `FETCH_BYTE` / `FETCH_SBYTE` / `GET_SWORD` / `DECODE_EXT_WORD`)
+    used to unconditionally bswap under `FAME_BIG_ENDIAN` — correct
+    for ROM, silently wrong for WRAM. Carts that JSR into a
+    RAM-resident routine got the wrong opcode (Xenon 2's JMP table
+    read as F-line exceptions → vector to header → hang) or the
+    wrong immediate byte (Brian Lara's `BTST #1, (A5)` read as
+    `BTST #0, (A5)` — bit 0 = SR_PAL = always 1 in PAL mode → DMA
+    poll never exits).
+
+    Fix: `M68K_CONTEXT` carries a parallel `FetchSwap[256]`
+    populated at `cpu68k_map_set` time (1 = raw-BE source, 0 =
+    native-host source). The direct-to-Fetch[] write in
+    `PicoMemSetup` for the ROM mapping (under `FAME_BIG_ENDIAN`)
+    sets FetchSwap[i]=1 for the same banks. `SET_PC` caches the
+    per-bank flag into `fetch_swap_now` once per rebase. The fetch
+    macros branch on the cached flag in the hot path. Cost: +256
+    bytes BSS in `PicoCpuFM68k`, one byte-load + one branch per
+    opcode dispatch; the branch predictor pins it (ROM is 99%+ of
+    fetches) so steady-state cost is effectively zero.
+
+    Test set went from 27/41 → 41/41 OK on 1 MB MD ROMs in our
+    EMUBackup/ corpus. No host/device divergence — FAME_BIG_ENDIAN
+    is set on both LE-relative-to-68K targets.
+
 ## nofrendo/
 
 NES emulation core. Vendored from the **retro-go** project's `retro-core/components/nofrendo` directory.
