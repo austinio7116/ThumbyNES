@@ -33,29 +33,6 @@
 #include "hardware/gpio.h"
 #include "ff.h"
 
-/* Progress callback for MD save/load state. PicoDrive's state.c calls
- * PicoStateProgressCB (a global fn-pointer it defines) before each
- * chunk write, passing a string like "Saving.. RAM" or "Loading.. VDP".
- * We repaint the LCD with the current string so the user can see where
- * the operation is sitting in real time — especially useful when the
- * 140 KB MD dump stalls mid-save on a flash-sector commit, or if a
- * specific chunk actually hangs indefinitely. md_save_progress_fb is
- * set by the save/load action handler to the live framebuffer. */
-uint16_t *md_save_progress_fb;
-void md_save_progress_cb(const char *str) {
-    if (!md_save_progress_fb || !str) return;
-    /* Two-line banner so short chunk names fit centred. Clear a wider
-     * strip than the normal 1-line OSD — the strings are up to ~22
-     * chars ("Saving.. FM_TIMERS" etc.). */
-    memset(md_save_progress_fb + 56 * 128, 0, NES_FONT_CELL_H * 3 * 128 * 2);
-    int tw = nes_font_width(str);
-    if (tw > 126) tw = 126;
-    nes_font_draw(md_save_progress_fb, str, (128 - tw) / 2, 60, 0xFFE0);
-    nes_lcd_wait_idle();
-    nes_lcd_present(md_save_progress_fb);
-    nes_lcd_wait_idle();
-}
-
 /* Pin map — same as every other runner. */
 #define BTN_LEFT_GP   0
 #define BTN_UP_GP     1
@@ -570,21 +547,13 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (r.kind == NES_MENU_ACTION) {
                 switch (r.action_id) {
                 case ACT_SAVE_STATE: {
-                    /* MD state dumps ~140 KB (RAM 64K + VRAM 64K + Z80 +
-                     * VDP + PSG + FM tables). Per-chunk progress hook
-                     * lands the current chunk name in osd_text and
-                     * repaints the LCD so we can see exactly where a
-                     * slow write sits — and if it actually hangs, which
-                     * chunk is the culprit. Also flush the flash-disk
-                     * cache up-front so the save starts with clean
-                     * cache slots and the first 32 KB goes through
-                     * without triggering commits. */
-                    extern void (*PicoStateProgressCB)(const char *str);
-                    extern uint16_t *md_save_progress_fb;
-                    extern void md_save_progress_cb(const char *str);
-                    md_save_progress_fb = fb;
-                    PicoStateProgressCB = md_save_progress_cb;
-
+                    /* MD state dumps ~140 KB. The flash-disk cache only
+                     * holds 32 KB, so evictions mid-save fire inline
+                     * flash commits (~70 ms each). Flush the cache
+                     * up-front so the save starts with clean slots and
+                     * the first 32 KB writes commit-free, then paint a
+                     * single "saving state" banner so the user sees
+                     * progress during the unavoidable 2..3 s pause. */
                     nes_flash_disk_flush();
                     {
                         const char *txt = "saving state";
@@ -597,7 +566,6 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     }
 
                     int rc = mdc_save_state(sta_path);
-                    PicoStateProgressCB = NULL;
                     nes_flash_disk_flush();
                     snprintf(osd_text, sizeof(osd_text),
                               rc == 0 ? "state saved" : "save fail");
@@ -605,12 +573,6 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     break;
                 }
                 case ACT_LOAD_STATE: {
-                    extern void (*PicoStateProgressCB)(const char *str);
-                    extern uint16_t *md_save_progress_fb;
-                    extern void md_save_progress_cb(const char *str);
-                    md_save_progress_fb = fb;
-                    PicoStateProgressCB = md_save_progress_cb;
-
                     {
                         const char *txt = "loading state";
                         int tw = nes_font_width(txt);
@@ -622,7 +584,6 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     }
 
                     int rc = mdc_load_state(sta_path);
-                    PicoStateProgressCB = NULL;
                     snprintf(osd_text, sizeof(osd_text),
                               rc == 0 ? "state loaded" : "load fail");
                     osd_text_ms = 1000;
