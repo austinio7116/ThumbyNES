@@ -144,13 +144,20 @@ static bool      s_loaded;
 static uint8_t  *s_rom_copy;
 
 /* Pre-allocated scratch buffer for state.c's malloc calls in
- * state_save (CHUNK_LIMIT_W = 18772) and state_load (CHUNK_LIMIT_R
- * = 0x10960 = 68448). Sized for the larger of the two so one
- * buffer covers both paths. Exported so state.c's patched malloc
- * can find it. Alloc happens in mdc_init, while the heap is still
- * pristine; the runtime heap state mid-cart is what deadlocked
- * newlib's malloc in the save path. */
-#define MDC_STATE_SCRATCH_SIZE 0x10960
+ * state_save / state_load. PicoDrive's upper bounds (CHUNK_LIMIT_W =
+ * 18 772, CHUNK_LIMIT_R = 68 448) are conservative for Mega-CD /
+ * 32X (we build neither). The serializers that actually run on a
+ * plain MD cart write at most ~800 bytes (YM2612PicoStateSave3);
+ * IOPORTSv2, FM_TIMERS, VDP, PSG are all in the tens of bytes.
+ *
+ * Sizing: 4 KB gives comfortable headroom over the ~800-byte peak.
+ * Allocation happens in mdc_init while the heap is still pristine —
+ * the runtime heap state mid-cart is what deadlocked newlib's malloc
+ * in the save path (save state hung on 'stage: PicoStateFP' before
+ * any chunk callback, i.e. stuck in state_save's first malloc).
+ * 4 KB is small enough the alloc always succeeds at init; larger
+ * would squeeze out PicoInit / cart load. */
+#define MDC_STATE_SCRATCH_SIZE 4096
 uint8_t *mdc_state_scratch = NULL;
 
 /* PicoDrive calls writeSound at end-of-frame with length-in-bytes,
