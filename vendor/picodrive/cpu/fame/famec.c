@@ -304,9 +304,12 @@ extern volatile unsigned int md_dbg_trap_hit;
 #define SET_PC(A)               \
 { \
     u32 pc = A; \
+    unsigned int _idx; \
     FORCE_ALIGNMENT(pc); \
-    BasePC = ctx->Fetch[(pc >> M68K_FETCHSFT) & M68K_FETCHMASK];    \
+    _idx = (pc >> M68K_FETCHSFT) & M68K_FETCHMASK; \
+    BasePC = ctx->Fetch[_idx];    \
     PC = (u16*)((pc & M68K_ADR_MASK) + BasePC);	\
+    ctx->fetch_swap_now = ctx->FetchSwap[_idx]; \
 }
 
 #else
@@ -314,10 +317,13 @@ extern volatile unsigned int md_dbg_trap_hit;
 #define SET_PC(A)               \
 { \
     u32 pc = A; \
+    unsigned int _idx; \
     FORCE_ALIGNMENT(pc); \
-    BasePC = ctx->Fetch[(pc >> M68K_FETCHSFT) & M68K_FETCHMASK];    \
+    _idx = (pc >> M68K_FETCHSFT) & M68K_FETCHMASK; \
+    BasePC = ctx->Fetch[_idx];    \
     BasePC -= pc & 0xFF000000;    \
     PC = (u16*)(pc + BasePC); \
+    ctx->fetch_swap_now = ctx->FetchSwap[_idx]; \
 }
 
 #endif
@@ -400,27 +406,47 @@ extern volatile unsigned int md_dbg_trap_hit;
 	 * result the LE-default branch gets from pre-swapped ROM. Most ROMs
 	 * don't trip the bug early because FETCH_LONG is only used for
 	 * absolute-long operands (TST.L abs, MOVE.L #imm, etc.) — MLF and
-	 * Speedball 2 hit it within the first instruction at reset. */
-	#define FETCH_LONG(A)                                        \
-		(A) = ((u32)__builtin_bswap16(PC[0]) << 16)              \
-		    |  (u32)__builtin_bswap16(PC[1]);                    \
+	 * Speedball 2 hit it within the first instruction at reset.
+	 *
+	 * Mixed-endian source fix: the bswap is correct only when PC points
+	 * at raw-BE ROM. WRAM stores native-LE u16s (so a host u16 read
+	 * already returns the BE-meaning value the cart wrote). The
+	 * fetch_swap_now flag (set per-bank by SET_PC from FetchSwap[])
+	 * gates the bswap so the same FETCH_* path serves both. Byte
+	 * fetches need no gating: byte[PC+1] in memory is the same physical
+	 * byte regardless of u16 storage layout, so (*PC) >> 8 returns the
+	 * correct byte either way. */
+	#define _FAME_BSWAP_W(w) (((unsigned)(w) & 0xFF) << 8 | ((unsigned)(w) >> 8))
+	#define _FAME_MAYBE_BSWAP_W(w) \
+		(ctx->fetch_swap_now ? _FAME_BSWAP_W(w) : (unsigned)(w))
+	/* The "BE byte" the 68K wants is the LSB of the big-endian word at
+	 * PC. In raw-BE memory that's byte[PC+1] in storage — read as the
+	 * HIGH byte of the host's LE u16 ((*PC) >> 8). In native-LE storage
+	 * (WRAM under FAME_BIG_ENDIAN) the BE-meaning value equals the
+	 * native u16, so its LSB is just (*PC) & 0xFF. */
+	#define _FAME_MAYBE_LOW_B(w) \
+		(ctx->fetch_swap_now ? ((unsigned)(w) >> 8) : ((unsigned)(w) & 0xFF))
+
+	#define FETCH_LONG(A)                                                 \
+		(A) = ((u32)_FAME_MAYBE_BSWAP_W(PC[0]) << 16)                     \
+		    |  (u32)_FAME_MAYBE_BSWAP_W(PC[1]);                           \
 		PC += 2;
 
 	#define GET_SWORD                           \
-		((s16)(((*PC & 0xFF) << 8) | (*PC >> 8)))
+		((s16)_FAME_MAYBE_BSWAP_W(*PC))
 
 	#define FETCH_BYTE(A)                       \
-		(A) = (*PC++) >> 8;
+		(A) = _FAME_MAYBE_LOW_B(*PC); PC++;
 
 	#define FETCH_SBYTE(A)                      \
-		(A) = (s8)((*PC++) >> 8);
+		(A) = (s8)_FAME_MAYBE_LOW_B(*PC); PC++;
 
 	#define FETCH_WORD(A)                       \
-		(A) = ((*PC & 0xFF) << 8) | (*PC >> 8);     \
+		(A) = _FAME_MAYBE_BSWAP_W(*PC);         \
 		PC++;
 
 	#define FETCH_SWORD(A)                          \
-		(A) = (s16)(((*PC & 0xFF) << 8) | (*PC >> 8));  \
+		(A) = (s16)_FAME_MAYBE_BSWAP_W(*PC);        \
 		PC++;
 
 	/* ThumbyNES: the original BIG_ENDIAN DECODE_EXT_WORD reads *PC
@@ -434,7 +460,7 @@ extern volatile unsigned int md_dbg_trap_hit;
 	 * after bswap. */
 	#define DECODE_EXT_WORD     \
 	{                           \
-	    u32 ext = __builtin_bswap16(*PC++);                     \
+	    u32 ext = _FAME_MAYBE_BSWAP_W(*PC); PC++;               \
 	                                                            \
 	    adr += (s8)(ext);                                       \
 	    if (ext & 0x0800) adr += DREGs32(ext >> 12);            \

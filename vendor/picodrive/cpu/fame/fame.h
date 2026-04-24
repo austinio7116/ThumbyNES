@@ -158,6 +158,21 @@ typedef struct
 	unsigned char  pad[3];
 
 	uintptr_t      Fetch[M68K_FETCHBANK1];
+
+	/* ThumbyNES: per-Fetch-bank instruction-fetch endian flag. ROM is
+	 * stored raw big-endian (so a host-native u16 read returns a swapped
+	 * value that needs bswap to get the BE opcode); WRAM is stored in
+	 * host-native u16 layout (a native read already gives the BE opcode
+	 * the cart wrote). Under FAME_BIG_ENDIAN, FETCH_WORD/LONG/etc. used
+	 * to bswap unconditionally — correct for ROM, broken for RAM-resident
+	 * routines (Xenon 2 hangs on JSR into a RAM jump-table; same class of
+	 * bug presumably hits other carts). cpu68k_map_set populates this in
+	 * lockstep with Fetch[]: 1=bswap (ROM), 0=native (RAM). SET_PC reads
+	 * it once per rebase into fetch_swap_now; the FETCH_* macros branch
+	 * on the cached flag (~0-cycle in the steady state since ROM is the
+	 * overwhelmingly common case and the branch predictor locks in). */
+	unsigned char  FetchSwap[M68K_FETCHBANK1];
+	unsigned char  fetch_swap_now;
 } M68K_CONTEXT;
 
 typedef enum

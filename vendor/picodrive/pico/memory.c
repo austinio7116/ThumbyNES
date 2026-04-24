@@ -88,8 +88,14 @@ void cpu68k_map_set(uptr *map, u32 start_addr, u32 end_addr,
     int shiftout = 24 - FAMEC_FETCHBITS;
     int i = start_addr >> shiftout;
     uptr base = (uptr)func_or_mh - (i << shiftout);
-    for (; i <= (end_addr >> shiftout); i++)
+    for (; i <= (end_addr >> shiftout); i++) {
       ctx->Fetch[i] = base;
+      /* ThumbyNES: !is_func mappings are RAM-style (native u16 layout)
+       * — clear the per-bank FETCH_BSWAP so FAME doesn't bswap fetches
+       * out of WRAM. ROM banks under FAME_BIG_ENDIAN are populated by
+       * the direct loop in PicoMemSetup (and set the flag). */
+      ctx->FetchSwap[i] = 0;
+    }
   }
 #endif
 }
@@ -121,8 +127,10 @@ void cpu68k_map_read_mem(u32 start_addr, u32 end_addr, void *ptr, int is_sub)
     int shiftout = 24 - FAMEC_FETCHBITS;
     i = start_addr >> shiftout;
     addr = (uptr)ptr - (i << shiftout);
-    for (; i <= (end_addr >> shiftout); i++)
+    for (; i <= (end_addr >> shiftout); i++) {
       ctx->Fetch[i] = addr;
+      ctx->FetchSwap[i] = 0; /* RAM-style mapping; see cpu68k_map_set */
+    }
   }
 #endif
 }
@@ -157,8 +165,10 @@ void cpu68k_map_all_ram(u32 start_addr, u32 end_addr, void *ptr, int is_sub)
     int shiftout = 24 - FAMEC_FETCHBITS;
     i = start_addr >> shiftout;
     addr = (uptr)ptr - (i << shiftout);
-    for (; i <= (end_addr >> shiftout); i++)
+    for (; i <= (end_addr >> shiftout); i++) {
       ctx->Fetch[i] = addr;
+      ctx->FetchSwap[i] = 0; /* RAM-style mapping; see cpu68k_map_set */
+    }
   }
 #endif
 }
@@ -1190,13 +1200,17 @@ PICO_INTERNAL void PicoMemSetup(void)
      * macros (built with FAME_BIG_ENDIAN), and needs a DIRECT pointer
      * in ctx->Fetch to find the ROM bytes. cpu68k_map_set skips Fetch
      * population when is_func=1, so populate it manually with the raw
-     * ROM pointer. */
+     * ROM pointer. ROM is raw big-endian, so set FetchSwap=1 for these
+     * banks — FETCH_* will bswap host u16 reads to recover the BE
+     * opcode. (RAM banks set FetchSwap=0 in cpu68k_map_set.) */
     {
       int shiftout = 24 - FAMEC_FETCHBITS;
       int i = 0;
       uptr base = (uptr)Pico.rom;
-      for (; i <= ((rs - 1) >> shiftout); i++)
+      for (; i <= ((rs - 1) >> shiftout); i++) {
         PicoCpuFM68k.Fetch[i] = base;
+        PicoCpuFM68k.FetchSwap[i] = 1;
+      }
     }
 #else
     cpu68k_map_set(m68k_read8_map,  0x000000, rs - 1, Pico.rom, 0);
