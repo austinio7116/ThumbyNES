@@ -230,6 +230,7 @@ in-game menu (open with MENU long-hold) instead.
 | **MENU long hold** (≥ 500 ms, no chord) | Open the **in-game menu** |
 | **MENU + A** | Save a screenshot (32×32 + 64×64 sidecars) |
 | **MENU + dpad** *(GG / GB only)* | Pan the live CROP viewport while the cart keeps running |
+| **D-pad** *(MD CROP only, no MENU)* | Pan the CROP viewport. The cart keeps running but doesn't see directional input; face buttons / Start / C still reach it. |
 
 ### At boot
 
@@ -495,7 +496,7 @@ the screen via asymmetric scaling).
 ### CROP
 
 A 1:1 native viewport into the cart frame, pannable across the full
-picture. Two flavours:
+picture. Three flavours:
 
 - **Pause-on-CROP** (NES + SMS): tap MENU to enter CROP. The cart
   pauses entirely, audio mutes, and the **D-pad pans the viewport**
@@ -506,10 +507,19 @@ picture. Two flavours:
   game**. **MENU + dpad** pans the viewport while held. Designed
   for the handhelds where reading menus while the cart breathes is
   the point.
+- **Pan-override CROP** (MD): tap MENU to enter CROP. The cart keeps
+  running — we can't cleanly pause PicoDrive's 68K/Z80/VDP pipeline
+  mid-frame — but the **D-pad always pans the viewport** and the
+  cart sees no directional input while CROP is active. Face buttons
+  (A/B), Start (LB), and C (RB) still reach the cart so it continues
+  to progress. Designed for the MD's much-larger-than-128px native
+  frame where pan is essential to read HUDs or signage that live
+  outside the centred 128-col window.
 
 The CROP pan range is whatever the source frame allows: NES has 128
 horizontal × 112 vertical of slack, SMS has 128 × 64, GB and GG both
-have 32 × 16.
+have 32 × 16, MD (H40 + V28, most common) has 192 × 96, MD H32 has
+128 × 96. V30 carts extend the vertical slack to 112.
 
 ---
 

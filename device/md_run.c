@@ -369,6 +369,29 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
         if (sleeping) { sleep_ms(50); continue; }
 
+        /* CROP pan is always-on — the d-pad pans the viewport as long
+         * as the display is in CROP mode, no MENU required. The cart
+         * keeps running (we can't pause it) but the cart never sees
+         * the d-pad in CROP mode — it's stripped before feeding
+         * PicoDrive, below. Face buttons / Start / C still reach the
+         * cart so it continues to behave. Useful for exploring HUDs
+         * or signage that lives outside the 128-col CROP window. */
+        if (scale_mode == SCALE_CROP) {
+            const int PAN_STEP = 2;
+            int vx, vy, vw, vh;
+            mdc_viewport(&vx, &vy, &vw, &vh);
+            if (up_down) pan_y -= PAN_STEP;
+            if (dn_down) pan_y += PAN_STEP;
+            if (lt_down) pan_x -= PAN_STEP;
+            if (rt_down) pan_x += PAN_STEP;
+            int pmax_x = vw - 128; if (pmax_x < 0) pmax_x = 0;
+            int pmax_y = vh - 128; if (pmax_y < 0) pmax_y = 0;
+            if (pan_x < 0)       pan_x = 0;
+            if (pan_x > pmax_x)  pan_x = pmax_x;
+            if (pan_y < 0)       pan_y = 0;
+            if (pan_y > pmax_y)  pan_y = pmax_y;
+        }
+
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
@@ -379,22 +402,6 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                           rc == 0 ? "shot saved" : "shot fail");
                 osd_text_ms = 800;
                 menu_consumed = 1;
-            }
-            /* CROP pan while MENU held. */
-            if (scale_mode == SCALE_CROP) {
-                const int PAN_STEP = 2;
-                int vx, vy, vw, vh;
-                mdc_viewport(&vx, &vy, &vw, &vh);
-                if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
-                if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
-                if (lt_down) { pan_x -= PAN_STEP; menu_consumed = 1; }
-                if (rt_down) { pan_x += PAN_STEP; menu_consumed = 1; }
-                int pmax_x = vw - 128; if (pmax_x < 0) pmax_x = 0;
-                int pmax_y = vh - 128; if (pmax_y < 0) pmax_y = 0;
-                if (pan_x < 0)       pan_x = 0;
-                if (pan_x > pmax_x)  pan_x = pmax_x;
-                if (pan_y < 0)       pan_y = 0;
-                if (pan_y > pmax_y)  pan_y = pmax_y;
             }
             if (menu_press_ms >= 500 && !menu_consumed) {
                 open_menu = 1;
@@ -565,11 +572,14 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             fb_needs_clear = true;       /* menu drew over fb */
         }
 
-        /* Feed buttons; in CROP the cart gets no input while MENU held
-         * (MENU+dpad pans). Otherwise cart receives the input. */
-        uint16_t pad = 0;
-        if (!(scale_mode == SCALE_CROP && menu_down))
-            pad = read_md_buttons();
+        /* Feed buttons. In CROP the d-pad pans the viewport instead of
+         * steering the cart, so strip the direction bits before
+         * PicoDrive sees them — face buttons / Start / C still reach
+         * the cart. FIT / FILL pass the d-pad through unchanged. */
+        uint16_t pad = read_md_buttons();
+        if (scale_mode == SCALE_CROP) {
+            pad &= ~(MDC_BTN_UP | MDC_BTN_DOWN | MDC_BTN_LEFT | MDC_BTN_RIGHT);
+        }
         if (!six_button) {
             /* Strip the 6-button-only bits so the cart reads 3-button. */
             pad &= ~(MDC_BTN_X | MDC_BTN_Y | MDC_BTN_Z | MDC_BTN_MODE);
