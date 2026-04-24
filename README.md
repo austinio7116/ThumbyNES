@@ -27,6 +27,11 @@ firmware image.
 <img src="images/gb-super-mario-land.jpg" width="360" alt="Game Boy — Super Mario Land">
 <img src="images/sms-sonic-fit.jpg" width="360" alt="SMS — Sonic the Hedgehog (FIT mode)">
 </p>
+<p align="center">
+<img src="images/md-sonic-greenhill.jpg" width="240" alt="Mega Drive — Sonic the Hedgehog (Green Hill Zone, CROP)">
+<img src="images/md-jimmy-white-snooker.jpg" width="240" alt="Mega Drive — Jimmy White's Whirlwind Snooker">
+<img src="images/md-brian-lara-cricket.jpg" width="240" alt="Mega Drive — Brian Lara Cricket 96">
+</p>
 
 [`firmware/nesrun_device.uf2`](firmware/nesrun_device.uf2) is committed
 to the repo if you want to flash without setting up the toolchain.
