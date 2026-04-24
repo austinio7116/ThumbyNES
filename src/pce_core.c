@@ -30,6 +30,9 @@
 #include "sprite.h"
 #include "sys_dep.h"
 
+extern struct host_machine host;
+extern void WriteBuffer(char *, int, unsigned);
+
 /* ---- HuExpress global state we interact with ----------------------
  * These are all declared in pce.c / hard_pce.c. We reach into them
  * directly because that's the shape of the core — there is no clean
@@ -69,6 +72,16 @@ static uint16_t s_palette_rgb565[512];
 static uint8_t  s_bram[2048];            /* HuCard BRAM (2 KB) */
 static int      s_skip_render = 0;
 static uint16_t s_pad_mask = 0;
+
+/* Per-PSG-channel scratch buffer used by pcec_audio_pull. We drive
+ * WriteBuffer in MONO mode (signed 8-bit, sample_size=1, stereo=0):
+ *   - Simpler mix — one byte per sample.
+ *   - Avoids the upstream silent-channel memset bug: at mix.c:249 the
+ *     memset only zeros dwSize bytes, but stereo actually needs 2×dwSize.
+ *     Stale L/R bytes from prior active audio pollute the output on
+ *     channel disable. Mono side-steps this entirely. */
+#define PCEC_AUDIO_MAX_FRAME_SAMPLES 1024
+static int8_t s_sbuf[6][PCEC_AUDIO_MAX_FRAME_SAMPLES];
 
 /* Viewport as reported by the VDC. Updated per-frame by the hook
  * PCE_hardware_periodical inserts into io state. */
@@ -181,6 +194,16 @@ int pcec_init(int region, int sample_rate)
     s_pad_mask = 0;
     memset(s_bram, 0, sizeof s_bram);
 
+    /* Audio format: mono signed 8-bit, 1 byte per sample. */
+    host.sound.freq         = s_sample_rate;
+    host.sound.stereo       = 0;
+    host.sound.signed_sound = 1;
+    host.sound.sample_size  = 1;
+
+    /* Defer JOY[*] init to pcec_load_rom, where hard_init() has
+     * already allocated the io struct. Initialising here would
+     * deref a NULL struct. */
+
     /* Upstream's ODROID-GO main.c owned these allocations; since we
      * didn't vendor main.c, replicate them exactly. Two subtleties:
      *
@@ -272,6 +295,13 @@ int pcec_load_rom(const uint8_t *data, size_t len)
      * it ourselves, once, here — otherwise gfx_need_redraw / UCount
      * are whatever calloc gave them. */
     gfx_init();
+
+    /* Joypad default: all pads "no button pressed". The IO_read path
+     * XORs with 0xFF before masking, so a raw 0xFF reads as 0
+     * (no-press). Without this, boot-time joypad reads (R-Type
+     * test-mode check, copyright-screen wait) see phantom presses. */
+    for (int i = 0; i < 5; i++) io.JOY[i] = 0xFF;
+
     s_inited = 1;
     return 0;
 }
@@ -350,8 +380,14 @@ void pcec_set_buttons(uint16_t mask)
 {
     s_pad_mask = mask;
     /* HuExpress polls io.JOY[0] each frame. Bit layout matches the
-     * HuC6280 joypad register spec — same order as PCEC_BTN_*. */
+     * HuC6280 joypad register spec — same order as PCEC_BTN_*.
+     *
+     * The IO $1000 read auto-advances io.joy_counter through pads
+     * 0..4 on each button-nibble read; unmentioned pad slots must
+     * present "no button pressed" (0xFF pre-XOR) or the game will
+     * interpret them as all-buttons-held. */
     io.JOY[0] = (uchar)(mask & 0xFF);
+    for (int i = 1; i < 5; i++) io.JOY[i] = 0xFF;
 }
 
 void pcec_set_skip_render(int skip)
@@ -363,15 +399,28 @@ void pcec_set_skip_render(int skip)
 
 int pcec_audio_pull(int16_t *out, int n)
 {
-    /* HuExpress's mix_buffer_length is (sndrate / 60 + 1). The mixer
-     * writes to an internal ring. We expose a pull model to match
-     * sms/gb/md wrappers.
-     *
-     * TODO(pcec_audio_pull): wire the PSG mixer — sound.c has
-     * `run_ring_bell()` / mix.c has `MixBuffer()`. Initial frame
-     * output can be silence so the PWM driver sees a valid stream. */
     if (!out || n <= 0) return 0;
-    memset(out, 0, (size_t)n * sizeof(int16_t));
+    if (n > PCEC_AUDIO_MAX_FRAME_SAMPLES) n = PCEC_AUDIO_MAX_FRAME_SAMPLES;
+
+    /* WriteBuffer writes `n` mono samples per channel (one byte each). */
+    for (int ch = 0; ch < 6; ch++) {
+        WriteBuffer((char *)s_sbuf[ch], ch, (unsigned)n);
+    }
+
+    /* Mix 6 PSG channels → mono signed 16-bit.
+     * Per-channel per-sample range is -127..127 (mono averages L/R
+     * balance so keeps the same per-byte range). Sum of 6 channels
+     * → ±762. Shift by 5 (×32) expands into int16 with headroom. */
+    for (int i = 0; i < n; i++) {
+        int32_t mix = 0;
+        for (int ch = 0; ch < 6; ch++) {
+            mix += (int32_t)s_sbuf[ch][i];
+        }
+        mix <<= 5;
+        if (mix >  32767) mix =  32767;
+        if (mix < -32768) mix = -32768;
+        out[i] = (int16_t)mix;
+    }
     return n;
 }
 

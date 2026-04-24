@@ -68,7 +68,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -84,6 +84,24 @@ int main(int argc, char **argv)
                                          SDL_TEXTUREACCESS_STREAMING, vw, vh);
 
     uint16_t *scratch = malloc((size_t)vw * vh * 2);
+
+    /* Audio: 22050 Hz mono signed 16-bit, pushed per frame.
+     * SDL_QueueAudio batches samples; we just ensure the queue
+     * never grows unbounded (the sleep-based frame pacer keeps
+     * the producer at ~60 Hz). */
+    const int AUDIO_RATE = 22050;
+    const int SAMPLES_PER_FRAME = AUDIO_RATE / 60 + 1;  /* 368 */
+    SDL_AudioSpec want = {
+        .freq = AUDIO_RATE,
+        .format = AUDIO_S16SYS,
+        .channels = 1,
+        .samples = 512,
+        .callback = NULL,
+    };
+    SDL_AudioDeviceID audio_dev =
+        SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+    int16_t audio_scratch[1024];
+    if (audio_dev) SDL_PauseAudioDevice(audio_dev, 0);
 
     /* Frame pacer. PCE is 60 Hz NTSC. sibling host runners (md/gb)
      * use the same pattern. */
@@ -115,6 +133,18 @@ int main(int argc, char **argv)
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
 
+        /* Pull one frame of audio and push to SDL. Drop samples if
+         * the device queue is already a few frames deep to avoid
+         * latency creeping up. */
+        if (audio_dev) {
+            int got = pcec_audio_pull(audio_scratch, SAMPLES_PER_FRAME);
+            uint32_t q = SDL_GetQueuedAudioSize(audio_dev);
+            if (q < (uint32_t)(SAMPLES_PER_FRAME * 4 * sizeof(int16_t))) {
+                SDL_QueueAudio(audio_dev, audio_scratch,
+                               (uint32_t)got * sizeof(int16_t));
+            }
+        }
+
         /* Sleep until next 60 Hz tick. If we're already behind, catch
          * up without sleeping (up to a frame) so transient stalls
          * don't compound. */
@@ -126,6 +156,7 @@ int main(int argc, char **argv)
             next_frame_ms = now;
     }
 
+    if (audio_dev) SDL_CloseAudioDevice(audio_dev);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
