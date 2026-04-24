@@ -90,27 +90,31 @@ void *my_special_alloc(unsigned char speed, unsigned char bytes,
 bool skipNextFrame = false;
 
 /* ---- Palette expansion --------------------------------------------
- * PCE VCE stores 9-bit BGR (3 bits per channel, 0-7). The 512-entry
- * palette is 256 background + 256 sprite. We rebuild our RGB565 LUT
- * after each frame because VCE writes mid-frame are legal. */
-static void rebuild_palette(void)
+ * HuExpress's render pipeline does NOT write VCE entry indices into
+ * osd_gfx_buffer — it writes `Pal[n] = io.VCE[n].W >> 1`, a packed
+ * 8-bit encoding where bits [7:5] = G[2:0], [4:2] = R[2:0], [1:0] =
+ * B[2:1] (VCE B bit 0 is dropped).
+ *
+ * So the framebuffer holds 256 possible byte values, each of which
+ * decodes into a fixed RGB via this pattern. The game changes which
+ * VCE entries are live but the byte → RGB mapping in the framebuffer
+ * is static (determined by the hw encoding). Our LUT is 256 entries
+ * keyed on the encoded byte, built once. */
+static void build_palette_once(void)
 {
-    /* Pal[] stores 8-bit indices into the 9-bit VCE entries via the
-     * internal vce_lut. For Phase 1 we read io.VCE directly and
-     * expand to RGB565. */
-    if (!io.VCE) return;
-    for (int i = 0; i < 512; i++) {
-        uint16_t vce = io.VCE[i].W & 0x01FF;
-        uint8_t g3 = (vce >> 6) & 0x07;
-        uint8_t r3 = (vce >> 3) & 0x07;
-        uint8_t b3 = (vce >> 0) & 0x07;
-        /* 3 → 5/6 bit expansion: duplicate high bits for even gradient */
+    static int built = 0;
+    if (built) return;
+    for (int i = 0; i < 256; i++) {
+        uint8_t g3 = (i >> 5) & 0x07;
+        uint8_t r3 = (i >> 2) & 0x07;
+        uint8_t b3 = ((i & 0x03) << 1);   /* 2-bit B expanded to 3-bit */
         uint8_t r5 = (r3 << 2) | (r3 >> 1);
         uint8_t g6 = (g3 << 3) | g3;
         uint8_t b5 = (b3 << 2) | (b3 >> 1);
         s_palette_rgb565[i] =
             (uint16_t)((r5 << 11) | (g6 << 5) | b5);
     }
+    built = 1;
 }
 
 /* ---- US-encoded ROM helpers ----------------------------------------
@@ -275,10 +279,41 @@ int pcec_load_rom(const uint8_t *data, size_t len)
 void pcec_run_frame(void)
 {
     if (!s_inited) return;
+
+    /* Fill the full 220 KB XBUF with the current BG colour before the
+     * core renders. Rationale:
+     *
+     *   PCE VDC tile rendering only writes pixels for tile planes
+     *   where at least one of the 4 plane bytes is non-zero (see the
+     *   J-mask check in sprite_RefreshLine.h). Fully-transparent tile
+     *   pixels are SKIPPED — whatever was in the buffer stays visible.
+     *
+     *   Real hardware handles this by outputting Pal[0] for transparent
+     *   tile pixels; the framebuffer abstraction never sees stale
+     *   pixels there. HuExpress does NOT — both upstream ODROID (double-
+     *   buffered) and us (single-buffered) end up with stale content
+     *   bleeding through transparent tiles. Upstream hides it partially
+     *   because each buffer is only re-rendered every other frame,
+     *   which means the stale content is 2 frames old — still visible
+     *   as trails on fast-moving sprites but sometimes blended away by
+     *   the next overwrite.
+     *
+     *   The clean fix is to emulate the hardware: every pixel becomes
+     *   Pal[0] before a new frame's tiles/sprites draw. One memset of
+     *   220 KB per frame is ~50 µs on host and will be eliminated on
+     *   device by the scanline renderer (task #12).
+     */
+    {
+        extern uchar *Pal;
+        uchar bg = Pal ? Pal[0] : 0;
+        uchar *raw = osd_gfx_buffer - (32 + 64 * XBUF_WIDTH);
+        memset(raw, bg, (size_t)XBUF_WIDTH * XBUF_HEIGHT);
+    }
+
     /* exe_go() in the upstream returns at end-of-frame via our
      * g_pce_frame_done patch (see gfx_Loop6502.h + h6280_exe_go.h). */
     exe_go();
-    if (!s_skip_render) rebuild_palette();
+    build_palette_once();
 
 }
 

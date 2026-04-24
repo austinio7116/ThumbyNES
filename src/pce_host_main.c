@@ -85,6 +85,11 @@ int main(int argc, char **argv)
 
     uint16_t *scratch = malloc((size_t)vw * vh * 2);
 
+    /* Frame pacer. PCE is 60 Hz NTSC. sibling host runners (md/gb)
+     * use the same pattern. */
+    const uint32_t FRAME_MS = 1000 / 60;
+    uint32_t next_frame_ms = SDL_GetTicks();
+
     int running = 1;
     while (running) {
         SDL_Event e;
@@ -109,6 +114,16 @@ int main(int argc, char **argv)
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
+
+        /* Sleep until next 60 Hz tick. If we're already behind, catch
+         * up without sleeping (up to a frame) so transient stalls
+         * don't compound. */
+        next_frame_ms += FRAME_MS;
+        uint32_t now = SDL_GetTicks();
+        if ((int32_t)(next_frame_ms - now) > 0)
+            SDL_Delay(next_frame_ms - now);
+        else if ((int32_t)(now - next_frame_ms) > (int32_t)(2 * FRAME_MS))
+            next_frame_ms = now;
     }
 
     SDL_DestroyTexture(tex);
