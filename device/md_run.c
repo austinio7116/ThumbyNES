@@ -97,11 +97,10 @@ static uint16_t read_md_buttons(void) {
     /* MD pad → Thumby mapping:
      *   Thumby B   → MD A     (primary action — Sonic jump)
      *   Thumby A   → MD B
-     *   Thumby LB  → MD START  (was MODE; changed 2026-04-23 — START
-     *                           on its own is more useful than MODE
-     *                           since the 6-button sub-mode is rarely
-     *                           needed, and replaces the earlier
-     *                           LB+RB chord which was awkward.)
+     *   Thumby LB  → MD START  (fires on RELEASE, not press — so
+     *                           holding LB enters the CROP-pan chord
+     *                           instead. See the chord block in
+     *                           md_run_main below for the gate.)
      *   Thumby RB  → MD C
      *   Thumby MENU (short tap) → cycle FIT / FILL / CROP display mode
      *   Thumby MENU (long hold) → in-game menu
@@ -109,7 +108,11 @@ static uint16_t read_md_buttons(void) {
      * turn on the "6-button" toggle in the in-game menu — that frees
      * up the X/Y/Z/MODE bits again (still no Thumby binding for them
      * today but they stop being stripped so a future rebind has
-     * somewhere to go). */
+     * somewhere to go).
+     *
+     * Note: this function emits the raw MD_START bit on LB-down, but
+     * the main loop strips it while LB is held and re-asserts it as
+     * a release-pulse. Callers outside the loop should be aware. */
     if (!gpio_get(BTN_B_GP))     m |= MDC_BTN_A;
     if (!gpio_get(BTN_A_GP))     m |= MDC_BTN_B;
     if (!gpio_get(BTN_LB_GP))    m |= MDC_BTN_START;
@@ -309,7 +312,24 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     /* CROP pan (source coords). Centred default. */
     int pan_x = 96, pan_y = 48;
+    /* FILL X pan (source crop offset). -1 = uninitialised; centred
+     * to (vw-vh)/2 on first FILL render so a fresh boot shows the
+     * normal aspect-preserving centre crop. LB-held d-pad in FILL
+     * mode shifts this; the cart's vertical content always fills
+     * 128 rows so there's no Y pan to track. */
+    int pan_x_fill = -1;
     int prev_a = 0;
+
+    /* LB chord for play-while-cropped panning. While LB is held in
+     * CROP mode the d-pad pans the source viewport instead of going
+     * to the cart, and LB→START is suppressed so START doesn't fire
+     * mid-pan. On LB release: if no pan motion happened during the
+     * hold, pulse START to the cart for a few frames so a "tap LB"
+     * still acts as START. If the chord was used, swallow the START
+     * so panning doesn't accidentally pause the game. */
+    int  lb_held_frames = 0;     /* frames of current LB hold */
+    bool lb_pan_used    = false; /* set if d-pad moved the view this hold */
+    int  lb_start_pulse = 0;     /* >0 = pulse START to cart this many frames */
 
     int16_t audio[1024];
 
@@ -369,28 +389,56 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
         if (sleeping) { sleep_ms(50); continue; }
 
-        /* CROP pan is always-on — the d-pad pans the viewport as long
-         * as the display is in CROP mode, no MENU required. The cart
-         * keeps running (we can't pause it) but the cart never sees
-         * the d-pad in CROP mode — it's stripped before feeding
-         * PicoDrive, below. Face buttons / Start / C still reach the
-         * cart so it continues to behave. Useful for exploring HUDs
-         * or signage that lives outside the 128-col CROP window. */
-        if (scale_mode == SCALE_CROP) {
+        /* CROP pan: hold LB to engage. While LB is held in CROP mode
+         * the d-pad pans the source viewport (cart sees no d-pad and
+         * LB→START is suppressed). Default — without LB held — d-pad
+         * + LB go to the cart, so the game stays fully playable while
+         * cropped. On LB release: pulse START to the cart only if no
+         * pan motion happened during the hold (a "tap LB" still acts
+         * as START); if the chord was used to pan, swallow the START
+         * to avoid accidentally pausing on chord exit. */
+        if (lb_down) {
+            lb_held_frames++;
             const int PAN_STEP = 2;
             int vx, vy, vw, vh;
             mdc_viewport(&vx, &vy, &vw, &vh);
-            if (up_down) pan_y -= PAN_STEP;
-            if (dn_down) pan_y += PAN_STEP;
-            if (lt_down) pan_x -= PAN_STEP;
-            if (rt_down) pan_x += PAN_STEP;
-            int pmax_x = vw - 128; if (pmax_x < 0) pmax_x = 0;
-            int pmax_y = vh - 128; if (pmax_y < 0) pmax_y = 0;
-            if (pan_x < 0)       pan_x = 0;
-            if (pan_x > pmax_x)  pan_x = pmax_x;
-            if (pan_y < 0)       pan_y = 0;
-            if (pan_y > pmax_y)  pan_y = pmax_y;
+            int dx = (rt_down ? PAN_STEP : 0) - (lt_down ? PAN_STEP : 0);
+            int dy = (dn_down ? PAN_STEP : 0) - (up_down ? PAN_STEP : 0);
+            if (scale_mode == SCALE_CROP) {
+                if (dx || dy) {
+                    pan_x += dx;
+                    pan_y += dy;
+                    int pmax_x = vw - 128; if (pmax_x < 0) pmax_x = 0;
+                    int pmax_y = vh - 128; if (pmax_y < 0) pmax_y = 0;
+                    if (pan_x < 0)      pan_x = 0;
+                    if (pan_x > pmax_x) pan_x = pmax_x;
+                    if (pan_y < 0)      pan_y = 0;
+                    if (pan_y > pmax_y) pan_y = pmax_y;
+                    lb_pan_used = true;
+                }
+            } else if (scale_mode == SCALE_FILL) {
+                /* X-only pan in FILL — Y always fills 128 rows so
+                 * no vertical headroom. dy is ignored on purpose. */
+                if (dx) {
+                    if (pan_x_fill < 0) pan_x_fill = (vw - vh) / 2;
+                    pan_x_fill += dx;
+                    int pmax = vw - vh; if (pmax < 0) pmax = 0;
+                    if (pan_x_fill < 0)    pan_x_fill = 0;
+                    if (pan_x_fill > pmax) pan_x_fill = pmax;
+                    lb_pan_used = true;
+                }
+            }
+        } else {
+            if (lb_held_frames > 0 && !lb_pan_used) {
+                /* Pulse START for ~3 frames so the cart definitely
+                 * registers the press, regardless of when in its tick
+                 * cycle the read lands. */
+                lb_start_pulse = 3;
+            }
+            lb_held_frames = 0;
+            lb_pan_used    = false;
         }
+        if (lb_start_pulse > 0) lb_start_pulse--;
 
         if (menu_down) {
             menu_press_ms += 16;
@@ -600,13 +648,23 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             fb_needs_clear = true;       /* menu drew over fb */
         }
 
-        /* Feed buttons. In CROP the d-pad pans the viewport instead of
-         * steering the cart, so strip the direction bits before
-         * PicoDrive sees them — face buttons / Start / C still reach
-         * the cart. FIT / FILL pass the d-pad through unchanged. */
+        /* Feed buttons. While LB is held in CROP the d-pad pans the
+         * viewport — strip the direction bits + LB→START before the
+         * cart sees them (chord-active suppression). On LB release we
+         * pulse START explicitly via lb_start_pulse if no pan was
+         * used during the hold. Face buttons / RB→C still reach the
+         * cart throughout, so the game keeps responding to the rest
+         * of the input. */
         uint16_t pad = read_md_buttons();
-        if (scale_mode == SCALE_CROP) {
-            pad &= ~(MDC_BTN_UP | MDC_BTN_DOWN | MDC_BTN_LEFT | MDC_BTN_RIGHT);
+        if (lb_down) {
+            pad &= ~MDC_BTN_START;       /* suppress LB→START while held */
+            if (scale_mode == SCALE_CROP) {
+                pad &= ~(MDC_BTN_UP | MDC_BTN_DOWN
+                         | MDC_BTN_LEFT | MDC_BTN_RIGHT);
+            }
+        }
+        if (lb_start_pulse > 0) {
+            pad |= MDC_BTN_START;        /* delayed START on LB release */
         }
         if (!six_button) {
             /* Strip the 6-button-only bits so the cart reads 3-button. */
@@ -632,8 +690,19 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             memset(fb, 0, 128 * 128 * 2);
             fb_needs_clear = false;
         }
+        /* In FILL we pass the X-pan via the same pan_x slot; md_core
+         * interprets it as the source-X crop offset (clamped 0..vw-vh).
+         * Lazily centre on first FILL render so the cart's normal
+         * aspect-preserving centre crop is the default until the user
+         * pans. CROP/FIT keep their existing (pan_x, pan_y) meaning. */
+        int eff_pan_x = pan_x, eff_pan_y = pan_y;
+        if (scale_mode == SCALE_FILL) {
+            if (pan_x_fill < 0) pan_x_fill = (vw - vh) / 2;
+            eff_pan_x = pan_x_fill;
+            eff_pan_y = 0;
+        }
         mdc_set_scale_target(fb, (int)scale_mode, vx, vy, vw, vh,
-                              pan_x, pan_y);
+                              eff_pan_x, eff_pan_y);
 
         /* Adaptive skip-render decision — set before running the
          * frame. Never skip under fast-forward (already running flat

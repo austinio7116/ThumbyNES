@@ -65,6 +65,7 @@ static uint16_t   s_sx2_lut[128];
 static int16_t    s_lut_vw;
 static int16_t    s_lut_vh;
 static uint8_t    s_lut_scale;
+static int16_t    s_lut_pan_x;     /* FILL only — invalidates LUT on pan */
 #else
 /* Full 320x240 RGB565 frame. PicoDrive writes one scanline at a time
  * through DrawLineDest; we hand it a contiguous buffer and a row
@@ -446,11 +447,16 @@ static void md_core_rebuild_sx_lut(void) {
     int mode = s_scale_mode;
 
     if (mode == 1) {
-        /* FILL — preserve aspect by using Y scale in X too, then
-         * crop centre-window of width `vh` out of `vw`. */
+        /* FILL — preserve aspect by using Y scale in X too. The X
+         * crop offset (s_pan_x) selects which `vh`-wide slice of the
+         * `vw`-wide viewport is shown. Centre is (vw-vh)/2; LB-held
+         * d-pad in FILL mode shifts s_pan_x left/right within
+         * [0, vw-vh]. */
         int visible = vh;
-        int crop    = (vw - visible) / 2;
-        if (crop < 0) crop = 0;
+        int pmax    = vw - visible; if (pmax < 0) pmax = 0;
+        int crop    = s_pan_x;
+        if (crop < 0)    crop = 0;
+        if (crop > pmax) crop = pmax;
         for (int dx = 0; dx < 128; dx++) {
             int sx  = crop + (dx * visible) / 128;
             if (sx >= vw) sx = vw - 1;
@@ -472,6 +478,7 @@ static void md_core_rebuild_sx_lut(void) {
     s_lut_vw    = (int16_t)vw;
     s_lut_vh    = (int16_t)vh;
     s_lut_scale = (uint8_t)mode;
+    s_lut_pan_x = s_pan_x;
 }
 
 /* Downsample one MD scanline (just drawn into s_line_scratch) into
@@ -495,8 +502,11 @@ int md_core_scan_end(unsigned int line)
     if (y_src < 0 || y_src >= s_vh) return 0;
 
     /* Refresh sx LUT when viewport OR scale_mode changes — FIT and
-     * FILL sample X differently (stretch vs aspect-preserving crop). */
-    if (s_vw != s_lut_vw || s_vh != s_lut_vh || s_scale_mode != s_lut_scale)
+     * FILL sample X differently (stretch vs aspect-preserving crop).
+     * In FILL the LUT also depends on s_pan_x (left/right pan), so
+     * an unchanged scale+viewport with a new pan still rebuilds. */
+    if (s_vw != s_lut_vw || s_vh != s_lut_vh || s_scale_mode != s_lut_scale
+        || (s_scale_mode == 1 && s_pan_x != s_lut_pan_x))
         md_core_rebuild_sx_lut();
 
     const uint16_t *srow = s_line_scratch + s_vx;
