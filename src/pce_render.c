@@ -39,6 +39,18 @@
 #include "hard_pce.h"
 #include "sprite.h"
 
+/* On the RP2350 device, place the per-scanline composers in
+ * `.time_critical.*` — the Pico SDK linker copies that section from
+ * flash to RAM at boot so the inner loops don't thrash the XIP
+ * cache. Compile with -DPCE_RENDER_IRAM=1 from the device CMakeLists.
+ * Host builds leave it as plain text. */
+#if defined(PCE_RENDER_IRAM)
+#  define PCE_HOT_ATTR __attribute__((section(".time_critical.pce_render")))
+#else
+#  define PCE_HOT_ATTR
+#endif
+#define PCE_HOT(name) PCE_HOT_ATTR name
+
 extern uchar  *VRAM;
 extern uchar  *Pal;
 extern uint16 *SPRAM;
@@ -94,9 +106,12 @@ static int   s_spr_n;
 
 /* ---- Public API --------------------------------------------------- */
 
+static void spread8_init(void);
+
 void pce_render_set_target(uint16_t *lcd_fb,
                             const uint16_t *palette_rgb565, int blend)
 {
+    spread8_init();
     s_lcd_fb = lcd_fb;
     s_pal565 = palette_rgb565;
     s_blend  = blend ? 1 : 0;
@@ -122,21 +137,50 @@ void pce_render_frame_begin(void)
 
 /* ---- BG line render ----------------------------------------------- */
 
-/* PCE tile pixel decode: given a tile (32 bytes in VRAM) and an (x,y)
- * within it, return the 4-bit colour index. */
-static inline uint8_t tile_pixel(const uchar *tile, int col, int row)
+/* Bit-spread LUT: spread8[b] is a 64-bit value where byte i (LSB-first)
+ * holds bit (7-i) of b in its low bit.
+ *
+ *   spread8[0xA5]  -> 0x01 00 01 00 00 01 00 01   (LSBs spell 1 0 1 0 0 1 0 1)
+ *
+ * Built once at boot. Used to decode an 8-pixel BG tile row in 4 LUT
+ * loads + 3 shift/OR ops, instead of looping 8 times with per-pixel
+ * shift+AND. Each output byte gets the 4-bit color index in its low
+ * nibble. ~3x faster than per-pixel decode.
+ *
+ * This is the same identity an emulator like Mednafen uses for fast
+ * tile decode; the win is shifting the per-pixel work to once-per-row. */
+static uint64_t s_spread8[256];
+static int      s_spread8_inited = 0;
+
+static void spread8_init(void)
 {
-    int shift = 7 - (col & 7);
-    const uchar *p01 = tile + row * 2;
-    const uchar *p23 = tile + 16 + row * 2;
-    return (uint8_t)(
-          ((p01[0] >> shift) & 1)
-        | (((p01[1] >> shift) & 1) << 1)
-        | (((p23[0] >> shift) & 1) << 2)
-        | (((p23[1] >> shift) & 1) << 3));
+    if (s_spread8_inited) return;
+    for (int v = 0; v < 256; v++) {
+        uint64_t out = 0;
+        for (int i = 0; i < 8; i++) {
+            uint64_t bit = (uint64_t)((v >> (7 - i)) & 1);
+            out |= bit << (i * 8);
+        }
+        s_spread8[v] = out;
+    }
+    s_spread8_inited = 1;
 }
 
-static void render_bg_line(int pce_y, int screen_w)
+/* Decode one 8-pixel BG tile row into a uint64_t holding 8 bytes,
+ * each byte's low nibble = the 4-bit colour index of that pixel. */
+static inline uint64_t PCE_HOT(decode_bg_row64)(const uchar *tile, int row)
+{
+    uint8_t b0 = tile[row * 2];
+    uint8_t b1 = tile[row * 2 + 1];
+    uint8_t b2 = tile[16 + row * 2];
+    uint8_t b3 = tile[16 + row * 2 + 1];
+    return  s_spread8[b0]
+         | (s_spread8[b1] << 1)
+         | (s_spread8[b2] << 2)
+         | (s_spread8[b3] << 3);
+}
+
+static void PCE_HOT(render_bg_line)(int pce_y, int screen_w)
 {
     /* Screen off → line is the backdrop colour. */
     uint8_t bg = Pal ? Pal[0] : 0;
@@ -156,22 +200,39 @@ static void render_bg_line(int pce_y, int screen_w)
     int row = wy & 7;
     const uint16 *bat_row = ((const uint16 *)VRAM)
                             + (wy >> 3) * io.bg_w;
+    int bg_w_mask = io.bg_w - 1;
     int sx     = IO_VDC_07_BXR.W & (bg_w_px - 1);
     int tx     = sx >> 3;
     int subx   = sx & 7;
     int dx     = 0;
 
     while (dx < screen_w) {
-        uint16 entry = bat_row[tx & (io.bg_w - 1)];
-        const uchar *bank = Pal + (entry >> 12) * 16;
+        uint16 entry = bat_row[tx & bg_w_mask];
         const uchar *tile = VRAM + ((entry & 0x7FF) * 32);
+
+        /* Zero-tile fast path: if all 4 plane bytes for this row are
+         * zero, the entire 8-pixel row is transparent → backdrop.
+         * Common case in PCE backgrounds (sky, stars, void tiles).
+         * One uint32 load tests two plane bytes at once. */
+        uint32_t plane01 = ((const uint16 *)tile)[row];
+        uint32_t plane23 = ((const uint16 *)tile)[8 + row];
         int end = subx + (screen_w - dx);
         if (end > 8) end = 8;
+        if ((plane01 | plane23) == 0) {
+            int n = end - subx;
+            memset(&s_line[dx], bg, n);
+            dx += n;
+            subx = 0;
+            tx++;
+            continue;
+        }
+
+        const uchar *bank = Pal + (entry >> 12) * 16;
+        uint64_t pix64 = decode_bg_row64(tile, row);
+        /* Store packed-RGB byte (Pal[bank*16+p]) per pixel — matches
+         * the upstream renderer's buffer semantics. */
         for (int c = subx; c < end; c++) {
-            uint8_t p = tile_pixel(tile, c, row);
-            /* Store packed-RGB byte (Pal[bank*16+p]) — matches the
-             * upstream renderer's buffer semantics so the 256-entry
-             * RGB565 LUT in pce_core.c can decode any pixel. */
+            uint8_t p = (uint8_t)((pix64 >> (c * 8)) & 0xF);
             s_line[dx++] = p ? bank[p] : bg;
         }
         subx = 0;
@@ -181,7 +242,7 @@ static void render_bg_line(int pce_y, int screen_w)
 
 /* ---- Sprite scan + per-line draw ---------------------------------- */
 
-static void scan_sprites(int pce_y, int screen_w)
+static void PCE_HOT(scan_sprites)(int pce_y, int screen_w)
 {
     s_spr_n = 0;
     if (!(IO_VDC_05_CR.W & 0x40)) return;
@@ -244,7 +305,7 @@ static inline uint8_t sprite_pixel(const uchar *cell, int col, int row)
         | (((cell[ 96 + p_row] >> shift) & 1) << 3));
 }
 
-static void draw_sprites_line(int pce_y, int screen_w)
+static void PCE_HOT(draw_sprites_line)(int pce_y, int screen_w)
 {
     /* Walk in REVERSE iteration order from scan_sprites — that built
      * the list with index 63 first, so iterate forward here so low
@@ -253,7 +314,6 @@ static void draw_sprites_line(int pce_y, int screen_w)
         spr_t *s = &s_spr[i];
         int atr = s->atr;
         int h   = (s->cgy + 1) * 16;
-        int w   = (s->cgx + 1) * 16;
         int local_y = pce_y - s->y_top;
         if (atr & 0x8000) local_y = h - 1 - local_y;     /* V flip */
         int cell_y    = local_y >> 4;
@@ -301,7 +361,7 @@ static inline uint16_t pak565(uint32_t c)
     return (uint16_t)((c | (c >> 16)) & 0xFFFFu);
 }
 
-static void emit_row(int pce_y, int screen_w)
+static void PCE_HOT(emit_row)(int pce_y, int screen_w)
 {
     int dst_y = (pce_y >> 1) + s_letterbox_y;
     if (dst_y < 0 || dst_y >= 128) return;
@@ -356,7 +416,7 @@ static void emit_row(int pce_y, int screen_w)
 
 /* ---- Public per-scanline entry ------------------------------------ */
 
-void pce_render_scanline(int pce_y)
+void PCE_HOT(pce_render_scanline)(int pce_y)
 {
     if (!s_lcd_fb || !s_pal565) return;
     if (pce_y < 0) return;

@@ -59,6 +59,14 @@
 #define PCE_SRC_H   224
 #define PCE_FIT_H   (PCE_SRC_H / 2)      /* 112 — 8 px letterbox top & bottom */
 
+/* Second LCD-shaped framebuffer for double-buffered DMA. The scanline
+ * renderer writes directly to whichever buffer is not currently being
+ * shipped to the GC9107, so emu+render of frame N overlaps the DMA of
+ * frame N-1. Without this, every frame stalls ~10 ms on
+ * nes_lcd_wait_idle before it can touch fb. 32 KB BSS, only allocated
+ * when the PCE slot is built. */
+static uint16_t pce_fb_back[128 * 128];
+
 static void make_sidecar_path(char *out, size_t outsz,
                                const char *rom_name, const char *ext) {
     char base[64];
@@ -95,15 +103,16 @@ static void battery_save(const char *rom_name) {
     f_close(&f);
 }
 
-/* PCE joypad bitmask from Thumby buttons. Bit layout is whatever
- * PCEC_BTN_* declares — the core's IO read path XORs with 0xFF to
- * produce the raw HuC6280 register value. */
+/* PCE joypad bitmask from Thumby buttons. MENU is reserved for the
+ * in-game menu (long-hold) and gets masked out of the cart's view
+ * when held; we can't reuse it for RUN. Map shoulders instead:
+ *   LB → SELECT,  RB → RUN. */
 static uint16_t read_pce_buttons(void) {
     uint16_t m = 0;
     if (!gpio_get(BTN_A_GP))     m |= PCEC_BTN_I;
     if (!gpio_get(BTN_B_GP))     m |= PCEC_BTN_II;
     if (!gpio_get(BTN_LB_GP))    m |= PCEC_BTN_SELECT;
-    if (!gpio_get(BTN_MENU_GP))  m |= PCEC_BTN_RUN;
+    if (!gpio_get(BTN_RB_GP))    m |= PCEC_BTN_RUN;
     if (!gpio_get(BTN_UP_GP))    m |= PCEC_BTN_UP;
     if (!gpio_get(BTN_DOWN_GP))  m |= PCEC_BTN_DOWN;
     if (!gpio_get(BTN_LEFT_GP))  m |= PCEC_BTN_LEFT;
@@ -365,6 +374,16 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  open_menu     = 0;
     bool exit_after    = false;
 
+    /* Tracks which buffer was last DMA'd to the LCD. The menu paints
+     * on `fb`, so we copy back when opening the menu if the last
+     * frame ended up on pce_fb_back. */
+    uint16_t *last_presented_fb = fb;
+    /* Buffer-selection toggle. Must NOT reuse fps_frames here — that
+     * counter resets every 1-sec FPS window and would collapse the
+     * ping-pong (two consecutive frames sharing the same buffer →
+     * render races the in-flight DMA → ghosting + flicker). */
+    int       fb_toggle = 0;
+
     int pan_x = 64, pan_y = 48;       /* 256-128=128 /2, 224-128=96 /2 → centred */
     int prev_a = 0;
 
@@ -374,6 +393,24 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     absolute_time_t next_frame = get_absolute_time();
     absolute_time_t fps_window = get_absolute_time();
     int fps_frames = 0, fps_show = 0;
+
+    /* Adaptive frameskip — same shape as md_run.c. Skip the scanline
+     * composer when emulation alone overran last frame's budget,
+     * with a hard cap so we don't freeze the display for long. */
+    uint32_t prev_emu_us     = 0;
+    uint32_t prev_cycle_us   = 0;     /* end-to-end loop iter time */
+    uint32_t prev_wait_us    = 0;     /* DMA-wait at top of cycle */
+    uint32_t prev_aud_us     = 0;     /* audio pull + push */
+    uint32_t cycle_us_show   = 0;
+    uint32_t wait_us_show    = 0;
+    uint32_t aud_us_show     = 0;
+    uint64_t prev_cycle_t0   = (uint64_t)time_us_64();
+    uint32_t skip_streak     = 0;
+    uint32_t skipped_count   = 0;
+    uint32_t skipped_show    = 0;
+    uint32_t emu_us_show     = 0;
+    const int SKIP_BUDGET_US = (int)FRAME_US;
+    const int SKIP_STREAK_MAX = 2;
 
     while (!exit_after) {
         int menu_down = !gpio_get(BTN_MENU_GP);
@@ -448,6 +485,13 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* ----- in-game menu ----- */
         if (open_menu) {
             open_menu = 0;
+            /* Menu paints on fb, but our last gameplay frame might
+             * be sitting on pce_fb_back. Copy it across so the menu
+             * shows on top of the actual game state. ~150 us. */
+            if (last_presented_fb != fb) {
+                nes_lcd_wait_idle();
+                memcpy(fb, last_presented_fb, 128 * 128 * 2);
+            }
             int v_scale = (int)scale_mode;
             int v_vol   = volume;
 #ifdef THUMBYONE_SLOT_MODE
@@ -576,37 +620,88 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* Cart always sees input — pan controls live on MENU+dpad. */
         pcec_set_buttons(menu_down ? 0 : read_pce_buttons());
 
-        /* Scanline renderer writes directly into `fb` per-line as the
-         * VDC loop hits each display row. Only the LAST run of a
-         * fast-forward burst hits the LCD; intermediate frames bind
-         * NULL to skip the line callback work. */
-        nes_lcd_wait_idle();
+        /* Adaptive frameskip — if last frame's emulation alone blew
+         * the budget, skip the scanline composer this frame. Never
+         * under fast-forward (already running flat out) and never
+         * more than SKIP_STREAK_MAX in a row. */
+        int skip_this = 0;
+        if (!fast_forward
+            && (int)prev_emu_us > SKIP_BUDGET_US
+            && skip_streak < SKIP_STREAK_MAX)
+        {
+            skip_this = 1;
+            skip_streak++;
+            skipped_count++;
+        } else {
+            skip_streak = 0;
+        }
+        pcec_set_skip_render(skip_this);
+
+        /* Double-buffered render: pick the buffer NOT currently being
+         * shipped to the LCD. DMA from the previous frame is reading
+         * the other buffer, so the scanline composer can write this
+         * one freely — no wait_idle stall before render.
+         *
+         * Skip frames bind NULL (no render) and ALSO don't present
+         * (LCD keeps the last good frame). If we presented on skip,
+         * we'd ship a stale or zero-filled buffer every other frame
+         * and the screen would alternate good/garbage = flicker.
+         *
+         * The picker/menu/exit path expects the visible frame to live
+         * in `fb`, so we copy the back buffer back when opening the
+         * menu (~150 µs memcpy, off the hot path). */
+        uint16_t *cur_fb = NULL;
+        if (!skip_this) {
+            fb_toggle++;
+            cur_fb = (fb_toggle & 1) ? pce_fb_back : fb;
+        }
+
         int frame_runs = fast_forward ? 4 : 1;
+        uint32_t t_emu0 = (uint32_t)time_us_64();
         for (int i = 0; i < frame_runs; i++) {
-            pcec_set_scale_target(i == frame_runs - 1 ? fb : NULL, blend);
+            uint16_t *target = (i != frame_runs - 1) ? NULL : cur_fb;
+            pcec_set_scale_target(target, blend);
             pcec_run_frame();
         }
+        prev_emu_us = (uint32_t)time_us_64() - t_emu0;
         unsaved_play_frames += frame_runs;
 
-        if (show_fps) {
-            char ftxt[12];
-            snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
-                     fast_forward ? " FF" : "");
-            nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
+        if (cur_fb) {
+            if (show_fps) {
+                char l0[24], l1[24];
+                snprintf(l0, sizeof(l0), "%2d e%5u t%5u",
+                         fps_show, (unsigned)emu_us_show, (unsigned)cycle_us_show);
+                snprintf(l1, sizeof(l1), "w%5u a%5u",
+                         (unsigned)wait_us_show, (unsigned)aud_us_show);
+                memset(cur_fb + 5  * 128, 0, NES_FONT_CELL_H * 128 * 2);
+                nes_font_draw(cur_fb, l0, 2,  5, 0xFFE0);
+                nes_font_draw(cur_fb, l1, 2, 16, 0xFFE0);
+            }
+            if (osd_text_ms > 0) {
+                int w = nes_font_width(osd_text);
+                nes_font_draw(cur_fb, osd_text, (128 - w) / 2, 60, 0xFFE0);
+                osd_text_ms -= 16;
+            }
+            /* wait_idle happens HERE — right before present — so emu+
+             * render above runs concurrently with the previous frame's
+             * DMA. In steady state this should be ~0. */
+            uint32_t t_wait0 = (uint32_t)time_us_64();
+            nes_lcd_wait_idle();
+            prev_wait_us = (uint32_t)time_us_64() - t_wait0;
+            nes_lcd_present(cur_fb);
+            last_presented_fb = cur_fb;
+        } else if (osd_text_ms > 0) {
+            osd_text_ms -= 16;     /* still tick down the OSD timer */
         }
-        if (osd_text_ms > 0) {
-            int w = nes_font_width(osd_text);
-            nes_font_draw(fb, osd_text, (128 - w) / 2, 60, 0xFFE0);
-            osd_text_ms -= 16;
-        }
-        nes_lcd_present(fb);
 
         {
+            uint32_t t_aud0 = (uint32_t)time_us_64();
             int n = pcec_audio_pull(audio, 1024);
             if (n > 0) {
                 scale_audio(audio, n, volume);
                 nes_audio_pwm_push(audio, n);
             }
+            prev_aud_us = (uint32_t)time_us_64() - t_aud0;
         }
 
         if (unsaved_play_frames > 0 &&
@@ -623,8 +718,22 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         } else {
             next_frame = get_absolute_time();
         }
+        /* End-to-end iteration time: from last cycle's t0 to the
+         * top of THIS cycle. Sampled here AFTER the sleep_until so it
+         * reflects the actual frame pacing. */
+        {
+            uint64_t now = (uint64_t)time_us_64();
+            prev_cycle_us = (uint32_t)(now - prev_cycle_t0);
+            prev_cycle_t0 = now;
+        }
+
         if (absolute_time_diff_us(fps_window, get_absolute_time()) > 1000000) {
             fps_show = fps_frames; fps_frames = 0;
+            skipped_show = skipped_count; skipped_count = 0;
+            emu_us_show  = prev_emu_us;
+            cycle_us_show = prev_cycle_us;
+            wait_us_show  = prev_wait_us;
+            aud_us_show   = prev_aud_us;
             fps_window = get_absolute_time();
         }
     }

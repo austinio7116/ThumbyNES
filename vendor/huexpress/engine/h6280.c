@@ -448,7 +448,7 @@ osd_getTime(void)
 
 #ifndef MY_h6280_exe_go
 
-void
+IRAM_ATTR void
 exe_go(void)
 {
 /*    flnz_list = (uchar *)my_special_alloc(false, 1,256);

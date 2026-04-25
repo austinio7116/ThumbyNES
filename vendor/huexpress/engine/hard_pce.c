@@ -513,14 +513,14 @@ return_value_mask(uint16 A)
 }
 
 /* read */
-uchar
+IRAM_ATTR uchar
 IO_read_raw(uint16 A)
 {
 #include "IO_read_raw.h"
 }
 
 //! Adds the io_buffer feature
-uchar
+IRAM_ATTR uchar
 IO_read_(uint16 A)
 {
 	int mask;

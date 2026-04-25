@@ -1,5 +1,5 @@
 
-void
+IRAM_ATTR void
 exe_go(void)
 {
 #ifdef BENCHMARK

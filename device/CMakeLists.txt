@@ -454,6 +454,9 @@ target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 
 if (THUMBYNES_WITH_PCE)
     target_compile_definitions(thumbynes_core PUBLIC THUMBYNES_WITH_PCE=1)
+    # Place the scanline composers in .time_critical.* (RAM at boot)
+    # so the per-pixel decode loop doesn't thrash the XIP cache.
+    target_compile_definitions(thumbynes_core PRIVATE PCE_RENDER_IRAM=1)
     target_link_libraries(thumbynes_core PUBLIC huexpress)
 endif()
 
