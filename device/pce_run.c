@@ -576,33 +576,30 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         /* Cart always sees input — pan controls live on MENU+dpad. */
         pcec_set_buttons(menu_down ? 0 : read_pce_buttons());
 
-        /* Tick the emulator (fast-fwd runs 4 frames per display frame). */
-        {
-            int frame_runs = fast_forward ? 4 : 1;
-            for (int i = 0; i < frame_runs; i++) pcec_run_frame();
-            unsaved_play_frames += frame_runs;
+        /* Scanline renderer writes directly into `fb` per-line as the
+         * VDC loop hits each display row. Only the LAST run of a
+         * fast-forward burst hits the LCD; intermediate frames bind
+         * NULL to skip the line callback work. */
+        nes_lcd_wait_idle();
+        int frame_runs = fast_forward ? 4 : 1;
+        for (int i = 0; i < frame_runs; i++) {
+            pcec_set_scale_target(i == frame_runs - 1 ? fb : NULL, blend);
+            pcec_run_frame();
         }
+        unsaved_play_frames += frame_runs;
 
-        const uint8_t  *frame = pcec_framebuffer();
-        const uint16_t *pal   = pcec_palette_rgb565();
-        if (frame && pal) {
-            nes_lcd_wait_idle();
-            if      (scale_mode == SCALE_CROP) blit_crop_pce (fb, frame, pal, pan_x, pan_y);
-            else if (blend)                    blit_blend_pce(fb, frame, pal);
-            else                                blit_fit_pce  (fb, frame, pal);
-            if (show_fps) {
-                char ftxt[12];
-                snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
-                         fast_forward ? " FF" : "");
-                nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
-            }
-            if (osd_text_ms > 0) {
-                int w = nes_font_width(osd_text);
-                nes_font_draw(fb, osd_text, (128 - w) / 2, 60, 0xFFE0);
-                osd_text_ms -= 16;
-            }
-            nes_lcd_present(fb);
+        if (show_fps) {
+            char ftxt[12];
+            snprintf(ftxt, sizeof(ftxt), "%d%s", fps_show,
+                     fast_forward ? " FF" : "");
+            nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
         }
+        if (osd_text_ms > 0) {
+            int w = nes_font_width(osd_text);
+            nes_font_draw(fb, osd_text, (128 - w) / 2, 60, 0xFFE0);
+            osd_text_ms -= 16;
+        }
+        nes_lcd_present(fb);
 
         {
             int n = pcec_audio_pull(audio, 1024);
