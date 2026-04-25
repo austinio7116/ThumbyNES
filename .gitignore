@@ -11,3 +11,4 @@ build_device/
 *.map
 .cache/
 compile_commands.json
+test-roms/

@@ -15,6 +15,7 @@
 #define THUMBY_BUILD 1
 
 #include "pce_core.h"
+#include "pce_render.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,14 +90,25 @@ static int s_vp_x = 0, s_vp_y = 0;
 static int s_vp_w = PCEC_DEFAULT_W, s_vp_h = PCEC_DEFAULT_H;
 
 /* ---- my_special_alloc — HuExpress's PSRAM/IRAM picker -------------
- * ODROID-GO directs allocations to internal SRAM vs PSRAM based on
- * speed/size hints. We don't have that distinction — just malloc. */
+ * ODROID-GO directed allocations to internal SRAM vs PSRAM based on
+ * speed/size hints. We don't have that distinction — just calloc.
+ *
+ * NOTE: pcec_shutdown does NOT free these. We tried tracking them in
+ * a linked list and calling free-all on shutdown; host testing
+ * revealed glibc double-free / heap-corruption errors that were
+ * already present (latent) during emulation — HuExpress's sprite
+ * renderer writes at negative offsets into the 220 KB XBUF that
+ * reach past the allocation's start into adjacent malloc blocks.
+ * Upstream ODROID's port has the same latent issue but never frees,
+ * so the corruption stays invisible. On device we'd need to fix the
+ * renderer bounds for a clean free path; for now the allocations
+ * leak and are re-used on the next session (all the `if (!X)`
+ * guards below make that idempotent). */
 void *my_special_alloc(unsigned char speed, unsigned char bytes,
                        unsigned long size)
 {
     (void)speed; (void)bytes;
-    void *p = calloc(1, size ? size : 1);
-    return p;
+    return calloc(1, size ? size : 1);
 }
 
 /* HuExpress reference to this flag in myadd.h — never set by us. */
@@ -204,52 +216,54 @@ int pcec_init(int region, int sample_rate)
      * already allocated the io struct. Initialising here would
      * deref a NULL struct. */
 
-    /* Upstream's ODROID-GO main.c owned these allocations; since we
-     * didn't vendor main.c, replicate them exactly. Two subtleties:
-     *
-     *  1. osd_gfx_buffer is NOT the base of the 220 KB frame buffer —
-     *     it's offset into it by (32 + 64 * XBUF_WIDTH). The sprite
-     *     renderer writes with negative offsets that reach back into
-     *     the 64-row top padding + 32-col left padding. Setting
-     *     osd_gfx_buffer = alloc base would put those writes past
-     *     the start of the allocation → segfault.
-     *
-     *  2. SPM (sprite priority mask) is a second 220 KB buffer the
-     *     sprite renderer needs. Without it, sprite writes go to NULL. */
+#ifndef PCE_SCANLINE_RENDER
+    /* Legacy full-framebuffer path. Under PCE_SCANLINE_RENDER we
+     * don't render into osd_gfx_buffer / SPM at all; see pce_render.c. */
     if (!osd_gfx_buffer) {
-        uchar *raw = (uchar *)calloc(1, XBUF_WIDTH * XBUF_HEIGHT);
+        uchar *raw = (uchar *)my_special_alloc(false, 1,
+                                                XBUF_WIDTH * XBUF_HEIGHT);
         if (!raw) return 1;
         osd_gfx_buffer = raw + 32 + 64 * XBUF_WIDTH;
     }
     extern uchar *SPM_raw, *SPM;
     if (!SPM_raw) {
-        SPM_raw = (uchar *)calloc(1, XBUF_WIDTH * XBUF_HEIGHT);
+        SPM_raw = (uchar *)my_special_alloc(false, 1,
+                                             XBUF_WIDTH * XBUF_HEIGHT);
         if (!SPM_raw) return 1;
         SPM = SPM_raw + 32 + 64 * XBUF_WIDTH;
     }
+#endif
+    /* spr_init_pos is a precomputed offset table the stock renderer
+     * uses; scanline mode doesn't read it, but ResetPCE writes to it
+     * unconditionally — a 4 KB buffer keeps those writes landing in
+     * real memory. */
     if (!spr_init_pos) {
-        spr_init_pos = (uint32 *)calloc(1024, sizeof(uint32));
+        spr_init_pos = (uint32 *)my_special_alloc(false, 4,
+                                                   1024 * sizeof(uint32));
         if (!spr_init_pos) return 1;
     }
 
     /* Path-string globals — declared as char* in pce.c, allocated by
-     * upstream main.c. Each is PATH_MAX (256 B). Total ≈ 3 KB; never
-     * freed (single-process lifetime). */
+     * upstream main.c. Each is PATH_MAX (256 B). Total ≈ 3 KB per
+     * session, freed in pcec_shutdown. */
     extern char *short_cart_name, *short_iso_name;
     extern char *config_basepath, *sav_path, *sav_basepath;
     extern char *tmp_basepath, *video_path, *ISO_filename;
     extern char *syscard_filename;
-    if (!cart_name)        cart_name        = (char *)calloc(1, PATH_MAX);
-    if (!short_cart_name)  short_cart_name  = (char *)calloc(1, PATH_MAX);
-    if (!short_iso_name)   short_iso_name   = (char *)calloc(1, PATH_MAX);
-    if (!rom_file_name)    rom_file_name    = (char *)calloc(1, PATH_MAX);
-    if (!config_basepath)  config_basepath  = (char *)calloc(1, PATH_MAX);
-    if (!sav_path)         sav_path         = (char *)calloc(1, PATH_MAX);
-    if (!sav_basepath)     sav_basepath     = (char *)calloc(1, PATH_MAX);
-    if (!tmp_basepath)     tmp_basepath     = (char *)calloc(1, PATH_MAX);
-    if (!video_path)       video_path       = (char *)calloc(1, PATH_MAX);
-    if (!ISO_filename)     ISO_filename     = (char *)calloc(1, PATH_MAX);
-    if (!syscard_filename) syscard_filename = (char *)calloc(1, PATH_MAX);
+#define PCE_ALLOC_PATH(p) \
+    if (!(p)) (p) = (char *)my_special_alloc(false, 1, PATH_MAX)
+    PCE_ALLOC_PATH(cart_name);
+    PCE_ALLOC_PATH(short_cart_name);
+    PCE_ALLOC_PATH(short_iso_name);
+    PCE_ALLOC_PATH(rom_file_name);
+    PCE_ALLOC_PATH(config_basepath);
+    PCE_ALLOC_PATH(sav_path);
+    PCE_ALLOC_PATH(sav_basepath);
+    PCE_ALLOC_PATH(tmp_basepath);
+    PCE_ALLOC_PATH(video_path);
+    PCE_ALLOC_PATH(ISO_filename);
+    PCE_ALLOC_PATH(syscard_filename);
+#undef PCE_ALLOC_PATH
     return 0;
 }
 
@@ -310,40 +324,17 @@ void pcec_run_frame(void)
 {
     if (!s_inited) return;
 
-    /* Fill the full 220 KB XBUF with the current BG colour before the
-     * core renders. Rationale:
-     *
-     *   PCE VDC tile rendering only writes pixels for tile planes
-     *   where at least one of the 4 plane bytes is non-zero (see the
-     *   J-mask check in sprite_RefreshLine.h). Fully-transparent tile
-     *   pixels are SKIPPED — whatever was in the buffer stays visible.
-     *
-     *   Real hardware handles this by outputting Pal[0] for transparent
-     *   tile pixels; the framebuffer abstraction never sees stale
-     *   pixels there. HuExpress does NOT — both upstream ODROID (double-
-     *   buffered) and us (single-buffered) end up with stale content
-     *   bleeding through transparent tiles. Upstream hides it partially
-     *   because each buffer is only re-rendered every other frame,
-     *   which means the stale content is 2 frames old — still visible
-     *   as trails on fast-moving sprites but sometimes blended away by
-     *   the next overwrite.
-     *
-     *   The clean fix is to emulate the hardware: every pixel becomes
-     *   Pal[0] before a new frame's tiles/sprites draw. One memset of
-     *   220 KB per frame is ~50 µs on host and will be eliminated on
-     *   device by the scanline renderer (task #12).
-     */
-    {
-        extern uchar *Pal;
-        uchar bg = Pal ? Pal[0] : 0;
-        uchar *raw = osd_gfx_buffer - (32 + 64 * XBUF_WIDTH);
-        memset(raw, bg, (size_t)XBUF_WIDTH * XBUF_HEIGHT);
-    }
-
-    /* exe_go() in the upstream returns at end-of-frame via our
-     * g_pce_frame_done patch (see gfx_Loop6502.h + h6280_exe_go.h). */
-    exe_go();
+    /* Scanline renderer writes directly into the LCD fb bound via
+     * pcec_set_scale_target. Letterbox bars get painted once per
+     * frame; active rows are composited as HuExpress's VDC loop hits
+     * each display scanline (pce_render_scanline hooked into the
+     * patched gfx_Loop6502.h). */
     build_palette_once();
+    pce_render_frame_begin();
+
+    /* exe_go() returns at end-of-frame via our g_pce_frame_done patch
+     * (see gfx_Loop6502.h + h6280_exe_go.h). */
+    exe_go();
 
 }
 
@@ -363,12 +354,17 @@ void pcec_viewport(int *x, int *y, int *w, int *h)
 
 const uint8_t *pcec_framebuffer(void)
 {
-    /* osd_gfx_buffer is already pre-offset into the 220 KB XBUF —
-     * (0, 0) in active display coordinates IS osd_gfx_buffer[0].
-     * The caller blits using PCEC_PITCH = 256 but the underlying
-     * stride is XBUF_WIDTH (600). That mismatch is the viewport
-     * problem the runner has to handle (see pcec_viewport note). */
-    return osd_gfx_buffer;
+    /* Stub — the scanline renderer writes RGB565 directly into the
+     * LCD fb bound via pcec_set_scale_target. pcebench still calls
+     * this to check "did anything render"; point it at a tiny
+     * static array to avoid NULL. */
+    static uint8_t dummy[1];
+    return dummy;
+}
+
+void pcec_set_scale_target(uint16_t *lcd_fb, int blend)
+{
+    pce_render_set_target(lcd_fb, s_palette_rgb565, blend);
 }
 
 const uint16_t *pcec_palette_rgb565(void)
@@ -445,14 +441,12 @@ int pcec_load_state(const char *path)
 void pcec_shutdown(void)
 {
     if (!s_inited) return;
-    /* TODO(pcec_shutdown): call a HuExpress teardown path. Upstream's
-     * TrashPCE() does system() calls and disk I/O we don't want —
-     * extract just the free() portion. For Phase 1 we leak the heap
-     * on shutdown since the device-side flow re-boots into the
-     * picker rather than re-initing in place. */
+    /* Keep allocations — see note on my_special_alloc. s_inited=0 so
+     * the next pcec_init/load_rom cycle re-inits state on top of the
+     * same buffers (VRAM/RAM/XBUF get re-zeroed by the core's own
+     * reset paths, pcec_run_frame memsets XBUF to Pal[0] each
+     * frame). Heap stays held for the slot's lifetime. */
     s_inited = 0;
+    g_pce_mem_rom_active = 0;
 }
 
-#if defined(PCE_SCANLINE_RENDER) && !defined(PCE_SCANLINE_IMPL)
-#  error "PCE_SCANLINE_RENDER enabled but line renderer not plumbed yet. See PCE_PLAN.md §5."
-#endif

@@ -237,15 +237,28 @@ hard_init(void)
     memset(hard_pce->WRAM, 0, 0x2000*sizeof(uchar));
 
     hard_pce->VRAM = (uchar *)my_special_alloc(false, 1, VRAMSIZE);//[VRAMSIZE]
+    memset(hard_pce->VRAM, 0, VRAMSIZE*sizeof(uchar));
+#ifdef PCE_SCANLINE_RENDER
+    /* ThumbyNES scanline renderer reads tile / sprite patterns
+     * straight out of VRAM — the VRAM2 / VRAMS decoded-pixel caches
+     * and their vchange / vchanges dirty bitmaps are unused. Tiny
+     * placeholder allocs keep pointer derefs safe (upstream writes
+     * VRAM2[tile] / vchange[tile] in some code paths we haven't
+     * severed) without the 128 KB + 2.5 KB price tag. */
+    hard_pce->VRAM2    = (uchar *)my_special_alloc(false, 1, 4);
+    hard_pce->VRAMS    = (uchar *)my_special_alloc(false, 1, 4);
+    hard_pce->vchange  = (uchar *)my_special_alloc(false, 1, 4);
+    hard_pce->vchanges = (uchar *)my_special_alloc(false, 1, 4);
+#else
     hard_pce->VRAM2 = (uchar *)my_special_alloc(false, 1, VRAMSIZE);//[VRAMSIZE];
     hard_pce->VRAMS = (uchar *)my_special_alloc(false, 1, VRAMSIZE);//[VRAMSIZE];
     hard_pce->vchange = (uchar *)my_special_alloc(false, 1, VRAMSIZE / 32);//[VRAMSIZE / 32];
     hard_pce->vchanges = (uchar *)my_special_alloc(false, 1, VRAMSIZE / 128);//[VRAMSIZE / 128];
-    memset(hard_pce->VRAM, 0, VRAMSIZE*sizeof(uchar));
     memset(hard_pce->VRAM2, 0, VRAMSIZE*sizeof(uchar));
     memset(hard_pce->VRAMS, 0, VRAMSIZE*sizeof(uchar));
     memset(hard_pce->vchange, 0, VRAMSIZE/32*sizeof(uchar));
     memset(hard_pce->vchanges, 0, VRAMSIZE/128*sizeof(uchar));
+#endif
 
 /*    
 #define cd_extra_mem_size 0x10000

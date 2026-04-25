@@ -72,18 +72,23 @@ int main(int argc, char **argv)
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
-    int vx, vy, vw, vh;
-    pcec_viewport(&vx, &vy, &vw, &vh);
-    const int scale = 2;
+    /* The scanline renderer writes the device-shape 128x128 LCD fb
+     * directly. We allocate that on the host too and present it
+     * upscaled so pcehost shows the same downsample/blend you'd see
+     * on the Thumby Color. */
+    const int LCD_W = 128, LCD_H = 128;
+    const int scale = 4;                 /* SDL window: 512×512 */
     SDL_Window *win = SDL_CreateWindow(
         "ThumbyNES — pcehost",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        vw * scale, vh * scale, 0);
+        LCD_W * scale, LCD_H * scale, 0);
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
-                                         SDL_TEXTUREACCESS_STREAMING, vw, vh);
+                                         SDL_TEXTUREACCESS_STREAMING,
+                                         LCD_W, LCD_H);
 
-    uint16_t *scratch = malloc((size_t)vw * vh * 2);
+    uint16_t lcd_fb[128 * 128];          /* 32 KB on host stack region */
+    pcec_set_scale_target(lcd_fb, /*blend=*/1);
 
     /* Audio: 22050 Hz mono signed 16-bit, pushed per frame.
      * SDL_QueueAudio batches samples; we just ensure the queue
@@ -116,19 +121,12 @@ int main(int argc, char **argv)
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = 0;
         }
         pcec_set_buttons(read_pad(SDL_GetKeyboardState(NULL)));
+        /* Re-bind each frame so the user can flip the blend toggle
+         * later without restarting. */
+        pcec_set_scale_target(lcd_fb, /*blend=*/1);
         pcec_run_frame();
-        pcec_viewport(&vx, &vy, &vw, &vh);
 
-        const uint8_t  *fb  = pcec_framebuffer();
-        const uint16_t *pal = pcec_palette_rgb565();
-        if (fb && pal) {
-            for (int y = 0; y < vh; y++) {
-                const uint8_t *row = fb + (vy + y) * PCEC_PITCH + vx;
-                uint16_t *dst = scratch + y * vw;
-                for (int x = 0; x < vw; x++) dst[x] = pal[row[x]];
-            }
-            SDL_UpdateTexture(tex, NULL, scratch, vw * 2);
-        }
+        SDL_UpdateTexture(tex, NULL, lcd_fb, LCD_W * 2);
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
@@ -161,7 +159,6 @@ int main(int argc, char **argv)
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();
-    free(scratch);
     pcec_shutdown();
     free(buf);
     return 0;

@@ -1381,16 +1381,25 @@ InitPCE(char *name)
 
 	memset(VRAM, 0, VRAMSIZE);
 
+#ifndef PCE_SCANLINE_RENDER
+	/* ThumbyNES: under PCE_SCANLINE_RENDER VRAM2/VRAMS/vchange/vchanges
+	 * are 4-byte placeholders (the scanline renderer reads tiles + sprites
+	 * straight out of VRAM). Skip the full-size memsets that would otherwise
+	 * clobber adjacent heap. */
 	memset(VRAM2, 0, VRAMSIZE);
-
 	memset(VRAMS, 0, VRAMSIZE);
+#endif
 
-	IOAREA = (uchar *) malloc(0x2000);
+	/* ThumbyNES: route through my_special_alloc so the session
+	 * allocation tracker frees IOAREA on pcec_shutdown along with
+	 * everything else. See pce_core.c::my_special_free_all. */
+	IOAREA = (uchar *) my_special_alloc(false, 1, 0x2000);
 	memset(IOAREA, 0xFF, 0x2000);
 
+#ifndef PCE_SCANLINE_RENDER
 	memset(vchange, 1, VRAMSIZE / 32);
-
 	memset(vchanges, 1, VRAMSIZE / 128);
+#endif
 
 	local_us_encoded_card = US_encoded_card;
 

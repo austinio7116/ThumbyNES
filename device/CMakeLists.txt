@@ -412,6 +412,7 @@ if (THUMBYNES_WITH_PCE)
         LSB_FIRST=1
         FINAL_RELEASE=1
         PCE_HUCARD_ONLY
+        PCE_SCANLINE_RENDER
         # TODO: once the scanline renderer is plumbed, flip this on:
         # PCE_SCANLINE_RENDER
         # Map IRAM_ATTR so h6280's dispatcher runs from SRAM — same
@@ -440,7 +441,8 @@ if (THUMBYNES_WITH_MD)
     list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/md_core.c)
 endif()
 if (THUMBYNES_WITH_PCE)
-    list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/pce_core.c)
+    list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/pce_core.c
+                                     ${NES_ROOT}/src/pce_render.c)
 endif()
 add_library(thumbynes_core STATIC ${THUMBYNES_CORE_SRC})
 target_include_directories(thumbynes_core PUBLIC

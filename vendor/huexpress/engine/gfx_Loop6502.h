@@ -64,6 +64,20 @@
 
         if ((scanline >= io.vdc_min_display)
             && (scanline <= io.vdc_max_display)) {
+#ifdef PCE_SCANLINE_RENDER
+            /* ThumbyNES scanline renderer: composite BG + sprites
+             * directly into the bound LCD fb for the current scanline.
+             * Skips HuExpress's full-framebuffer render entirely —
+             * no XBUF / SPM / VRAM2 / VRAMS are needed.
+             * See src/pce_render.c. */
+            {
+                extern void pce_render_scanline(int pce_y);
+                pce_render_scanline(display_counter);
+            }
+            display_counter++;
+            last_display_counter = display_counter;
+            gfx_need_redraw = 0;
+#else
             if (gfx_need_redraw) {
                 // && scanline > io.vdc_min_display)
                 // We got render things before being on the second line
@@ -93,9 +107,15 @@
             }
             display_counter++;
 #endif
+#endif /* PCE_SCANLINE_RENDER */
         }
     } else if (scanline < 14 + 242 + 4) {
         if (scanline == 14 + 242) {
+#ifdef PCE_SCANLINE_RENDER
+            /* ThumbyNES: scanline renderer already emitted every
+             * display row inside the active-display loop above. Skip
+             * the end-of-frame batch render. */
+#else
             save_gfx_context(0);
 
 #ifdef MY_INLINE_GFX
@@ -103,6 +123,7 @@
 #else
             render_lines(last_display_counter, display_counter);
 #endif
+#endif /* PCE_SCANLINE_RENDER */
 #if 0
             if (video_dump_flag) {
                 if (video_dump_countdown)

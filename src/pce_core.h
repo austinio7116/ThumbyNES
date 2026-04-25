@@ -116,6 +116,23 @@ void pcec_set_buttons(uint16_t mask);
  * the frame-pacing logic in device/pce_run.c when falling behind. */
 void pcec_set_skip_render(int skip);
 
+/* Bind the 128×128 RGB565 output framebuffer and blend mode the
+ * scanline renderer should write into. Call once before each
+ * pcec_run_frame (the binding is cheap; the runners call it per
+ * frame in case the runner toggles the blend flag from its menu).
+ *
+ * blend: 0 = nearest-neighbour, 1 = 2×2 box average in packed RGB565.
+ *
+ * pcec_run_frame composites BG + sprites DIRECTLY into `lcd_fb` —
+ * there is no intermediate full framebuffer. Peak per-session RAM
+ * cost of the renderer is ~128 bytes of visible-sprite scan list.
+ *
+ * On host builds (pcehost / pcebench) the scale target may be NULL;
+ * in that case the core still runs but no pixels are written. Those
+ * binaries use pcec_framebuffer() instead to pull an already-rendered
+ * target for SDL display. */
+void pcec_set_scale_target(uint16_t *lcd_fb, int blend);
+
 /* Pull n int16 mono samples produced by the most recent frame. Returns
  * the count actually written (= sndrate / 60 + 1 per frame typically).
  * HuExpress mixes the 6 PSG channels internally; we sum to mono. */

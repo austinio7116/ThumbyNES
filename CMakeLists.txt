@@ -265,6 +265,9 @@ target_compile_definitions(huexpress PUBLIC
     LSB_FIRST=1          # H6280 endianness
     FINAL_RELEASE=1      # drop debug printf/tracing blocks
     PCE_HUCARD_ONLY      # strips CD_track (74 KB BSS) and PCM buffer (64 KB heap)
+    PCE_SCANLINE_RENDER  # enables the per-scanline direct-to-LCD renderer
+                         # (see src/pce_render.c) and eliminates the
+                         # XBUF / SPM / VRAM2 / VRAMS allocations.
 )
 target_compile_options(huexpress PRIVATE
     -Wno-unused-function -Wno-unused-variable
@@ -276,7 +279,8 @@ target_compile_options(huexpress PRIVATE
 # ThumbyNES runtime glue
 # ----------------------------------------------------------------------
 add_library(thumbynes STATIC
-    src/nes_core.c src/sms_core.c src/gb_core.c src/md_core.c src/pce_core.c)
+    src/nes_core.c src/sms_core.c src/gb_core.c src/md_core.c
+    src/pce_core.c src/pce_render.c)
 target_include_directories(thumbynes PUBLIC src)
 target_link_libraries(thumbynes PUBLIC nofrendo smsplus peanut_gb picodrive huexpress)
 

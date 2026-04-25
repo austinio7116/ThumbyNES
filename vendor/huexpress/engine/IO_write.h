@@ -141,8 +141,14 @@
                 VRAM[IO_VDC_00_MAWR.W * 2] = io.vdc_ratch;
                 VRAM[IO_VDC_00_MAWR.W * 2 + 1] = V;
 
+#ifndef PCE_SCANLINE_RENDER
+                /* Dirty-mark the tile / sprite decode caches. Scanline
+                 * mode reads tiles directly from VRAM and never looks
+                 * at vchange / vchanges, so the writes are OOB on our
+                 * placeholder 4-byte allocs. */
                 vchange[IO_VDC_00_MAWR.W / 16] = 1;
                 vchanges[IO_VDC_00_MAWR.W / 64] = 1;
+#endif
 
                 IO_VDC_00_MAWR.W += io.vdc_inc;
 
