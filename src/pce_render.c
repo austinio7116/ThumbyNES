@@ -268,7 +268,15 @@ static void draw_sprites_line(int pce_y, int screen_w)
              * halves, which renders as the correct sprite in two
              * pieces in the wrong order. */
             int src_xc = hflip ? (s->cgx - xc) : xc;
-            int no = s->pattern + cell_y * (s->cgx + 1) + src_xc;
+            /* PCE pattern memory uses a fixed 2-cell-per-cell-row
+             * stride regardless of sprite width — a 16x32 sprite at
+             * pattern N occupies cells N and N+2, NOT N and N+1
+             * (cell N+1 is hardware-reserved/empty). Upstream's
+             * sprite_RefreshSpriteExact.h confirms this with a hard-
+             * coded `C += h*inc + 16*7*inc = 256` advance per cell
+             * row, plus the alignment mask `~(cgy*2 + cgx)` that
+             * reserves (cgy+1)*2 pattern slots. */
+            int no = s->pattern + cell_y * 2 + src_xc;
             const uchar *cell = VRAM + (no * 128);
             int dx0 = s->x + xc * 16;
             for (int c = 0; c < 16; c++) {
