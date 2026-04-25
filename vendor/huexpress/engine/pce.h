@@ -75,6 +75,7 @@ extern FILE *out_snd;
 // The file used to put sound into
 
 extern char volatile key_delay;
+extern int  Country;     /* 0 = Japan, 0x40 = USA — OR'd into joypad reads */
 // are we allowed to press another 'COMMAND' key ?
 
 extern volatile uint32 message_delay;

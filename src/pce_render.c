@@ -117,7 +117,11 @@ void pce_render_set_target(uint16_t *lcd_fb,
     s_blend  = blend ? 1 : 0;
     int act_h = io.screen_h ? io.screen_h : 224;
     s_draw_h  = act_h / 2;
-    if (s_draw_h > 128) s_draw_h = 128;
+    /* Cap to leave ≥5 px bottom letterbox so any raster-effect bleed
+     * onto the last source rows (e.g. Final Soldier's HUD/Earth band)
+     * gets masked rather than displayed. 240-line mode: 4 + 119 + 5;
+     * 224-line mode: 8 + 112 + 8 (already symmetric). */
+    if (s_draw_h > 119) s_draw_h = 119;
     s_letterbox_y = (128 - s_draw_h) / 2;
     if (s_letterbox_y < 0) s_letterbox_y = 0;
 }
@@ -365,6 +369,9 @@ static void PCE_HOT(emit_row)(int pce_y, int screen_w)
 {
     int dst_y = (pce_y >> 1) + s_letterbox_y;
     if (dst_y < 0 || dst_y >= 128) return;
+    /* Don't render into the bottom letterbox even if act_h's source
+     * range spills past s_draw_h (240-line mode after the cap). */
+    if (dst_y >= s_letterbox_y + s_draw_h) return;
     uint16_t *drow = s_lcd_fb + dst_y * 128;
     int step = (screen_w << 8) / 128;          /* 8.8 fixed */
 

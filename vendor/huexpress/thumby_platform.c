@@ -144,6 +144,7 @@ char *log_filename = NULL;
  * touch it; signed int for atomicity. */
 volatile int g_pce_frame_done = 0;
 
+
 /* hard_init is the actual HuExpress init entry (in hard_pce.c).
  * Alias it as hardware_init so pce_core.c's wrapper can call the
  * upstream name without a rename. */

@@ -142,5 +142,11 @@ exe_go(void)
         }
         ODROID_DEBUG_PERF_INCR2(debug_perf_total, ODROID_DEBUG_PERF_TOTAL)
     }
-    MESSAGE_ERROR("Abnormal exit from the cpu loop\n");
+    /* ThumbyNES patch: upstream considered exe_go returning to be a
+     * fatal "should never happen" path. With our g_pce_frame_done
+     * frame-tick model it's the NORMAL exit point, fired 60 times a
+     * second. The original printf was flooding stdout/UART and on
+     * host that sync-flushes per call, starving SDL's audio queue
+     * and producing pervasive crackle. Removed. */
+    /* MESSAGE_ERROR("Abnormal exit from the cpu loop\n"); */
 }

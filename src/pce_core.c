@@ -287,7 +287,12 @@ int pcec_load_rom(const uint8_t *data, size_t len)
      * the CRC so CRC_file short-circuits on its in-memory fast path. */
     ROM = (uchar *)body;
     ROM_size = (int)(body_len / 0x2000);
-    Country = (s_region == PCEC_REGION_JP) ? 0 : 1;
+    /* `Country` is OR'd directly into the joypad-port read; the cart
+     * tests bit 6 to branch on region. JP=0, US=$40. Defaulting to US
+     * for AUTO matches what most carts (including Japanese ones) tolerate
+     * and unsticks USA carts like Legendary Axe II that otherwise take
+     * the JP boot path and hang in SATB-wait. */
+    Country = (s_region == PCEC_REGION_JP) ? 0x00 : 0x40;
     g_pce_mem_rom_crc = pce_crc32_buf(body, body_len);
     g_pce_mem_rom_active = 1;
 
@@ -403,19 +408,45 @@ int pcec_audio_pull(int16_t *out, int n)
         WriteBuffer((char *)s_sbuf[ch], ch, (unsigned)n);
     }
 
-    /* Mix 6 PSG channels → mono signed 16-bit.
-     * Per-channel per-sample range is -127..127 (mono averages L/R
-     * balance so keeps the same per-byte range). Sum of 6 channels
-     * → ±762. Shift by 5 (×32) expands into int16 with headroom. */
+    /* Mix 6 PSG channels → mono signed 16-bit. Three things matter
+     * for clean output:
+     *
+     *  1. Apply the PSG master volume (io.psg_volume). PCE format:
+     *     bits 7-4 = L master, 3-0 = R master. The HuExpress
+     *     mix.c only applies it for noise channels, so wave channels
+     *     ignore master fades entirely without this step. We scale
+     *     the mono mix by (avg of L+R) / 15 (0..1.0).
+     *
+     *  2. Cascaded 2-pole IIR LPF (a=1/2 each, ≈1.6 kHz cutoff,
+     *     -12 dB/oct). Real PCE has an analog low-pass on the DAC
+     *     output around 3 kHz; ours is a touch tighter to compensate
+     *     for the lack of bandlimited wavetable resampling.
+     *
+     *  3. Reduce master gain to <<4 (×16) so the master-volume
+     *     scaling has headroom and we don't risk clipping when many
+     *     channels peak together. Top-end loudness mostly comes back
+     *     when the user turns the volume up downstream. */
+    /* Master volume: combines L+R nibbles to a mono 0..30 multiplier.
+     * Sum of 6 channels is ±762; ×30 = ±22860, well inside int16. So
+     * for master=30 the gain is ~equivalent to the previous <<5
+     * (×32) with proper room left for the LPF. master=0 → silence,
+     * which is what the cart asked for. */
+    int master = ((io.psg_volume >> 4) & 0x0F) + (io.psg_volume & 0x0F);
+
+    static int32_t lpf1 = 0;
+    static int32_t lpf2 = 0;
     for (int i = 0; i < n; i++) {
         int32_t mix = 0;
         for (int ch = 0; ch < 6; ch++) {
             mix += (int32_t)s_sbuf[ch][i];
         }
-        mix <<= 5;
-        if (mix >  32767) mix =  32767;
-        if (mix < -32768) mix = -32768;
-        out[i] = (int16_t)mix;
+        mix *= master;
+        lpf1 = (mix  + lpf1) >> 1;
+        lpf2 = (lpf1 + lpf2) >> 1;
+        int32_t y = lpf2;
+        if (y >  32767) y =  32767;
+        if (y < -32768) y = -32768;
+        out[i] = (int16_t)y;
     }
     return n;
 }

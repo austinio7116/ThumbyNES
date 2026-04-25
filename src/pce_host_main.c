@@ -96,11 +96,15 @@ int main(int argc, char **argv)
      * the producer at ~60 Hz). */
     const int AUDIO_RATE = 22050;
     const int SAMPLES_PER_FRAME = AUDIO_RATE / 60 + 1;  /* 368 */
+    /* 2048-sample chunk = ~93 ms — large enough that the OS audio
+     * subsystem won't see a momentary frame stretch on host as a
+     * starvation event. Latency on host doesn't matter much; on the
+     * device we use a separate DMA path. */
     SDL_AudioSpec want = {
         .freq = AUDIO_RATE,
         .format = AUDIO_S16SYS,
         .channels = 1,
-        .samples = 512,
+        .samples = 2048,
         .callback = NULL,
     };
     SDL_AudioDeviceID audio_dev =
@@ -131,13 +135,16 @@ int main(int argc, char **argv)
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
 
-        /* Pull one frame of audio and push to SDL. Drop samples if
-         * the device queue is already a few frames deep to avoid
-         * latency creeping up. */
+        /* Pull one frame of audio and push to SDL. We aim for a queue
+         * depth of ~4–8 frames so the audio stream survives short
+         * scheduling stalls in the wall-clock pacer; dropping samples
+         * mid-stream causes audible clicks (the wraparound at the next
+         * sample is a step discontinuity). Cap at 16 frames so latency
+         * doesn't creep unboundedly. */
         if (audio_dev) {
             int got = pcec_audio_pull(audio_scratch, SAMPLES_PER_FRAME);
             uint32_t q = SDL_GetQueuedAudioSize(audio_dev);
-            if (q < (uint32_t)(SAMPLES_PER_FRAME * 4 * sizeof(int16_t))) {
+            if (q < (uint32_t)(SAMPLES_PER_FRAME * 16 * sizeof(int16_t))) {
                 SDL_QueueAudio(audio_dev, audio_scratch,
                                (uint32_t)got * sizeof(int16_t));
             }

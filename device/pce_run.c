@@ -320,19 +320,13 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         rom_const = rom_alloc;
     }
 
-    /* US-encoded HuCards (TurboGrafx-16): detect + decrypt before the
-     * core sees the ROM. mmap'd XIP is read-only so we can't rewrite
-     * in place — fall back to a RAM copy for those. The permanent
-     * "decrypt in flash at upload time" path is Phase 2 (see
-     * PCE_PLAN.md §1 on US cart strategy). */
+    /* US-encoded (bit-reversed) HuCards aren't supported on the device.
+     * Pre-decoded dumps work fine and are the de-facto standard in
+     * modern PCE/TG-16 dump sets, so we just refuse to load encrypted
+     * blobs and surface a load-error in the picker. */
     if (pcec_rom_is_us_encoded(rom_const, sz)) {
-        if (!rom_alloc) {
-            rom_alloc = (uint8_t *)malloc(sz);
-            if (!rom_alloc) return -21;
-            memcpy(rom_alloc, rom_const, sz);
-            rom_const = rom_alloc;
-        }
-        pcec_rom_decrypt_us(rom_alloc, sz);
+        free(rom_alloc);
+        return -22;     /* surfaces as "load err -22" in nes_device_main */
     }
 
     if (pcec_init(PCEC_REGION_AUTO, 22050) != 0) {
@@ -668,14 +662,13 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         if (cur_fb) {
             if (show_fps) {
-                char l0[24], l1[24];
-                snprintf(l0, sizeof(l0), "%2d e%5u t%5u",
-                         fps_show, (unsigned)emu_us_show, (unsigned)cycle_us_show);
-                snprintf(l1, sizeof(l1), "w%5u a%5u",
-                         (unsigned)wait_us_show, (unsigned)aud_us_show);
-                memset(cur_fb + 5  * 128, 0, NES_FONT_CELL_H * 128 * 2);
-                nes_font_draw(cur_fb, l0, 2,  5, 0xFFE0);
-                nes_font_draw(cur_fb, l1, 2, 16, 0xFFE0);
+                /* fps + frames skipped in the last 1-sec window.
+                 * Drawn on top of the game without a black bar. */
+                char ftxt[16];
+                snprintf(ftxt, sizeof(ftxt), "%2d k%2u%s",
+                         fps_show, (unsigned)skipped_show,
+                         fast_forward ? " FF" : "");
+                nes_font_draw(cur_fb, ftxt, 2, 5, 0xFFE0);
             }
             if (osd_text_ms > 0) {
                 int w = nes_font_width(osd_text);

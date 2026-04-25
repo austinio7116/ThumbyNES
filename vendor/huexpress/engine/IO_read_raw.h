@@ -89,8 +89,12 @@
             io.joy_counter = (uchar) ((io.joy_counter + 1) % 5);
         }
 
-        /* return ret | Country; *//* country 0:JPN 1<<6=US */
-        return ret | 0x30;      // those 2 bits are always on, bit 6 = 0 (Jap), bit 7 = 0 (Attached cd)
+        /* Country bit 6 selects region: 0=Japan, 0x40=USA. The wrapper
+         * sets `Country` (declared in pce.c) based on filename heuristics
+         * — without this, USA carts that branch on $1000.bit6 (e.g.
+         * Legendary Axe II) take the Japanese boot path and hang in
+         * SATB-wait loops with SEI in effect. */
+        return ret | 0x30 | (uchar)Country;
 
     case 0x1400:                /* IRQ */
         switch (A & 15) {
