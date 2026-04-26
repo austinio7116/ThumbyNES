@@ -21,6 +21,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Must come BEFORE HuExpress headers — hard_pce.h has `#define io
+ * (*p_io)`, which would otherwise rewrite the `io` parameter name in
+ * the bridge's function prototypes and miscompile the call as
+ * "thumby_state_io_t **" instead of "thumby_state_io_t *". */
+#ifdef THUMBY_STATE_BRIDGE
+#  include "thumby_state_bridge.h"
+#endif
+
 /* HuExpress engine — pulled in under THUMBY_BUILD so it sees
  * thumby_platform.h instead of ESP-IDF. */
 #include "cleantypes.h"
@@ -523,19 +531,233 @@ int pcec_audio_pull(int16_t *out, int n)
 uint8_t *pcec_battery_ram(void)  { return s_bram; }
 size_t   pcec_battery_size(void) { return sizeof s_bram; }
 
+/* ---- Save/load state ----------------------------------------------
+ *
+ * HuExpress has no upstream save-state — we hand-roll one. Format is
+ * a fixed-layout binary stream, version-tagged. We bind the ROM CRC
+ * into the header so loading a state into the wrong cart fails fast
+ * instead of dereferencing nonsense bank mappings.
+ *
+ * Pointer hygiene: the IO struct holds runtime pointers (VCE buffer,
+ * 6× psg_da_data buffers). We write the struct verbatim — those
+ * pointer slots in the file are junk — then the load path patches
+ * them back to the still-valid live allocations after the read.
+ *
+ * The ROM bank map (PageR/PageW) is rebuilt from mmr[] via bank_set,
+ * so it isn't part of the state file. Same for IO_VDC_active_ref,
+ * which is recomputed from io.vdc_reg with IO_VDC_active_set.
+ *
+ * The 8-byte magic is "PCESTATE" (no NUL). Version is bumped any time
+ * a layout-affecting field is added, removed, or resized.
+ */
+#define PCE_STATE_MAGIC0 0x50  /* 'P' */
+#define PCE_STATE_MAGIC1 0x43  /* 'C' */
+#define PCE_STATE_MAGIC2 0x45  /* 'E' */
+#define PCE_STATE_MAGIC3 0x53  /* 'S' */
+#define PCE_STATE_MAGIC4 0x54  /* 'T' */
+#define PCE_STATE_MAGIC5 0x41  /* 'A' */
+#define PCE_STATE_MAGIC6 0x54  /* 'T' */
+#define PCE_STATE_MAGIC7 0x45  /* 'E' */
+#define PCE_STATE_VERSION 1u
+
+#ifdef THUMBY_STATE_BRIDGE
+typedef thumby_state_io_t *pce_state_file;
+#  define PCE_FOPEN(p, m)        thumby_state_open((p), (m))
+#  define PCE_FCLOSE(f)          thumby_state_close((f))
+#  define PCE_FWRITE(b, n, f)    (thumby_state_write((b), 1, (n), (f)) == (n) ? 0 : -1)
+#  define PCE_FREAD(b, n, f)     (thumby_state_read ((b), 1, (n), (f)) == (n) ? 0 : -1)
+#else
+typedef FILE *pce_state_file;
+#  define PCE_FOPEN(p, m)        fopen((p), (m))
+#  define PCE_FCLOSE(f)          fclose((f))
+#  define PCE_FWRITE(b, n, f)    (fwrite((b), 1, (n), (f)) == (n) ? 0 : -1)
+#  define PCE_FREAD(b, n, f)     (fread ((b), 1, (n), (f)) == (n) ? 0 : -1)
+#endif
+
 int pcec_save_state(const char *path)
 {
-    /* TODO(pcec_state): custom THPE format per PCE_PLAN.md §7.
-     * Structure: magic, version, hard_pce struct, RAM, VRAM, Pal,
-     * SPRAM, IO. Wire through thumby_state_bridge.h. */
-    (void)path;
-    return -1;
+    if (!path || !s_inited || !hard_pce) return -1;
+
+    pce_state_file f = PCE_FOPEN(path, "wb");
+    if (!f) return -2;
+
+    /* Header: 8-byte magic + version + ROM CRC + Country. The
+     * 4-byte reserved word is for future use (e.g. flag bits). */
+    uint8_t  magic[8] = {
+        PCE_STATE_MAGIC0, PCE_STATE_MAGIC1, PCE_STATE_MAGIC2, PCE_STATE_MAGIC3,
+        PCE_STATE_MAGIC4, PCE_STATE_MAGIC5, PCE_STATE_MAGIC6, PCE_STATE_MAGIC7,
+    };
+    uint32_t version  = PCE_STATE_VERSION;
+    uint32_t rom_crc  = g_pce_mem_rom_crc;
+    int32_t  country  = (int32_t)Country;
+    uint32_t reserved = 0;
+
+    /* CPU registers — these live in hard_pce.c globals (reg_pc_, etc.)
+     * and are referenced directly in non-SHARED_MEMORY mode. cycles_
+     * is the per-instruction tally that exe_go consults each iter. */
+    uint32_t st_reg_pc = (uint32_t)reg_pc;
+    uint8_t  st_reg_a  = (uint8_t)reg_a;
+    uint8_t  st_reg_x  = (uint8_t)reg_x;
+    uint8_t  st_reg_y  = (uint8_t)reg_y;
+    uint8_t  st_reg_p  = (uint8_t)reg_p;
+    uint8_t  st_reg_s  = (uint8_t)reg_s;
+    uint32_t st_cycles = cycles_;
+
+    /* Hard-PCE dynamic scalars. Pointers in struct_hard_pce point at
+     * still-valid heap blocks (RAM/VRAM/...) we re-fill below; we
+     * don't serialise those pointer values. */
+    uint32_t st_scanline   = hard_pce->s_scanline;
+    uint32_t st_cyclecount = hard_pce->s_cyclecount;
+    uint32_t st_cyclecountold = hard_pce->s_cyclecountold;
+    int32_t  st_ext_ctrl   = hard_pce->s_external_control_cpu;
+
+    if (PCE_FWRITE(magic,             8, f) ||
+        PCE_FWRITE(&version,          4, f) ||
+        PCE_FWRITE(&rom_crc,          4, f) ||
+        PCE_FWRITE(&country,          4, f) ||
+        PCE_FWRITE(&reserved,         4, f) ||
+        PCE_FWRITE(&st_reg_pc,        4, f) ||
+        PCE_FWRITE(&st_reg_a,         1, f) ||
+        PCE_FWRITE(&st_reg_x,         1, f) ||
+        PCE_FWRITE(&st_reg_y,         1, f) ||
+        PCE_FWRITE(&st_reg_p,         1, f) ||
+        PCE_FWRITE(&st_reg_s,         1, f) ||
+        PCE_FWRITE(&st_cycles,        4, f) ||
+        PCE_FWRITE(&st_scanline,      4, f) ||
+        PCE_FWRITE(&st_cyclecount,    4, f) ||
+        PCE_FWRITE(&st_cyclecountold, 4, f) ||
+        PCE_FWRITE(&st_ext_ctrl,      4, f) ||
+        PCE_FWRITE(mmr,               8, f))
+    { goto fail; }
+
+    /* Bulk memory regions. RAM is allocated 32 KB but only 0x2000
+     * is meaningful on a CoreGrafx; we save the full 32 KB to keep
+     * the layout simple and to leave room for future SuperGrafx. */
+    if (PCE_FWRITE(RAM,    0x8000, f) ||
+        PCE_FWRITE(WRAM,   0x2000, f) ||
+        PCE_FWRITE(VRAM,  VRAMSIZE, f) ||
+        PCE_FWRITE(SPRAM, 64 * 4 * sizeof(uint16), f) ||
+        PCE_FWRITE(Pal,    512,    f))
+    { goto fail; }
+
+    /* IO struct + buffers it points at. Order: VCE pal data,
+     * psg_da_data[6] direct-PSG buffers, then the IO struct
+     * itself (whose pointers are stale and overwritten on load). */
+    if (PCE_FWRITE(io.VCE, 0x200 * sizeof(pair), f)) goto fail;
+    for (int i = 0; i < 6; i++) {
+        if (PCE_FWRITE(io.psg_da_data[i], PSG_DIRECT_ACCESS_BUFSIZE, f))
+            goto fail;
+    }
+    if (PCE_FWRITE(&io, sizeof(IO), f)) goto fail;
+
+    PCE_FCLOSE(f);
+    return 0;
+
+fail:
+    PCE_FCLOSE(f);
+    return -3;
 }
 
 int pcec_load_state(const char *path)
 {
-    (void)path;
-    return -1;
+    if (!path || !s_inited || !hard_pce) return -1;
+
+    pce_state_file f = PCE_FOPEN(path, "rb");
+    if (!f) return -2;
+
+    uint8_t  magic[8];
+    uint32_t version, rom_crc, reserved;
+    int32_t  country;
+
+    if (PCE_FREAD(magic, 8, f) ||
+        PCE_FREAD(&version,  4, f) ||
+        PCE_FREAD(&rom_crc,  4, f) ||
+        PCE_FREAD(&country,  4, f) ||
+        PCE_FREAD(&reserved, 4, f))
+    { goto fail; }
+
+    if (magic[0] != PCE_STATE_MAGIC0 || magic[1] != PCE_STATE_MAGIC1 ||
+        magic[2] != PCE_STATE_MAGIC2 || magic[3] != PCE_STATE_MAGIC3 ||
+        magic[4] != PCE_STATE_MAGIC4 || magic[5] != PCE_STATE_MAGIC5 ||
+        magic[6] != PCE_STATE_MAGIC6 || magic[7] != PCE_STATE_MAGIC7)
+    { goto fail; }
+    if (version != PCE_STATE_VERSION) goto fail;
+    if (rom_crc != g_pce_mem_rom_crc) goto fail;
+
+    Country = (int)country;
+
+    uint32_t st_reg_pc, st_cycles, st_scanline;
+    uint32_t st_cyclecount, st_cyclecountold;
+    int32_t  st_ext_ctrl;
+    uint8_t  st_reg_a, st_reg_x, st_reg_y, st_reg_p, st_reg_s;
+    uint8_t  st_mmr[8];
+
+    if (PCE_FREAD(&st_reg_pc,        4, f) ||
+        PCE_FREAD(&st_reg_a,         1, f) ||
+        PCE_FREAD(&st_reg_x,         1, f) ||
+        PCE_FREAD(&st_reg_y,         1, f) ||
+        PCE_FREAD(&st_reg_p,         1, f) ||
+        PCE_FREAD(&st_reg_s,         1, f) ||
+        PCE_FREAD(&st_cycles,        4, f) ||
+        PCE_FREAD(&st_scanline,      4, f) ||
+        PCE_FREAD(&st_cyclecount,    4, f) ||
+        PCE_FREAD(&st_cyclecountold, 4, f) ||
+        PCE_FREAD(&st_ext_ctrl,      4, f) ||
+        PCE_FREAD(st_mmr,            8, f))
+    { goto fail; }
+
+    if (PCE_FREAD(RAM,    0x8000, f) ||
+        PCE_FREAD(WRAM,   0x2000, f) ||
+        PCE_FREAD(VRAM,  VRAMSIZE, f) ||
+        PCE_FREAD(SPRAM, 64 * 4 * sizeof(uint16), f) ||
+        PCE_FREAD(Pal,    512,    f))
+    { goto fail; }
+
+    /* Live pointers we must preserve across the IO struct read. */
+    pair  *saved_vce = io.VCE;
+    uchar *saved_psg[6];
+    for (int i = 0; i < 6; i++) saved_psg[i] = io.psg_da_data[i];
+
+    if (PCE_FREAD(saved_vce, 0x200 * sizeof(pair), f)) goto fail;
+    for (int i = 0; i < 6; i++) {
+        if (PCE_FREAD(saved_psg[i], PSG_DIRECT_ACCESS_BUFSIZE, f))
+            goto fail;
+    }
+    if (PCE_FREAD(&io, sizeof(IO), f)) goto fail;
+
+    /* Stale pointers from the file — restore the live allocations. */
+    io.VCE = saved_vce;
+    for (int i = 0; i < 6; i++) io.psg_da_data[i] = saved_psg[i];
+
+    /* CPU and timing scalars. */
+    reg_pc = st_reg_pc;
+    reg_a  = st_reg_a;
+    reg_x  = st_reg_x;
+    reg_y  = st_reg_y;
+    reg_p  = st_reg_p;
+    reg_s  = st_reg_s;
+    cycles_ = st_cycles;
+    hard_pce->s_scanline         = st_scanline;
+    hard_pce->s_cyclecount       = st_cyclecount;
+    hard_pce->s_cyclecountold    = st_cyclecountold;
+    hard_pce->s_external_control_cpu = st_ext_ctrl;
+
+    /* Rebuild PageR/PageW from saved mmr[] via bank_set. mmr[P]=V is
+     * the source of truth for "which 8 KB ROM/RAM bank is paged into
+     * logical bank P"; PageR/W are derived caches into ROMMapR/W. */
+    for (int p = 0; p < 8; p++) bank_set((uchar)p, st_mmr[p]);
+
+    /* Restore the runtime VDC active-register pointer from io.vdc_reg.
+     * The IO struct already has the correct vdc_reg byte; this macro
+     * dispatches it to the matching IO_VDC_xx_* slot. */
+    IO_VDC_active_set(io.vdc_reg);
+
+    PCE_FCLOSE(f);
+    return 0;
+
+fail:
+    PCE_FCLOSE(f);
+    return -3;
 }
 
 void pcec_shutdown(void)
