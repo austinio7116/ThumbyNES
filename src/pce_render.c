@@ -128,13 +128,21 @@ void pce_render_set_target(uint16_t *lcd_fb,
 void pce_render_frame_begin(void)
 {
     if (!s_lcd_fb) return;
-    /* Clear letterbox bars once. The active band gets fully written
-     * row-by-row so we don't need to clear it. */
-    if (s_letterbox_y > 0) {
-        memset(s_lcd_fb, 0, (size_t)s_letterbox_y * 128 * 2);
-        memset(s_lcd_fb + (s_letterbox_y + s_draw_h) * 128, 0,
-               (size_t)(128 - s_letterbox_y - s_draw_h) * 128 * 2);
-    }
+    /* Clear the WHOLE framebuffer (32 KB, ~30 µs at SRAM speed). The
+     * active band is normally fully written by pce_render_scanline, but
+     * games whose VDC active-display range is narrower than 240 lines
+     * (or that haven't finished boot init) leave some rows unpainted.
+     * Without this clear, those rows show whatever the previous frame
+     * left, or — on first frame — whatever was on the stack/heap when
+     * the host (pcehost) allocated the lcd_fb buffer. That's the
+     * visible "noise" on screen for games that don't render the full
+     * 240 PCE rows.
+     *
+     * Cost: 32 KB memset per frame. Negligible compared to the per-
+     * scanline composer's work, and we get a deterministic black
+     * background that immediately reveals which rows the renderer is
+     * actually painting. */
+    memset(s_lcd_fb, 0, 128 * 128 * 2);
     s_have_prev = 0;
 }
 

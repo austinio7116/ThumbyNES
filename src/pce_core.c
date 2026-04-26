@@ -344,12 +344,25 @@ int pcec_load_rom(const uint8_t *data, size_t len)
      * the CRC so CRC_file short-circuits on its in-memory fast path. */
     ROM = (uchar *)body;
     ROM_size = (int)(body_len / 0x2000);
-    /* `Country` is OR'd directly into the joypad-port read; the cart
-     * tests bit 6 to branch on region. JP=0, US=$40. Defaulting to US
-     * for AUTO matches what most carts (including Japanese ones) tolerate
-     * and unsticks USA carts like Legendary Axe II that otherwise take
-     * the JP boot path and hang in SATB-wait. */
-    Country = (s_region == PCEC_REGION_JP) ? 0x00 : 0x40;
+    /* `Country` is OR'd into the $1000 joypad-port read so the cart
+     * sees bit 6 = 0 (PC Engine / JP) or 1 (TurboGrafx-16 / US).
+     *
+     * AUTO defaults to JP because we removed device-side bit-reversal
+     * US-decoding (carts must be pre-decoded). Once a cart is in PCE-
+     * native format, its CPU code is what determines boot behaviour —
+     * Hudson typically produced JP carts and bit-reversed them for US
+     * distribution, so a pre-decoded US cart's code expects to see
+     * bit 6 = 0 just like a JP cart. Tested: R-Type / Legendary Axe II
+     * / Blazing Lazers / Galaga '90 / Dragon's Curse / Super Star
+     * Soldier / Image Fight / Final Soldier all render under JP.
+     * Setting bit 6 (Country=0x40) made the USA carts hang in early
+     * boot with display disabled (CR=0x0000).
+     *
+     * Per-cart override: PCEC_REGION_US forces bit 6 = 1 for the rare
+     * USA cart that was authored against TG-16 firmware and wants
+     * region=US (e.g. region-locked promo carts). The picker cfg can
+     * surface that toggle if anything ever needs it. */
+    Country = (s_region == PCEC_REGION_US) ? 0x40 : 0x00;
     g_pce_mem_rom_crc = pce_crc32_buf(body, body_len);
     g_pce_mem_rom_active = 1;
 
@@ -397,7 +410,6 @@ void pcec_run_frame(void)
     /* exe_go() returns at end-of-frame via our g_pce_frame_done patch
      * (see gfx_Loop6502.h + h6280_exe_go.h). */
     exe_go();
-
 }
 
 int pcec_refresh_rate(void)

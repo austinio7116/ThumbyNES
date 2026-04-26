@@ -65,26 +65,10 @@ int main(int argc, char **argv)
     printf("%d frames in %.3fs = %.1f fps\n",
            BENCH_FRAMES, sec, BENCH_FRAMES / sec);
 
-    const uint8_t *fb = pcec_framebuffer();
-    const uint16_t *pal = pcec_palette_rgb565();
-    if (fb && pal) {
-        uint64_t nz = 0;
-        uint16_t rgb_seen[8] = {0};
-        int rgb_n = 0;
-        for (int y = 0; y < vh; y++) {
-            for (int x = 0; x < vw; x++) {
-                uint8_t p = fb[y * PCEC_PITCH + x];
-                if (p) nz++;
-                uint16_t c = pal[p];
-                int found = 0;
-                for (int k = 0; k < rgb_n; k++)
-                    if (rgb_seen[k] == c) { found = 1; break; }
-                if (!found && rgb_n < 8) rgb_seen[rgb_n++] = c;
-            }
-        }
-        printf("non-zero indices: %llu / %d, distinct colours: %d\n",
-               (unsigned long long)nz, vw * vh, rgb_n);
-    }
+    /* Framebuffer scan removed: under PCE_SCANLINE_RENDER the core
+     * writes pixels straight into the LCD fb passed to
+     * pcec_set_scale_target — pcec_framebuffer() is a 1-byte stub.
+     * The bench just confirms the cart boots and runs 600 frames. */
 
     pcec_shutdown();
     free(buf);

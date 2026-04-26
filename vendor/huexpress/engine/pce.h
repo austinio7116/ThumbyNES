@@ -416,8 +416,14 @@ extern pair *IO_VDC_active_ref;
     case 0x13: IO_VDC_active_ref = &IO_VDC_13_SATB; break; \
     case 0x14: IO_VDC_active_ref = &IO_VDC_14; break; \
     default: \
-        printf("Reg invalid: 0x%0X\n", io.vdc_reg); \
-        abort(); \
+        /* THUMBYNES: real PCE VDC has 21 registers (0..0x14); higher \
+         * values are undefined. Upstream abort() takes down host \
+         * pcehost on Dragon's Curse boot (ROM writes 0x15 to the reg \
+         * select). Park the active ref on a safe register; the \
+         * subsequent data write goes to a legit slot, no further \
+         * action needed. */ \
+        IO_VDC_active_ref = &IO_VDC_14; \
+        break; \
     } \
     }
 

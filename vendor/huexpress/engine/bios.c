@@ -16,10 +16,21 @@
 #include "pce.h"
 
 #ifdef MY_EXCLUDE
+/* THUMBYNES: PCE_HUCARD_ONLY build, no CD-BIOS support. Opcode 0xFC
+ * dispatches here as the CD-BIOS syscall trampoline; a HuCard that
+ * legitimately calls 0xFC needs the system card — we don't have one,
+ * so the syscall would be unhandled anyway. But a wild-branch or
+ * data-as-code 0xFC absolutely shouldn't kill the emulator. Behave
+ * like a 2-byte NOP so the outer dispatch loop advances and the CPU
+ * keeps running.
+ *
+ * Original stub here was abort() — that took down pcebench for
+ * Blazing Lazers / Dragon's Curse / Galaga '90 / Image Fight / Super
+ * Star Soldier as soon as their boot stream landed on a 0xFC byte. */
 void handle_bios(void)
 {
-    printf("handle_bios: not implemented!\n");
-    abort();
+    reg_pc += 2;
+    cycles_ += 8;
 }
 
 #else
