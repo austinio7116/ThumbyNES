@@ -448,7 +448,9 @@ osd_getTime(void)
 
 #ifndef MY_h6280_exe_go
 
-IRAM_ATTR void
+/* Inactive: MY_h6280_exe_go is set in myadd.h, so the active body
+ * is in h6280_exe_go.h (included at the end of this file). */
+void
 exe_go(void)
 {
 /*    flnz_list = (uchar *)my_special_alloc(false, 1,256);

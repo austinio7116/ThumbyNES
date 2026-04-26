@@ -144,30 +144,14 @@ SECTIONS
         __md_iram_pool_end = .;
     } > FLASH
 
-    /* ThumbyNES dynamic IRAM pool for PCE. Hot HuExpress functions
-     * (exe_go + IO_read_/IO_write_/adc/sbc + WriteBuffer + the
-     * scanline composer + the cold callees exe_go BLs to from inside
-     * the pool body) are tagged with
-     * __attribute__((section(".pce_iram_pool"))) so they collect
-     * here. device/pce_iram.c memcpys this whole block into a heap
-     * buffer at pcec_init and free's it at pcec_shutdown, so the RAM
-     * cost is dynamic — only paid while the user is in the PCE slot.
-     * Same lifecycle as md_iram.c.
-     *
-     * Internal BLs across pool members work because the linker emits
-     * PC-relative offsets, and memcpy preserves member-to-member
-     * spacing. External BLs from inside the pool to non-pool code
-     * would break — that's why all the once-per-frame helpers
-     * exe_go calls (RefreshScreen / CheckSprites / change_pce_screen_height
-     * / wait_next_vsync / osd_keyboard) are pulled in too. */
-    .pce_iram_pool : {
-        . = ALIGN(4);
-        __pce_iram_pool_start = .;
-        KEEP(*(.pce_iram_pool))
-        KEEP(*(.pce_iram_pool.*))
-        . = ALIGN(4);
-        __pce_iram_pool_end = .;
-    } > FLASH
+    /* PCE hot functions go into the SDK's standard `.time_critical.*`
+     * section instead of a custom pool. The SDK linker script + crt0
+     * already handle that section: it's loaded into FLASH but the
+     * boot-time copy moves it to SRAM before main(), and ld auto-
+     * generates long-call veneers for any cross-segment BLs (libc
+     * memset/memcpy, vendor Log, etc.) — which is exactly what trips
+     * up the dynamic-pool scheme. ~28 KB BSS cost, paid for via the
+     * PCE/SMS leak fixes that recovered ~95 KB of slot heap. */
 
     .ARM.extab :
     {

@@ -419,12 +419,18 @@ if (THUMBYNES_WITH_PCE)
         FINAL_RELEASE=1
         PCE_HUCARD_ONLY
         PCE_SCANLINE_RENDER
-        # Hot functions land in .pce_iram_pool (a flash section the
-        # linker reserves via md_memmap.ld). pce_iram.c memcopies the
-        # pool to heap at pcec_init time and frees it on shutdown, so
-        # the 36 KB cost is dynamic — only paid while the user is in
-        # the PCE slot. Same pattern as md_iram.c for Cz80_Exec.
-        "IRAM_ATTR=__attribute__((section(\".pce_iram_pool\")))"
+        # Static IRAM: only the genuinely hot hot-path goes into the
+        # SDK's `.time_critical.pce` SRAM-resident section — exe_go
+        # and the adc/sbc/IO_read_/IO_write_ helpers it calls every
+        # opcode, plus the audio synth WriteBuffer. Cold callees
+        # (RefreshScreen / CheckSprites / change_pce_screen_height /
+        # wait_next_vsync / osd_keyboard — once-per-frame at most)
+        # stay in XIP flash; ld auto-generates veneers for the long
+        # cross-segment BLs.
+        #
+        # Equivalent to `__not_in_flash("pce")`; expanded inline
+        # because the macro form doesn't survive `-D` token quoting.
+        "IRAM_ATTR=__attribute__((section(\".time_critical.pce\")))"
     )
     target_compile_options(huexpress PRIVATE
         -O3
@@ -461,11 +467,11 @@ target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 
 if (THUMBYNES_WITH_PCE)
     target_compile_definitions(thumbynes_core PUBLIC THUMBYNES_WITH_PCE=1)
-    # Match the huexpress IRAM_ATTR mapping for src/pce_render.c so
-    # the scanline composer joins the dynamic pool.
-    target_compile_definitions(thumbynes_core PRIVATE
-        "PCE_HOT_ATTR=__attribute__((section(\".pce_iram_pool\")))"
-        PCE_RENDER_IRAM=1)
+    # PCE_HOT_ATTR left undefined → expands to nothing in pce_render.c.
+    # Static IRAM is reserved for exe_go (the dispatcher), the dominant
+    # cost. The scanline composer stays in flash; ld emits veneers for
+    # exe_go (in SRAM) → pce_render_scanline (in flash) BLs. We can
+    # tag specific render hotspots later if perf isn't enough.
     target_link_libraries(thumbynes_core PUBLIC huexpress)
 endif()
 
@@ -542,7 +548,7 @@ if (THUMBYNES_WITH_MD)
     endif()
 endif()
 if (THUMBYNES_WITH_PCE)
-    list(APPEND NES_SRC_BASE pce_run.c pce_iram.c)
+    list(APPEND NES_SRC_BASE pce_run.c)
 endif()
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_SRC_BASE
@@ -584,16 +590,12 @@ pico_enable_stdio_uart(nesrun_device 0)
 if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
     target_link_options(nesrun_device PRIVATE -Wl,--wrap=Cz80_Exec)
 endif()
-if (THUMBYNES_WITH_PCE)
-    # Wrap exe_go so callers (pcec_run_frame in pce_core.c) dispatch
-    # via the function-pointer thunk in pce_iram.c — points at flash
-    # before pce_iram_init and at the heap copy after.
-    target_link_options(nesrun_device PRIVATE -Wl,--wrap=exe_go)
-endif()
-# md_memmap.ld carries both .md_iram_pool and .pce_iram_pool. Select
-# it whenever either dynamic-IRAM scheme is on — they're independent
-# and the script is harmless if one of them is empty.
-if ((THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC) OR THUMBYNES_WITH_PCE)
+# md_memmap.ld carries the .md_iram_pool section that the dynamic-
+# IRAM scheme for PicoDrive's Cz80_Exec collects into. PCE runs from
+# the SDK's standard `.time_critical.*` SRAM-resident section so it
+# doesn't need a custom script — but we still need md_memmap.ld
+# whenever MD's dynamic IRAM is on.
+if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
     pico_set_linker_script(nesrun_device ${CMAKE_CURRENT_LIST_DIR}/md_memmap.ld)
 endif()
 

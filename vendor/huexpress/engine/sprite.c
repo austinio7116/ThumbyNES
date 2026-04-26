@@ -59,8 +59,11 @@ int frame = 0;
 /*
 	Hit Chesk Sprite#0 and others
 */
-/* Pool-tagged: exe_go BLs CheckSprites from inside .pce_iram_pool. */
-IRAM_ATTR int32
+/* Cold path — exe_go BLs CheckSprites once per frame; the linker
+ * generates a long-call veneer when CheckSprites lives in flash and
+ * exe_go in `.time_critical.pce` SRAM. Saves ~3 KB SRAM by not
+ * tagging this. */
+int32
 CheckSprites(void)
 {
 	int i, x0, y0, w0, h0, x, y, w, h;

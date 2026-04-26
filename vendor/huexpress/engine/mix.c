@@ -207,7 +207,7 @@ WriteBufferAdpcm8(uchar * buf, uint32 begin, uint32 size, char *Index,
 }
 
 
-IRAM_ATTR void
+void
 WriteBuffer(char *buf, int ch, unsigned dwSize)
 {
     static uint32 fixed_n[6] = { 0, 0, 0, 0, 0, 0 };

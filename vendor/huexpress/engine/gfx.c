@@ -132,9 +132,9 @@ calc_fullscreen_aspect(unsigned short physical_screen_width,
 }
 
 //! Computes the new screen height and eventually change the screen mode
-/* Pool-tagged: exe_go BLs change_pce_screen_height from inside the
- * .pce_iram_pool when a cart writes a video-mode reg mid-frame. */
-IRAM_ATTR void
+/* Cold path — only fires when a cart switches video mode (e.g. mode
+ * change between scenes). Stays in flash. */
+void
 change_pce_screen_height()
 {
 	//! minimal theorical line where to begin drawing

@@ -788,7 +788,7 @@ nb_sect2msf(uint32 lsn, uchar * min, uchar * sec, uchar * frm)
 }
 
 
-IRAM_ATTR void
+void
 IO_write_(uint16 A, uchar V)
 {
 #include "IO_write.h"

@@ -17,7 +17,6 @@
  */
 #include "pce_run.h"
 #include "pce_core.h"
-#include "pce_iram.h"
 #include "nes_picker.h"
 #include "nes_lcd_gc9107.h"
 #include "nes_audio_pwm.h"
@@ -325,15 +324,6 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
      * doesn't see one frame of stale heap when ping-ponging buffers. */
     memset(pce_fb_back, 0, 128 * 128 * sizeof(uint16_t));
 
-    /* Copy the .pce_iram_pool flash section into a heap buffer and
-     * repoint the --wrap thunks at it. ~28 KB heap consumed for the
-     * session; reclaimed on exit. Without this the HuC6280 dispatcher
-     * runs from XIP flash at ~half speed. */
-    if (pce_iram_init() != 0) {
-        free(pce_fb_back); pce_fb_back = NULL;
-        return -41;
-    }
-
     /* Reuse the picker's XIP mmap path. PCE HuCards are small enough
      * (max 1 MB common, 2.5 MB for 20-Mbit carts) that fragmented
      * chains are rare but we still fall through to the RAM loader if
@@ -345,7 +335,6 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
         if (!rom_alloc) {
-            pce_iram_shutdown();
             free(pce_fb_back); pce_fb_back = NULL;
             return -30 + mmap_rc;
         }
@@ -358,21 +347,18 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
      * blobs and surface a load-error in the picker. */
     if (pcec_rom_is_us_encoded(rom_const, sz)) {
         free(rom_alloc);
-        pce_iram_shutdown();
         free(pce_fb_back); pce_fb_back = NULL;
         return -22;     /* surfaces as "load err -22" in nes_device_main */
     }
 
     if (pcec_init(PCEC_REGION_AUTO, 22050) != 0) {
         free(rom_alloc);
-        pce_iram_shutdown();
         free(pce_fb_back); pce_fb_back = NULL;
         return -20;
     }
     if (pcec_load_rom(rom_const, sz) != 0) {
         free(rom_alloc);
         pcec_shutdown();
-        pce_iram_shutdown();
         free(pce_fb_back); pce_fb_back = NULL;
         return -10;
     }
@@ -773,7 +759,6 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     pcec_shutdown();
-    pce_iram_shutdown();                       /* ~28 KB back to heap */
     free(rom_alloc);
     free(pce_fb_back); pce_fb_back = NULL;     /* 32 KB back to heap */
     while (!gpio_get(BTN_MENU_GP)) sleep_ms(10);

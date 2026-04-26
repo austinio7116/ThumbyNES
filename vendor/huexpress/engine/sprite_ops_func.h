@@ -313,8 +313,11 @@ plane2pixel(int no)
         Return: nothing
 
 *****************************************************************************/
-/* Pool-tagged: exe_go BLs RefreshScreen from inside .pce_iram_pool. */
-IRAM_ATTR void
+/* Cold path: once per frame; in our scanline build the body is mostly
+ * a no-op (HCD_handle_subtitle stub + stub_drv_draw + ENABLE_TRACING_*
+ * gated tracing). Stays in flash; ld emits a long-call veneer when
+ * exe_go (in `.time_critical.pce` SRAM) reaches it. */
+void
 RefreshScreen(void)
 {
     frame += UPeriod + 1;
