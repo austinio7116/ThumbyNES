@@ -6,7 +6,7 @@
 
 /*@ -type */
 
-static uchar
+IRAM_ATTR static uchar
 adc(uchar acc, uchar val)
 {
     int16 sig = (SBYTE) acc;
@@ -55,7 +55,7 @@ adc(uchar acc, uchar val)
     return (acc);
 }
 
-static void
+IRAM_ATTR static void
 sbc(uchar val)
 {
     int16 sig = (SBYTE) reg_a;

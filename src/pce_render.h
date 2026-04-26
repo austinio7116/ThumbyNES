@@ -31,3 +31,8 @@ void pce_render_frame_begin(void);
  * the bound LCD framebuffer, compositing BG tiles and sprites from
  * VRAM / SPRAM live — no XBUF, no SPM, no shadow VRAMs. */
 void pce_render_scanline(int pce_y);
+
+/* Free the per-session scratch (BG-decode spread LUT). Called from
+ * pcec_shutdown so the 2 KB returns to the heap when other emulators
+ * in the same firmware partition take over. */
+void pce_render_shutdown(void);

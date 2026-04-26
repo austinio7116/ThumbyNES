@@ -313,7 +313,8 @@ plane2pixel(int no)
         Return: nothing
 
 *****************************************************************************/
-void
+/* Pool-tagged: exe_go BLs RefreshScreen from inside .pce_iram_pool. */
+IRAM_ATTR void
 RefreshScreen(void)
 {
     frame += UPeriod + 1;

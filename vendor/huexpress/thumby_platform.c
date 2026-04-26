@@ -73,7 +73,8 @@ void osd_gfx_set_message(char *msg) { (void)msg; }
 /* Upstream sys_inp polls the keyboard via osd_keyboard() each frame.
  * We drive input through io.JOY[0] directly from pcec_set_buttons,
  * so this is a no-op returning "no key pressed". */
-int osd_keyboard(void) { return 0; }
+/* Pool-tagged for the same reason as wait_next_vsync above. */
+IRAM_ATTR int osd_keyboard(void) { return 0; }
 
 /* Breakpoint table entries — bp.c was stripped. Provide weak no-ops.
  * h6280's opcode table has one entry per 256 opcodes referencing a
@@ -169,7 +170,10 @@ void Log(const char *fmt, ...) {
 }
 
 /* Frame pacing is handled by the runner — this is a no-op. */
-void wait_next_vsync(void) {}
+/* exe_go BLs into wait_next_vsync from inside the .pce_iram_pool, so
+ * the stub has to live in the pool too — otherwise the BL's PC-rel
+ * offset breaks once exe_go is memcpy'd onto the heap. */
+IRAM_ATTR void wait_next_vsync(void) {}
 
 /* Runtime ROM patch helper — we don't ship patch files. */
 void patch_rom(char *filename, int offset, uchar value) {

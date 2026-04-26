@@ -78,7 +78,13 @@ extern void *my_special_alloc(unsigned char speed, unsigned char bytes, unsigned
 
 //#define MY_REALLOC_MEMORY_SIDEARMS
 //#define MY_PCENGINE_LOGGING
-#define MY_LOG_CPU_NOT_INLINED // Slower without?!
+/* MY_LOG_CPU_NOT_INLINED inserts printf("HMM: 0x%02X") for the 38
+ * cold-opcode lookup fallbacks. We strip it: the calls would BL into
+ * non-pool flash and break exe_go's relocation when the dynamic-IRAM
+ * memcpies it onto the heap. The 38 cold opcodes still dispatch via
+ * optable_runtime[cmd].func_exe (absolute BLX Rn) which works from
+ * any execution location. */
+//#define MY_LOG_CPU_NOT_INLINED // Slower without?!
 //#define BENCHMARK
 //#define MY_VSYNC_DISABLE
 //#define MY_DEBUG_CHECKS

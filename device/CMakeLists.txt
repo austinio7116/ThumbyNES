@@ -68,8 +68,14 @@ endif()
 # scanline renderer is plumbed will link fine but OOM on first frame.
 # ----------------------------------------------------------------------
 option(THUMBYNES_WITH_PCE "Build PC Engine / TurboGrafx (HuExpress) into ThumbyNES" OFF)
-if (DEFINED THUMBYONE_WITH_PCE AND NOT THUMBYONE_WITH_PCE)
-    set(THUMBYNES_WITH_PCE OFF)
+# When invoked from ThumbyOne, follow the parent flag: ThumbyOne
+# decides whether the unified firmware ships with PCE enabled.
+if (DEFINED THUMBYONE_WITH_PCE)
+    if (THUMBYONE_WITH_PCE)
+        set(THUMBYNES_WITH_PCE ON)
+    else()
+        set(THUMBYNES_WITH_PCE OFF)
+    endif()
 endif()
 
 # ----------------------------------------------------------------------
@@ -413,11 +419,12 @@ if (THUMBYNES_WITH_PCE)
         FINAL_RELEASE=1
         PCE_HUCARD_ONLY
         PCE_SCANLINE_RENDER
-        # TODO: once the scanline renderer is plumbed, flip this on:
-        # PCE_SCANLINE_RENDER
-        # Map IRAM_ATTR so h6280's dispatcher runs from SRAM — same
-        # trick as nofrendo.
-        "IRAM_ATTR=__attribute__((section(\".time_critical.pce\")))"
+        # Hot functions land in .pce_iram_pool (a flash section the
+        # linker reserves via md_memmap.ld). pce_iram.c memcopies the
+        # pool to heap at pcec_init time and frees it on shutdown, so
+        # the 36 KB cost is dynamic — only paid while the user is in
+        # the PCE slot. Same pattern as md_iram.c for Cz80_Exec.
+        "IRAM_ATTR=__attribute__((section(\".pce_iram_pool\")))"
     )
     target_compile_options(huexpress PRIVATE
         -O3
@@ -454,9 +461,11 @@ target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
 
 if (THUMBYNES_WITH_PCE)
     target_compile_definitions(thumbynes_core PUBLIC THUMBYNES_WITH_PCE=1)
-    # Place the scanline composers in .time_critical.* (RAM at boot)
-    # so the per-pixel decode loop doesn't thrash the XIP cache.
-    target_compile_definitions(thumbynes_core PRIVATE PCE_RENDER_IRAM=1)
+    # Match the huexpress IRAM_ATTR mapping for src/pce_render.c so
+    # the scanline composer joins the dynamic pool.
+    target_compile_definitions(thumbynes_core PRIVATE
+        "PCE_HOT_ATTR=__attribute__((section(\".pce_iram_pool\")))"
+        PCE_RENDER_IRAM=1)
     target_link_libraries(thumbynes_core PUBLIC huexpress)
 endif()
 
@@ -533,7 +542,7 @@ if (THUMBYNES_WITH_MD)
     endif()
 endif()
 if (THUMBYNES_WITH_PCE)
-    list(APPEND NES_SRC_BASE pce_run.c)
+    list(APPEND NES_SRC_BASE pce_run.c pce_iram.c)
 endif()
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_SRC_BASE
@@ -573,15 +582,18 @@ pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
 
 if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
-    # --wrap routes direct bl / function-pointer assignments to each
-    # hot function through our thunks in md_iram.c, which dispatch
-    # via function pointers (flash initially, heap after mdc_init).
-    target_link_options(nesrun_device PRIVATE
-        -Wl,--wrap=Cz80_Exec
-    )
-    # Custom linker script adds the .md_iram_pool section in flash
-    # with __md_iram_pool_start / __md_iram_pool_end symbols that
-    # md_iram.c reads to memcpy the block into heap.
+    target_link_options(nesrun_device PRIVATE -Wl,--wrap=Cz80_Exec)
+endif()
+if (THUMBYNES_WITH_PCE)
+    # Wrap exe_go so callers (pcec_run_frame in pce_core.c) dispatch
+    # via the function-pointer thunk in pce_iram.c — points at flash
+    # before pce_iram_init and at the heap copy after.
+    target_link_options(nesrun_device PRIVATE -Wl,--wrap=exe_go)
+endif()
+# md_memmap.ld carries both .md_iram_pool and .pce_iram_pool. Select
+# it whenever either dynamic-IRAM scheme is on — they're independent
+# and the script is harmless if one of them is empty.
+if ((THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC) OR THUMBYNES_WITH_PCE)
     pico_set_linker_script(nesrun_device ${CMAKE_CURRENT_LIST_DIR}/md_memmap.ld)
 endif()
 

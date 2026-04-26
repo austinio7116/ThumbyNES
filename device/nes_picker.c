@@ -3360,21 +3360,41 @@ static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUN
         ICON_SYS_STAR, ICON_SYS_NES, ICON_SYS_SMS, ICON_SYS_GB,
         ICON_SYS_GG,   ICON_SYS_MD,  ICON_SYS_PCE,
     };
-    /* 6 tabs in 128 px = 21 px each (loses 2 px on the right edge,
-     * which is fine — we treat it as overscan). */
-    int cell_w = FB_W / TAB_COUNT;
+    /* Hide tabs that have no ROMs uploaded (always keep FAV — it's
+     * the favourites bucket and tracks across cores — and the active
+     * tab so we don't render a tab strip that omits where the user is
+     * standing). */
+    int vis[TAB_COUNT];
+    int n_vis = 0;
     for (int t = 0; t < TAB_COUNT; t++) {
-        int x = t * cell_w;
+        if (t == TAB_FAV || t == active_tab || counts[t] > 0) {
+            vis[n_vis++] = t;
+        }
+    }
+
+    /* Cell width scales with visible tab count. The system icon is
+     * 12 px wide and lives at the cell's left edge; the count number
+     * sits at the right edge. They start to collide once cell_w drops
+     * below ~22 px (icon 14 + 4-px digit + 1 px gap), so we drop the
+     * number when there isn't room for it. */
+    int cell_w = FB_W / n_vis;
+    int show_count = (cell_w >= 22);
+    for (int i = 0; i < n_vis; i++) {
+        int t = vis[i];
+        int x = i * cell_w;
         int hl = (t == active_tab);
-        uint16_t bg = hl ? 0x39E7 /* lighter grey */ : 0x10A2 /* very dim */;
+        uint16_t bg = hl ? 0x39E7 : 0x10A2;
         fb_rect(fb, x, 0, cell_w, TAB_BAR_H - 1, bg);
         if (hl) fb_rect(fb, x, TAB_BAR_H - 2, cell_w, 1, COL_TITLE);
         uint16_t tint = hl ? COL_TITLE : COL_DIM;
         nes_thumb_icon(fb, x + 2, 1, icon_for[t], tint);
-        char lab[8];
-        snprintf(lab, sizeof(lab), "%d", counts[t]);
-        int lw = nes_font_width(lab);
-        nes_font_draw(fb, lab, x + cell_w - lw - 1, 3, hl ? COL_FG : COL_DIM);
+        if (show_count) {
+            char lab[8];
+            snprintf(lab, sizeof(lab), "%d", counts[t]);
+            int lw = nes_font_width(lab);
+            nes_font_draw(fb, lab, x + cell_w - lw - 1, 3,
+                          hl ? COL_FG : COL_DIM);
+        }
     }
     fb_rect(fb, 0, TAB_BAR_H, FB_W, 1, COL_DIM);
 }

@@ -305,6 +305,7 @@ void make_tms_tables(void)
         tables = calloc(1, sizeof(*tables));
 
     assert(tables != NULL);
+    if (!tables) return;
 
     for(sx = 0; sx < 16; sx++)
     {
@@ -585,5 +586,15 @@ static void render_bg_m2(int line)
         clut = &tms_lookup[vdp.bd][ct[name]][0];
         bpex = &bp_expand[pg[name]][0];
         RENDER_GR_LINE
+    }
+}
+
+/* THUMBYNES PATCH: release the ~46 KB TMS table calloc so SMS hands
+ * the memory back when the user exits to the picker. */
+void free_tms_tables(void)
+{
+    if (tables) {
+        free(tables);
+        tables = NULL;
     }
 }

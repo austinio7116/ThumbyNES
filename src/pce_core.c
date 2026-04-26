@@ -69,8 +69,13 @@ int     g_pce_mem_rom_active = 0;
 static int      s_inited = 0;
 static int      s_sample_rate = 22050;
 static int      s_region = PCEC_REGION_AUTO;
-static uint16_t s_palette_rgb565[512];
-static uint8_t  s_bram[2048];            /* HuCard BRAM (2 KB) */
+/* These three buffers are per-session — only used while a PCE cart
+ * is active. malloc'd in pcec_init and freed in pcec_shutdown so the
+ * RAM cost (~10 KB combined) is paid only inside the PCE slot, not
+ * permanently in BSS. Other emulators in the same firmware partition
+ * (NES/SMS/GB/MD) get the heap back. */
+static uint16_t *s_palette_rgb565;       /* 512 entries × 2 = 1 KB */
+static uint8_t  *s_bram;                 /* 2 KB HuCard BRAM */
 static int      s_skip_render = 0;
 static uint16_t s_pad_mask = 0;
 
@@ -82,7 +87,8 @@ static uint16_t s_pad_mask = 0;
  *     Stale L/R bytes from prior active audio pollute the output on
  *     channel disable. Mono side-steps this entirely. */
 #define PCEC_AUDIO_MAX_FRAME_SAMPLES 1024
-static int8_t s_sbuf[6][PCEC_AUDIO_MAX_FRAME_SAMPLES];
+/* 6 channels × 1024 bytes = 6 KB. malloc'd in pcec_init. */
+static int8_t (*s_sbuf)[PCEC_AUDIO_MAX_FRAME_SAMPLES];
 
 /* Viewport as reported by the VDC. Updated per-frame by the hook
  * PCE_hardware_periodical inserts into io state. */
@@ -91,24 +97,51 @@ static int s_vp_w = PCEC_DEFAULT_W, s_vp_h = PCEC_DEFAULT_H;
 
 /* ---- my_special_alloc — HuExpress's PSRAM/IRAM picker -------------
  * ODROID-GO directed allocations to internal SRAM vs PSRAM based on
- * speed/size hints. We don't have that distinction — just calloc.
+ * speed/size hints. We don't have that distinction — just calloc and
+ * track the result in a session-scoped list so pcec_shutdown can free
+ * the lot in one call. Without this, every PCE cart launch leaks
+ * ~120 KB of HuExpress internal buffers (RAM/VRAM/WRAM/IOAREA/SPRAM/
+ * VCE/Pal/psg_da_data/...) and a second emulator launched from the
+ * same slot session runs out of heap before MD's FAME jumptable can
+ * land contiguously.
  *
- * NOTE: pcec_shutdown does NOT free these. We tried tracking them in
- * a linked list and calling free-all on shutdown; host testing
- * revealed glibc double-free / heap-corruption errors that were
- * already present (latent) during emulation — HuExpress's sprite
- * renderer writes at negative offsets into the 220 KB XBUF that
- * reach past the allocation's start into adjacent malloc blocks.
- * Upstream ODROID's port has the same latent issue but never frees,
- * so the corruption stays invisible. On device we'd need to fix the
- * renderer bounds for a clean free path; for now the allocations
- * leak and are re-used on the next session (all the `if (!X)`
- * guards below make that idempotent). */
+ * Why this is safe in our build: upstream's "freeing crashes glibc"
+ * concern came from HuExpress's bulk-frame sprite renderer writing
+ * at negative offsets past XBUF[0] into adjacent malloc blocks. We
+ * compile with PCE_SCANLINE_RENDER, which composites sprites
+ * directly into the LCD framebuffer per scanline (pce_render.c) and
+ * never touches XBUF/SPM. So the buffer-underflow path is dead and
+ * the allocations can be freed cleanly on session exit. */
+typedef struct pce_alloc_node {
+    struct pce_alloc_node *next;
+    void                  *ptr;
+} pce_alloc_node_t;
+static pce_alloc_node_t *s_special_allocs = NULL;
+
 void *my_special_alloc(unsigned char speed, unsigned char bytes,
                        unsigned long size)
 {
     (void)speed; (void)bytes;
-    return calloc(1, size ? size : 1);
+    void *p = calloc(1, size ? size : 1);
+    if (!p) return NULL;
+    pce_alloc_node_t *n = (pce_alloc_node_t *)malloc(sizeof(*n));
+    if (!n) { free(p); return NULL; }
+    n->ptr  = p;
+    n->next = s_special_allocs;
+    s_special_allocs = n;
+    return p;
+}
+
+static void my_special_free_all(void)
+{
+    pce_alloc_node_t *cur = s_special_allocs;
+    while (cur) {
+        pce_alloc_node_t *next = cur->next;
+        free(cur->ptr);
+        free(cur);
+        cur = next;
+    }
+    s_special_allocs = NULL;
 }
 
 /* HuExpress reference to this flag in myadd.h — never set by us. */
@@ -125,10 +158,13 @@ bool skipNextFrame = false;
  * VCE entries are live but the byte → RGB mapping in the framebuffer
  * is static (determined by the hw encoding). Our LUT is 256 entries
  * keyed on the encoded byte, built once. */
+/* File-static (not function-local) so pcec_shutdown can reset it —
+ * s_palette_rgb565 is freed and re-malloc'd per session and the new
+ * buffer would contain whatever calloc handed back without a rebuild. */
+static int s_palette_built = 0;
 static void build_palette_once(void)
 {
-    static int built = 0;
-    if (built) return;
+    if (s_palette_built) return;
     for (int i = 0; i < 256; i++) {
         uint8_t g3 = (i >> 5) & 0x07;
         uint8_t r3 = (i >> 2) & 0x07;
@@ -139,7 +175,7 @@ static void build_palette_once(void)
         s_palette_rgb565[i] =
             (uint16_t)((r5 << 11) | (g6 << 5) | b5);
     }
-    built = 1;
+    s_palette_built = 1;
 }
 
 /* ---- US-encoded ROM helpers ----------------------------------------
@@ -204,7 +240,28 @@ int pcec_init(int region, int sample_rate)
     s_region = region;
     s_skip_render = 0;
     s_pad_mask = 0;
-    memset(s_bram, 0, sizeof s_bram);
+
+    /* Allocate per-session buffers up front so other emulators in the
+     * same firmware partition (NES/SMS/GB/MD) don't pay the BSS cost.
+     * Fail-fast if heap is exhausted — caller treats nonzero as load
+     * error and unwinds. */
+    if (!s_palette_rgb565) {
+        s_palette_rgb565 = (uint16_t *)calloc(512, sizeof(uint16_t));
+        if (!s_palette_rgb565) return 1;
+    }
+    if (!s_bram) {
+        s_bram = (uint8_t *)calloc(2048, 1);
+        if (!s_bram) { free(s_palette_rgb565); s_palette_rgb565 = NULL; return 1; }
+    }
+    if (!s_sbuf) {
+        s_sbuf = calloc(6 * PCEC_AUDIO_MAX_FRAME_SAMPLES, 1);
+        if (!s_sbuf) {
+            free(s_bram); s_bram = NULL;
+            free(s_palette_rgb565); s_palette_rgb565 = NULL;
+            return 1;
+        }
+    }
+    memset(s_bram, 0, 2048);
 
     /* Audio format: mono signed 8-bit, 1 byte per sample. */
     host.sound.freq         = s_sample_rate;
@@ -472,11 +529,34 @@ int pcec_load_state(const char *path)
 void pcec_shutdown(void)
 {
     if (!s_inited) return;
-    /* Keep allocations — see note on my_special_alloc. s_inited=0 so
-     * the next pcec_init/load_rom cycle re-inits state on top of the
-     * same buffers (VRAM/RAM/XBUF get re-zeroed by the core's own
-     * reset paths, pcec_run_frame memsets XBUF to Pal[0] each
-     * frame). Heap stays held for the slot's lifetime. */
+
+    /* Buffers we own. */
+    free(s_sbuf);            s_sbuf = NULL;
+    free(s_bram);            s_bram = NULL;
+    free(s_palette_rgb565);  s_palette_rgb565 = NULL;
+    s_palette_built = 0;     /* RGB565 LUT must rebuild on next pcec_init */
+    pce_render_shutdown();   /* frees the 2 KB BG-decode LUT */
+
+    /* HuExpress internals. trap_ram_* are direct mallocs in hard_init;
+     * everything else (hard_pce + RAM + VRAM + WRAM + IOAREA + SPRAM +
+     * VCE + Pal + psg_da_data[6] + the dummy CD / VRAM2 / VRAMS pads)
+     * comes through my_special_alloc and gets freed in one sweep. */
+    if (trap_ram_read)  { free(trap_ram_read);  trap_ram_read  = NULL; }
+    if (trap_ram_write) { free(trap_ram_write); trap_ram_write = NULL; }
+    if (PopRAM)         { free(PopRAM);         PopRAM         = NULL; }
+
+    my_special_free_all();    /* frees ~120 KB of HuExpress internals */
+
+    /* Globals that aliased into the now-freed hard_pce / pool. NULL
+     * them so a stray dereference between sessions traps cleanly
+     * instead of reading random heap. hard_init re-binds them all. */
+    hard_pce = NULL;
+    RAM = WRAM = PCM = VRAM = VRAM2 = VRAMS = NULL;
+    vchange = vchanges = Pal = IOAREA = NULL;
+    SPRAM = NULL;
+    extern uchar *ROM;        /* declared in vendor/huexpress/engine/pce.c */
+    ROM = NULL;               /* zero-copy XIP pointer, no free */
+
     s_inited = 0;
     g_pce_mem_rom_active = 0;
 }

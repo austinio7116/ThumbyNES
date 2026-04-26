@@ -17,6 +17,7 @@
  */
 #include "pce_run.h"
 #include "pce_core.h"
+#include "pce_iram.h"
 #include "nes_picker.h"
 #include "nes_lcd_gc9107.h"
 #include "nes_audio_pwm.h"
@@ -63,9 +64,15 @@
  * renderer writes directly to whichever buffer is not currently being
  * shipped to the GC9107, so emu+render of frame N overlaps the DMA of
  * frame N-1. Without this, every frame stalls ~10 ms on
- * nes_lcd_wait_idle before it can touch fb. 32 KB BSS, only allocated
- * when the PCE slot is built. */
-static uint16_t pce_fb_back[128 * 128];
+ * nes_lcd_wait_idle before it can touch fb.
+ *
+ * malloc'd at the top of pce_run_rom and freed on exit so the 32 KB
+ * goes back to the heap whenever the user is in another emulator
+ * slot (NES/SMS/GB/MD) or running the picker / defragment. Without
+ * this, ThumbyOne builds with PCE compiled in are left with so little
+ * heap (~129 KB) that MD / SMS / GB ROM loaders + the defragment
+ * planner all fail. */
+static uint16_t *pce_fb_back = NULL;
 
 static void make_sidecar_path(char *out, size_t outsz,
                                const char *rom_name, const char *ext) {
@@ -306,6 +313,27 @@ static void scale_audio(int16_t *buf, int n, int volume) {
 int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     const char *name = e->name;
 
+    /* Allocate the back framebuffer first — it's 32 KB and we need it
+     * for the double-buffered DMA path. Live for the duration of the
+     * session, freed on exit so other emulators / the picker get the
+     * 32 KB back. */
+    if (!pce_fb_back) {
+        pce_fb_back = (uint16_t *)malloc(128 * 128 * sizeof(uint16_t));
+        if (!pce_fb_back) return -40;     /* surfaces as load err -40 */
+    }
+    /* malloc is uninitialised — clear before first present so the user
+     * doesn't see one frame of stale heap when ping-ponging buffers. */
+    memset(pce_fb_back, 0, 128 * 128 * sizeof(uint16_t));
+
+    /* Copy the .pce_iram_pool flash section into a heap buffer and
+     * repoint the --wrap thunks at it. ~28 KB heap consumed for the
+     * session; reclaimed on exit. Without this the HuC6280 dispatcher
+     * runs from XIP flash at ~half speed. */
+    if (pce_iram_init() != 0) {
+        free(pce_fb_back); pce_fb_back = NULL;
+        return -41;
+    }
+
     /* Reuse the picker's XIP mmap path. PCE HuCards are small enough
      * (max 1 MB common, 2.5 MB for 20-Mbit carts) that fragmented
      * chains are rare but we still fall through to the RAM loader if
@@ -316,7 +344,11 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
     if (mmap_rc != 0) {
         rom_alloc = nes_picker_load_rom(name, &sz);
-        if (!rom_alloc) return -30 + mmap_rc;
+        if (!rom_alloc) {
+            pce_iram_shutdown();
+            free(pce_fb_back); pce_fb_back = NULL;
+            return -30 + mmap_rc;
+        }
         rom_const = rom_alloc;
     }
 
@@ -326,16 +358,22 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
      * blobs and surface a load-error in the picker. */
     if (pcec_rom_is_us_encoded(rom_const, sz)) {
         free(rom_alloc);
+        pce_iram_shutdown();
+        free(pce_fb_back); pce_fb_back = NULL;
         return -22;     /* surfaces as "load err -22" in nes_device_main */
     }
 
     if (pcec_init(PCEC_REGION_AUTO, 22050) != 0) {
         free(rom_alloc);
+        pce_iram_shutdown();
+        free(pce_fb_back); pce_fb_back = NULL;
         return -20;
     }
     if (pcec_load_rom(rom_const, sz) != 0) {
         free(rom_alloc);
         pcec_shutdown();
+        pce_iram_shutdown();
+        free(pce_fb_back); pce_fb_back = NULL;
         return -10;
     }
     battery_load(name);
@@ -735,7 +773,9 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     pcec_shutdown();
+    pce_iram_shutdown();                       /* ~28 KB back to heap */
     free(rom_alloc);
+    free(pce_fb_back); pce_fb_back = NULL;     /* 32 KB back to heap */
     while (!gpio_get(BTN_MENU_GP)) sleep_ms(10);
     return 0;
 }

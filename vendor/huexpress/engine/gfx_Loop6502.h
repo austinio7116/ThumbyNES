@@ -208,7 +208,17 @@ jump_CheckSprites:
 #if defined(WORDS_BIGENDIAN)
                 swab(VRAM + IO_VDC_13_SATB.W * 2, SPRAM, 64 * 8);
 #else
-                memcpy(SPRAM, VRAM + IO_VDC_13_SATB.W * 2, 64 * 8);
+                /* Manual word-copy instead of memcpy — exe_go is
+                 * relocated to heap RAM via the .pce_iram_pool, and
+                 * a BL to libc memcpy in flash would land on a wrong
+                 * PC-relative offset after relocation. 64 sprites ×
+                 * 8 bytes = 512 B, 128 word copies. */
+                {
+                    const uint32 *src = (const uint32 *)
+                        (VRAM + IO_VDC_13_SATB.W * 2);
+                    uint32 *dst = (uint32 *)SPRAM;
+                    for (int i = 0; i < 128; i++) dst[i] = src[i];
+                }
 #endif
                 io.vdc_satb = 1;
                 io.vdc_status &= ~VDC_SATBfinish;

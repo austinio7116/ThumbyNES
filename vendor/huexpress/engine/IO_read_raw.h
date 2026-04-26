@@ -23,12 +23,14 @@
             return 0;
         case 2:
             if (io.vdc_reg == VRR)
-                return VRAM[IO_VDC_01_MARR.W * 2];
+                /* THUMBYNES: wrap at VRAM end — match the write-side
+                 * mask in IO_write.h's VWR / DMA paths. */
+                return VRAM[(IO_VDC_01_MARR.W * 2 + 0) & (VRAMSIZE - 1)];
             else
                 return IO_VDC_active.B.l;
         case 3:
             if (io.vdc_reg == VRR) {
-                ret = VRAM[IO_VDC_01_MARR.W * 2 + 1];
+                ret = VRAM[(IO_VDC_01_MARR.W * 2 + 1) & (VRAMSIZE - 1)];
                 IO_VDC_01_MARR.W += io.vdc_inc;
                 return ret;
             } else

@@ -59,7 +59,8 @@ int frame = 0;
 /*
 	Hit Chesk Sprite#0 and others
 */
-int32
+/* Pool-tagged: exe_go BLs CheckSprites from inside .pce_iram_pool. */
+IRAM_ATTR int32
 CheckSprites(void)
 {
 	int i, x0, y0, w0, h0, x, y, w, h;

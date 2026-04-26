@@ -39,14 +39,13 @@
 #include "hard_pce.h"
 #include "sprite.h"
 
-/* On the RP2350 device, place the per-scanline composers in
- * `.time_critical.*` — the Pico SDK linker copies that section from
- * flash to RAM at boot so the inner loops don't thrash the XIP
- * cache. Compile with -DPCE_RENDER_IRAM=1 from the device CMakeLists.
- * Host builds leave it as plain text. */
-#if defined(PCE_RENDER_IRAM)
-#  define PCE_HOT_ATTR __attribute__((section(".time_critical.pce_render")))
-#else
+/* On the RP2350 device, the per-scanline composers join the PCE
+ * dynamic-IRAM pool — the device CMakeLists passes
+ *   -DPCE_HOT_ATTR='__attribute__((section(".pce_iram_pool")))'
+ * so the functions land in the .pce_iram_pool flash section, which
+ * device/pce_iram.c memcopies to heap at pcec_init time. Host builds
+ * leave PCE_HOT_ATTR undefined → the macro expands to nothing. */
+#ifndef PCE_HOT_ATTR
 #  define PCE_HOT_ATTR
 #endif
 #define PCE_HOT(name) PCE_HOT_ATTR name
@@ -153,12 +152,16 @@ void pce_render_frame_begin(void)
  *
  * This is the same identity an emulator like Mednafen uses for fast
  * tile decode; the win is shifting the per-pixel work to once-per-row. */
-static uint64_t s_spread8[256];
-static int      s_spread8_inited = 0;
+/* Heap-allocated on first pce_render_set_target so the 2 KB only
+ * lives during a PCE session. Other emulators in the same firmware
+ * partition (NES/SMS/GB/MD) get the bytes back. */
+static uint64_t *s_spread8;
 
 static void spread8_init(void)
 {
-    if (s_spread8_inited) return;
+    if (s_spread8) return;
+    s_spread8 = (uint64_t *)malloc(256 * sizeof(uint64_t));
+    if (!s_spread8) return;     /* alloc failure handled by render early-out */
     for (int v = 0; v < 256; v++) {
         uint64_t out = 0;
         for (int i = 0; i < 8; i++) {
@@ -167,7 +170,12 @@ static void spread8_init(void)
         }
         s_spread8[v] = out;
     }
-    s_spread8_inited = 1;
+}
+
+void pce_render_shutdown(void)
+{
+    free(s_spread8);
+    s_spread8 = NULL;
 }
 
 /* Decode one 8-pixel BG tile row into a uint64_t holding 8 bytes,
@@ -425,7 +433,7 @@ static void PCE_HOT(emit_row)(int pce_y, int screen_w)
 
 void PCE_HOT(pce_render_scanline)(int pce_y)
 {
-    if (!s_lcd_fb || !s_pal565) return;
+    if (!s_lcd_fb || !s_pal565 || !s_spread8) return;
     if (pce_y < 0) return;
     int act_h = io.screen_h ? io.screen_h : 224;
     if (pce_y >= act_h) return;

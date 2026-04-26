@@ -137,9 +137,16 @@
         case 3:
             switch (io.vdc_reg) {
             case VWR:           /* Write to mem */
-                /* Writing to hi byte actually perform the action */
-                VRAM[IO_VDC_00_MAWR.W * 2] = io.vdc_ratch;
-                VRAM[IO_VDC_00_MAWR.W * 2 + 1] = V;
+                /* Writing to hi byte actually perform the action.
+                 * THUMBYNES: mask the byte offset to (VRAMSIZE-1).
+                 * Real PCE VRAM is 32K words = 64 KB and the VDC only
+                 * decodes the low 15 bits of MAWR, wrapping at 0x8000.
+                 * Without the mask, a game that drives MAWR past 0x7FFF
+                 * (Final Soldier observed) writes past our 64 KB VRAM
+                 * allocation, smashes adjacent malloc chunks, and
+                 * leaves the heap free-list corrupted on PCE exit. */
+                VRAM[(IO_VDC_00_MAWR.W * 2 + 0) & (VRAMSIZE - 1)] = io.vdc_ratch;
+                VRAM[(IO_VDC_00_MAWR.W * 2 + 1) & (VRAMSIZE - 1)] = V;
 
 #ifndef PCE_SCANLINE_RENDER
                 /* Dirty-mark the tile / sprite decode caches. Scanline
@@ -190,8 +197,14 @@
 
                     int i;
 
+                    /* THUMBYNES: same mask as the VWR write above —
+                     * SOUR/DISTR are 16-bit but the VDC only decodes
+                     * 15 address bits. The VRAM-VRAM DMA loop walks
+                     * up to 0x20000 entries and would write past the
+                     * 64 KB VRAM allocation without this gate. */
                     for (i = 0; i < (IO_VDC_12_LENR.W + 1) * 2; i++) {
-                        *(VRAM + dest) = *(VRAM + source);
+                        VRAM[dest & (VRAMSIZE - 1)] =
+                            VRAM[source & (VRAMSIZE - 1)];
                         dest += destcount;
                         source += sourcecount;
                     }
@@ -208,8 +221,19 @@
 
                 IO_VDC_12_LENR.W = 0xFFFF;
 
+#ifndef PCE_SCANLINE_RENDER
+                /* THUMBYNES: under PCE_SCANLINE_RENDER vchange / vchanges are
+                 * 4-byte placeholder allocations (scanline render reads tiles
+                 * straight from VRAM and never looks at the dirty bitmaps).
+                 * The full-size memsets here would write 2.5 KB into 8 bytes
+                 * of buffer — silent heap overflow that clobbers adjacent
+                 * malloc chunks (notably the my_special_alloc tracking nodes).
+                 * Pre-leak-fix the corruption was invisible because nothing
+                 * ever walked those chunks; post-fix my_special_free_all
+                 * dereferences a corrupted node->next and hangs newlib. */
                 memset(vchange, 1, VRAMSIZE / 32);
                 memset(vchanges, 1, VRAMSIZE / 128);
+#endif
 
 
                 /* TODO: check whether this flag can be ignored */
@@ -466,6 +490,18 @@
         break;
 
     case 0x1A00:
+#ifdef PCE_HUCARD_ONLY
+        /* THUMBYNES: Arcade Card region. ac_extra_mem is a 4-byte
+         * placeholder allocation in the HuCard-only build (full AC
+         * needs 2 MB). The "case 0/1" path below indexes the buffer at
+         * (ac_base + ac_offset) & 0x1FFFFF — up to 2 MB OOB write,
+         * which silently corrupts adjacent malloc chunks (hard_pce
+         * struct, my_special_alloc tracking nodes, anything nearby).
+         * HuCards aren't supposed to write to 0x1A00..0x1AFF; if a
+         * game has a wild branch / debug code that hits this region,
+         * we'd crash on next free / malloc. Just no-op. */
+        return;
+#else
         {
 
             if ((A & 0x1AF0) == 0x1AE0) {
@@ -576,6 +612,7 @@
             }
         }
         break;
+#endif /* PCE_HUCARD_ONLY */
 
     case 0x1800:                /* CD-ROM extention */
 #if defined(BSD_CD_HARDWARE_SUPPORT)
