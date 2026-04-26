@@ -136,6 +136,9 @@ static uint32 atex[4] =
 
 /* Pixel look-up table */
 static const uint8 *lut; // )[0x10000];
+/* THUMBYNES PATCH: heap-allocated 64 KB pixel LUT, freed on render_shutdown
+ * so the slot heap returns to its full size while other emulators run. */
+static uint8 *_lut_alloc = NULL;
 
 /* THUMBYNES PATCH: was a 256 KB monolithic table indexed by a full
  * 16-bit (j<<8)|i value. Each entry decomposes to f(j) | g(i), so two
@@ -205,6 +208,14 @@ static inline void write_dword(void *address, uint32 data)
 
 void render_shutdown(void)
 {
+  if (_lut_alloc) {
+    free(_lut_alloc);
+    _lut_alloc = NULL;
+  }
+  lut = NULL;
+  /* Release the ~46 KB TMS lookup tables back to the heap. Without this
+   * SMS leaks them on every exit-to-picker, which starves MD/PCE. */
+  free_tms_tables();
 }
 
 /* Initialize the rendering data */
@@ -215,9 +226,12 @@ void render_init(void)
 
   make_tms_tables();
 
-  /* THUMBYNES PATCH: was malloc(0x10000); promoted to static BSS so the
-   * device build doesn't need 64 KB of free heap to start the SMS core. */
-  static uint8 _lut[0x10000];
+  /* THUMBYNES PATCH: heap allocation (was static BSS for a while, but that
+   * permanently reserved 64 KB of SRAM. Allocating per SMS session lets the
+   * memory go back to the heap when the picker / other emulators need it. */
+  if (!_lut_alloc) _lut_alloc = (uint8 *)malloc(0x10000);
+  if (!_lut_alloc) { lut = NULL; return; }
+  uint8 *_lut = _lut_alloc;
 
   for(bx = 0; bx < 0x100; bx++)
   {

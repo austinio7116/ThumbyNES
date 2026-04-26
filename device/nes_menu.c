@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
@@ -286,9 +287,12 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
 
     if (n_items == 0) return result;
 
-    /* Snapshot + dim the current frame as a backdrop. */
-    static uint16_t fb_dim[FB_W * FB_H];
-    memcpy(fb_dim, fb, sizeof(fb_dim));
+    /* Snapshot + dim the current frame as a backdrop. Heap-allocated
+     * (32 KB) so the menu only consumes that SRAM while open — out of
+     * menu, the emulator gets it back. */
+    uint16_t *fb_dim = (uint16_t *)malloc(FB_W * FB_H * sizeof(uint16_t));
+    if (!fb_dim) return result;
+    memcpy(fb_dim, fb, FB_W * FB_H * sizeof(uint16_t));
     darken_fb(fb_dim);
 
     /* Initial cursor — first selectable item. */
@@ -296,7 +300,7 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
     for (int i = 0; i < n_items; i++) {
         if (items[i].enabled) { cursor = i; break; }
     }
-    if (cursor < 0) return result;
+    if (cursor < 0) { free(fb_dim); return result; }
     int scroll_top = 0;
 
     /* Wait for the MENU long-press release that triggered the menu
@@ -363,6 +367,7 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
             while (!gpio_get(BTN_B_GP) || !gpio_get(BTN_MENU_GP)) {
                 tud_task(); sleep_ms(10);
             }
+            free(fb_dim);
             return result;
         }
 
@@ -433,6 +438,7 @@ nes_menu_result_t nes_menu_run(uint16_t       *fb,
                  * e.g. the picker after Quit) doesn't immediately
                  * react to the same press. */
                 while (!gpio_get(BTN_A_GP)) { tud_task(); sleep_ms(10); }
+                free(fb_dim);
                 return result;
             }
             break;

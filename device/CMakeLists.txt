@@ -60,6 +60,25 @@ if (DEFINED THUMBYONE_WITH_MD AND NOT THUMBYONE_WITH_MD)
 endif()
 
 # ----------------------------------------------------------------------
+# PC Engine / TurboGrafx-16 (HuExpress)
+#
+# HuCard-only. Off by default — Phase 1 scaffolding only; the device
+# build can't allocate HuExpress's 220 KB XBUF, so PCE_SCANLINE_RENDER
+# must land first (see PCE_PLAN.md §5). Flipping this ON before the
+# scanline renderer is plumbed will link fine but OOM on first frame.
+# ----------------------------------------------------------------------
+option(THUMBYNES_WITH_PCE "Build PC Engine / TurboGrafx (HuExpress) into ThumbyNES" OFF)
+# When invoked from ThumbyOne, follow the parent flag: ThumbyOne
+# decides whether the unified firmware ships with PCE enabled.
+if (DEFINED THUMBYONE_WITH_PCE)
+    if (THUMBYONE_WITH_PCE)
+        set(THUMBYNES_WITH_PCE ON)
+    else()
+        set(THUMBYNES_WITH_PCE OFF)
+    endif()
+endif()
+
+# ----------------------------------------------------------------------
 # Vendored Nofrendo NES core (GPLv2 — see vendor/VENDORING.md)
 # ----------------------------------------------------------------------
 set(NOFRENDO_DIR ${NES_ROOT}/vendor/nofrendo)
@@ -375,10 +394,51 @@ target_link_options(picodrive INTERFACE
 )
 endif()  # THUMBYNES_WITH_MD — picodrive block
 
+# ----------------------------------------------------------------------
+# Vendored HuExpress PC Engine core (GPLv2 — see vendor/VENDORING.md)
+#
+# Only built when THUMBYNES_WITH_PCE is ON. The engine tree is already
+# trimmed to HuCard-only (CD, Arcade Card, SuperGrafx, SDL OSD,
+# netplay, debugger all removed) — see vendor/huexpress/.
+# ----------------------------------------------------------------------
+if (THUMBYNES_WITH_PCE)
+    set(HUEXPRESS_DIR ${NES_ROOT}/vendor/huexpress)
+    file(GLOB HUEXPRESS_ENGINE_SRC CONFIGURE_DEPENDS ${HUEXPRESS_DIR}/engine/*.c)
+
+    add_library(huexpress STATIC
+        ${HUEXPRESS_ENGINE_SRC}
+        ${HUEXPRESS_DIR}/thumby_platform.c
+    )
+    target_include_directories(huexpress PUBLIC
+        ${HUEXPRESS_DIR}/engine
+        ${HUEXPRESS_DIR}/includes
+    )
+    target_compile_definitions(huexpress PUBLIC
+        THUMBY_BUILD
+        LSB_FIRST=1
+        FINAL_RELEASE=1
+        PCE_HUCARD_ONLY
+        PCE_SCANLINE_RENDER
+        # Hot functions land in .pce_iram_pool (a flash section the
+        # linker reserves via md_memmap.ld). pce_iram.c memcopies the
+        # pool to heap at pcec_init time and frees it on shutdown, so
+        # the 36 KB cost is dynamic — only paid while the user is in
+        # the PCE slot. Same pattern as md_iram.c for Cz80_Exec.
+        "IRAM_ATTR=__attribute__((section(\".pce_iram_pool\")))"
+    )
+    target_compile_options(huexpress PRIVATE
+        -O3
+        -Wno-array-bounds -Wno-format -Wno-unused-parameter
+        -Wno-unused-function -Wno-unused-variable
+        -Wno-unused-but-set-variable -Wno-implicit-fallthrough
+        -Wno-sign-compare -Wno-incompatible-pointer-types
+        -fno-strict-aliasing
+    )
+endif()
+
 # Cross-platform glue lives outside the device directory; build it
-# here as a small static lib. md_core.c only compiled when MD is
-# enabled — it pulls in PicoDrive headers that don't exist when
-# the picodrive target above is skipped.
+# here as a small static lib. md_core.c / pce_core.c only compiled
+# when their respective cores are enabled.
 set(THUMBYNES_CORE_SRC
     ${NES_ROOT}/src/nes_core.c
     ${NES_ROOT}/src/sms_core.c
@@ -387,6 +447,10 @@ set(THUMBYNES_CORE_SRC
 if (THUMBYNES_WITH_MD)
     list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/md_core.c)
 endif()
+if (THUMBYNES_WITH_PCE)
+    list(APPEND THUMBYNES_CORE_SRC ${NES_ROOT}/src/pce_core.c
+                                     ${NES_ROOT}/src/pce_render.c)
+endif()
 add_library(thumbynes_core STATIC ${THUMBYNES_CORE_SRC})
 target_include_directories(thumbynes_core PUBLIC
     ${NES_ROOT}/src
@@ -394,6 +458,16 @@ target_include_directories(thumbynes_core PUBLIC
 )
 target_compile_definitions(thumbynes_core PRIVATE THUMBY_STATE_BRIDGE)
 target_link_libraries(thumbynes_core PUBLIC nofrendo smsplus peanut_gb)
+
+if (THUMBYNES_WITH_PCE)
+    target_compile_definitions(thumbynes_core PUBLIC THUMBYNES_WITH_PCE=1)
+    # Match the huexpress IRAM_ATTR mapping for src/pce_render.c so
+    # the scanline composer joins the dynamic pool.
+    target_compile_definitions(thumbynes_core PRIVATE
+        "PCE_HOT_ATTR=__attribute__((section(\".pce_iram_pool\")))"
+        PCE_RENDER_IRAM=1)
+    target_link_libraries(thumbynes_core PUBLIC huexpress)
+endif()
 
 if (THUMBYNES_WITH_MD)
     target_compile_definitions(thumbynes_core PUBLIC MD_LINE_SCRATCH THUMBYNES_WITH_MD=1)
@@ -467,6 +541,9 @@ if (THUMBYNES_WITH_MD)
         list(APPEND NES_SRC_BASE md_iram.c)
     endif()
 endif()
+if (THUMBYNES_WITH_PCE)
+    list(APPEND NES_SRC_BASE pce_run.c pce_iram.c)
+endif()
 if (NOT THUMBYONE_SLOT_MODE)
     list(APPEND NES_SRC_BASE
         nes_msc.c
@@ -505,15 +582,18 @@ pico_enable_stdio_usb(nesrun_device 0)
 pico_enable_stdio_uart(nesrun_device 0)
 
 if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
-    # --wrap routes direct bl / function-pointer assignments to each
-    # hot function through our thunks in md_iram.c, which dispatch
-    # via function pointers (flash initially, heap after mdc_init).
-    target_link_options(nesrun_device PRIVATE
-        -Wl,--wrap=Cz80_Exec
-    )
-    # Custom linker script adds the .md_iram_pool section in flash
-    # with __md_iram_pool_start / __md_iram_pool_end symbols that
-    # md_iram.c reads to memcpy the block into heap.
+    target_link_options(nesrun_device PRIVATE -Wl,--wrap=Cz80_Exec)
+endif()
+if (THUMBYNES_WITH_PCE)
+    # Wrap exe_go so callers (pcec_run_frame in pce_core.c) dispatch
+    # via the function-pointer thunk in pce_iram.c — points at flash
+    # before pce_iram_init and at the heap copy after.
+    target_link_options(nesrun_device PRIVATE -Wl,--wrap=exe_go)
+endif()
+# md_memmap.ld carries both .md_iram_pool and .pce_iram_pool. Select
+# it whenever either dynamic-IRAM scheme is on — they're independent
+# and the script is harmless if one of them is empty.
+if ((THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC) OR THUMBYNES_WITH_PCE)
     pico_set_linker_script(nesrun_device ${CMAKE_CURRENT_LIST_DIR}/md_memmap.ld)
 endif()
 

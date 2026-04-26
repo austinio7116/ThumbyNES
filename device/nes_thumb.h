@@ -19,6 +19,7 @@
 #define ICON_SYS_GG    ROM_SYS_GG
 #define ICON_SYS_GB    ROM_SYS_GB
 #define ICON_SYS_MD    ROM_SYS_MD
+#define ICON_SYS_PCE   ROM_SYS_PCE
 #define ICON_SYS_STAR  255
 
 /* Draw a 12×8 procedural tab icon at (x, y) into the 128×128
