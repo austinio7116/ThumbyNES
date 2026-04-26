@@ -104,6 +104,12 @@ static int8_t (*s_sbuf)[PCEC_AUDIO_MAX_FRAME_SAMPLES];
  * and the next frame begins with a DC step (audible click). */
 static int32_t s_audio_lpf;
 
+/* Phase accumulator used by pcec_audio_pull to round 22050/60 = 367.5
+ * to an integer count per frame (368 most frames, 367 every other).
+ * Long-term keeps push rate exactly equal to the audio engine's
+ * drain rate so the device PWM ring never over- or underflows. */
+static int s_audio_phase_acc;
+
 /* Viewport as reported by the VDC. Updated per-frame by the hook
  * PCE_hardware_periodical inserts into io state. */
 static int s_vp_x = 0, s_vp_y = 0;
@@ -486,6 +492,21 @@ int pcec_audio_pull(int16_t *out, int n)
     if (!out || n <= 0) return 0;
     if (n > PCEC_AUDIO_MAX_FRAME_SAMPLES) n = PCEC_AUDIO_MAX_FRAME_SAMPLES;
 
+    /* Cap n to one frame's worth at our output rate. Without this, the
+     * device runner asks for 1024 every 16.6 ms — 61 kHz against a
+     * 22 kHz drain rate — the ring overflows in ~10 frames and
+     * nes_audio_pwm_push drops the tail of every push. The audible
+     * effect is chopped 36 %-duty audio with clicks at every cut.
+     *
+     * The phase accumulator gives us the exact 22050/60 ratio over
+     * any 60-frame window: most frames 368 samples, some 367. Caller
+     * can still pass less than per_frame (e.g. host probes); we
+     * honour that so they get partial frames. */
+    int per_frame = s_sample_rate / 60;
+    s_audio_phase_acc += s_sample_rate - per_frame * 60;
+    if (s_audio_phase_acc >= 60) { per_frame++; s_audio_phase_acc -= 60; }
+    if (n > per_frame) n = per_frame;
+
     /* WriteBuffer writes `n` mono samples per channel (one byte each). */
     for (int ch = 0; ch < 6; ch++) {
         WriteBuffer((char *)s_sbuf[ch], ch, (unsigned)n);
@@ -782,6 +803,7 @@ void pcec_shutdown(void)
     free(s_palette_rgb565);  s_palette_rgb565 = NULL;
     s_palette_built = 0;     /* RGB565 LUT must rebuild on next pcec_init */
     s_audio_lpf = 0;         /* clean filter integrator for next session */
+    s_audio_phase_acc = 0;   /* phase accumulator restarts at 0 too */
     pce_render_shutdown();   /* frees the 2 KB BG-decode LUT */
 
     /* HuExpress internals. trap_ram_* are direct mallocs in hard_init;
