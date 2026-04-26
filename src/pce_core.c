@@ -98,6 +98,12 @@ static uint16_t s_pad_mask = 0;
 /* 6 channels × 1024 bytes = 6 KB. malloc'd in pcec_init. */
 static int8_t (*s_sbuf)[PCEC_AUDIO_MAX_FRAME_SAMPLES];
 
+/* 1-pole IIR LPF state. File-scope so pcec_shutdown / pcec_load_state
+ * can reset it — without that, switching ROMs or restoring a state
+ * leaves the filter integrator at the previous game's final mix value
+ * and the next frame begins with a DC step (audible click). */
+static int32_t s_audio_lpf;
+
 /* Viewport as reported by the VDC. Updated per-frame by the hook
  * PCE_hardware_periodical inserts into io state. */
 static int s_vp_x = 0, s_vp_y = 0;
@@ -485,46 +491,47 @@ int pcec_audio_pull(int16_t *out, int n)
         WriteBuffer((char *)s_sbuf[ch], ch, (unsigned)n);
     }
 
-    /* Mix 6 PSG channels → mono signed 16-bit. Three things matter
-     * for clean output:
+    /* Mix 6 PSG channels → mono signed 16-bit. Pipeline:
      *
-     *  1. Apply the PSG master volume (io.psg_volume). PCE format:
-     *     bits 7-4 = L master, 3-0 = R master. The HuExpress
-     *     mix.c only applies it for noise channels, so wave channels
-     *     ignore master fades entirely without this step. We scale
-     *     the mono mix by (avg of L+R) / 15 (0..1.0).
+     *  1. Sum 6 int8 channels: max ±6×127 = ±762.
      *
-     *  2. Cascaded 2-pole IIR LPF (a=1/2 each, ≈1.6 kHz cutoff,
-     *     -12 dB/oct). Real PCE has an analog low-pass on the DAC
-     *     output around 3 kHz; ours is a touch tighter to compensate
-     *     for the lack of bandlimited wavetable resampling.
+     *  2. Apply PSG master volume (io.psg_volume): bits 7-4 = L master,
+     *     3-0 = R master, both 0..15. We sum them for a 0..30 mono
+     *     multiplier. HuExpress's mix.c only applies master to the
+     *     noise channels, so without this step wave channels ignore
+     *     master fades entirely.  Max post-master: ±22860.
      *
-     *  3. Reduce master gain to <<4 (×16) so the master-volume
-     *     scaling has headroom and we don't risk clipping when many
-     *     channels peak together. Top-end loudness mostly comes back
-     *     when the user turns the volume up downstream. */
-    /* Master volume: combines L+R nibbles to a mono 0..30 multiplier.
-     * Sum of 6 channels is ±762; ×30 = ±22860, well inside int16. So
-     * for master=30 the gain is ~equivalent to the previous <<5
-     * (×32) with proper room left for the LPF. master=0 → silence,
-     * which is what the cart asked for. */
+     *  3. Halve to leave ~6 dB headroom inside int16. Brief peaks
+     *     (e.g. two waveform channels phase-aligning) can otherwise
+     *     skim the int16 limit; with this margin they don't.
+     *     Max post-shift: ±11430.
+     *
+     *  4. Single-pole IIR LPF, a = 7/8 → fc ≈ 7.3 kHz at 22050 Hz.
+     *     y += a*(x - y), implemented as `s_audio_lpf += ((x - lpf) *
+     *     7) >> 3`. Approximates the real PC Engine analog DAC
+     *     rolloff (8–10 kHz). The previous cascaded 2-pole at fc ≈
+     *     2.5 kHz removed treble entirely and was the dominant cause
+     *     of muffled-sounding output.
+     *
+     *  5. Saturating clamp to int16 (defensive — the headroom shift
+     *     should keep us inside, but DC drift from accumulated mix
+     *     bias can creep up). */
     int master = ((io.psg_volume >> 4) & 0x0F) + (io.psg_volume & 0x0F);
 
-    static int32_t lpf1 = 0;
-    static int32_t lpf2 = 0;
+    int32_t lpf = s_audio_lpf;
     for (int i = 0; i < n; i++) {
         int32_t mix = 0;
         for (int ch = 0; ch < 6; ch++) {
             mix += (int32_t)s_sbuf[ch][i];
         }
-        mix *= master;
-        lpf1 = (mix  + lpf1) >> 1;
-        lpf2 = (lpf1 + lpf2) >> 1;
-        int32_t y = lpf2;
+        mix = (mix * master) >> 1;
+        lpf += ((mix - lpf) * 7) >> 3;
+        int32_t y = lpf;
         if (y >  32767) y =  32767;
         if (y < -32768) y = -32768;
         out[i] = (int16_t)y;
     }
+    s_audio_lpf = lpf;
     return n;
 }
 
@@ -752,6 +759,11 @@ int pcec_load_state(const char *path)
      * dispatches it to the matching IO_VDC_xx_* slot. */
     IO_VDC_active_set(io.vdc_reg);
 
+    /* Clear the audio LPF integrator. Without this, the first frame
+     * after a state load slews from the pre-load mix value to the
+     * post-load value over ~30 samples — audible as a soft thump. */
+    s_audio_lpf = 0;
+
     PCE_FCLOSE(f);
     return 0;
 
@@ -769,6 +781,7 @@ void pcec_shutdown(void)
     free(s_bram);            s_bram = NULL;
     free(s_palette_rgb565);  s_palette_rgb565 = NULL;
     s_palette_built = 0;     /* RGB565 LUT must rebuild on next pcec_init */
+    s_audio_lpf = 0;         /* clean filter integrator for next session */
     pce_render_shutdown();   /* frees the 2 KB BG-decode LUT */
 
     /* HuExpress internals. trap_ram_* are direct mallocs in hard_init;
