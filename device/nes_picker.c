@@ -3493,7 +3493,8 @@ static void draw_hero(uint16_t *fb, const nes_rom_entry *e, int sel,
      * meta line and the position counter. Same dim grey as the meta
      * so the cart title above stays the focal point. */
     static const char * const tab_label[TAB_COUNT] = {
-        "FAVORITES", "NES", "MASTER SYSTEM", "GAME BOY", "GAME GEAR", "MEGA DRIVE",
+        "FAVORITES", "NES", "MASTER SYSTEM", "GAME BOY", "GAME GEAR",
+        "MEGA DRIVE", "PC ENGINE",
     };
     if (active_tab >= 0 && active_tab < TAB_COUNT) {
         const char *lbl = tab_label[active_tab];
