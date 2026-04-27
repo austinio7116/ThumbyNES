@@ -427,11 +427,22 @@ int pcec_load_rom(const uint8_t *data, size_t len)
      * are whatever calloc gave them. */
     gfx_init();
 
-    /* Joypad default: all pads "no button pressed". The IO_read path
-     * XORs with 0xFF before masking, so a raw 0xFF reads as 0
-     * (no-press). Without this, boot-time joypad reads (R-Type
-     * test-mode check, copyright-screen wait) see phantom presses. */
-    for (int i = 0; i < 5; i++) io.JOY[i] = 0xFF;
+    /* Joypad default: all pads idle. io.JOY[] uses active-HIGH storage
+     * (bit set = pressed) — confirmed via bios.c::EX_JOYSNS, which
+     * computes "newly pressed = (JOY ^ prev) & JOY" (only meaningful
+     * if set bits == currently held). IO_read $1000 then XORs with
+     * 0xff to flip to the active-LOW the cart actually sees on real
+     * hardware. So idle = 0x00 in storage, NOT 0xFF.
+     *
+     * Why this matters: io.joy_counter auto-advances on each direction
+     * read (low-nibble path), wrapping 0..4. Carts that don't CLR
+     * before each poll (Galaga '90, Legendary Axe II, Dragon's Curse)
+     * walk into JOY[1..4]; if those slots are 0xFF, the cart sees
+     * "all buttons held" on pads 2..5 → permanent auto-fire +
+     * can't-move. Carts that CLR aggressively (Bonk, Soldier Blade)
+     * never read past pad 0 and so were unaffected by the prior
+     * 0xFF init bug. */
+    for (int i = 0; i < 5; i++) io.JOY[i] = 0x00;
 
     s_inited = 1;
     return 0;
@@ -493,15 +504,17 @@ const uint16_t *pcec_palette_rgb565(void)
 void pcec_set_buttons(uint16_t mask)
 {
     s_pad_mask = mask;
-    /* HuExpress polls io.JOY[0] each frame. Bit layout matches the
-     * HuC6280 joypad register spec — same order as PCEC_BTN_*.
+    /* HuExpress polls io.JOY[0] each frame. Bit layout matches
+     * PCEC_BTN_* directly (I=0x01, II=0x02, SELECT=0x04, RUN=0x08,
+     * UP=0x10, RIGHT=0x20, DOWN=0x40, LEFT=0x80) — these are the
+     * pre-XOR storage positions HuExpress uses internally, with
+     * "bit set = pressed" semantics (active-high storage).
      *
-     * The IO $1000 read auto-advances io.joy_counter through pads
-     * 0..4 on each button-nibble read; unmentioned pad slots must
-     * present "no button pressed" (0xFF pre-XOR) or the game will
-     * interpret them as all-buttons-held. */
+     * Pads 2..5 stay at 0x00 (idle = no buttons held). Setting
+     * them to 0xFF here would re-introduce the auto-fire bug —
+     * see the long comment in pcec_init. */
     io.JOY[0] = (uchar)(mask & 0xFF);
-    for (int i = 1; i < 5; i++) io.JOY[i] = 0xFF;
+    for (int i = 1; i < 5; i++) io.JOY[i] = 0x00;
 }
 
 void pcec_set_skip_render(int skip)
