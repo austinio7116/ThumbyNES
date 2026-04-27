@@ -582,31 +582,19 @@ the screen via asymmetric scaling).
 ### CROP
 
 A 1:1 native viewport into the cart frame, pannable across the full
-picture. Three flavours:
+picture. From 1.09 on, **all six cores share one chord**: tap MENU
+to enter CROP, and hold **LB + d-pad** to pan the source viewport
+while the cart keeps running. Audio keeps playing, the d-pad goes
+to the cart by default, and the cart-side mapping for LB (NES /
+GB → SELECT, MD → START, PCE → SELECT) is suppressed only while LB
+is actively held. On LB release without any pan motion the input
+pulses for ~3 frames so a "tap LB" still acts as Start / Select.
+SMS / GG don't map LB to a cart button so there's no pulse to
+manage there.
 
-- **Pause-on-CROP** (NES + SMS): tap MENU to enter CROP. The cart
-  pauses entirely, audio mutes, and the **D-pad pans the viewport**
-  across the full picture. Tap MENU again to return to FIT. Designed
-  for reading text or stepping away.
-- **Live-pan CROP** (GB + GG): tap MENU to enter CROP. The cart keeps
-  running, audio keeps playing, and the **D-pad still goes to the
-  game**. **MENU + dpad** pans the viewport while held. Designed
-  for the handhelds where reading menus while the cart breathes is
-  the point.
-- **Play-while-cropped CROP** (MD + PCE): tap MENU to enter CROP.
-  The cart keeps running — neither PicoDrive's 68K/Z80/VDP pipeline
-  nor HuExpress's HuC6280/VDC pipeline can be cleanly paused
-  mid-frame — and the d-pad goes to the cart by default so the
-  game stays fully playable in the cropped view. Hold **LB** to
-  engage the pan chord: while LB is held the d-pad pans the source
-  viewport instead, and LB → cart-input (MD START / PCE SELECT) is
-  suppressed so you don't accidentally fire it. Release LB with no
-  pan motion → the cart input pulses (so a tap LB still acts as
-  Start / Select); release after panning → the pulse is swallowed.
-  Designed for the MD's and PCE's much-larger-than-128px native
-  frames where reading HUDs / signage / minimaps off the centred
-  crop is the point. *(MD shipped with this in 1.06; PCE adopted
-  the same chord in 1.08 — see the changelog below.)*
+The "freeze the cart and read text" use case the NES paused-CROP
+gave you in 1.07 / 1.08 is gone — the in-game menu's *Resume*
+anchor still pauses if you really need to step away.
 
 The CROP pan range is whatever the source frame allows: NES has 128
 horizontal × 112 vertical of slack, SMS has 128 × 64, GB and GG both
@@ -1248,6 +1236,37 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.09 — PCE FILL centring + LB+d-pad pan harmonisation across all cores
+
+Small follow-up release that finishes 1.08's PCE work and lines the
+FILL/CROP behaviour up across every core.
+
+- **NES / SMS / GG / GB now use the LB + d-pad pan chord** (same
+  shape as MD / PCE). Previously NES / SMS pause-and-pan with a bare
+  d-pad press in CROP, and GG / GB pan via MENU + d-pad. All four
+  now keep the cart running while LB is held, the d-pad pans the
+  source viewport instead of going to the cart, and a tap of LB
+  still maps to SELECT (NES / GB) — the strip-and-pulse pattern
+  mirrors `pce_run.c`. The "freeze the cart so you can read text" use
+  case the NES paused-CROP gave you is gone, but the in-game menu's
+  *Resume* anchor still pauses if you really need to.
+- **SMS FILL is now horizontally pannable** (LB + L/R, range 0..64
+  source pixels). Previously the 192-col centre slice was hard-coded;
+  now `pan_x` slides it inside the 256-wide frame so you can pick
+  which third of the SMS image gets cropped off.
+- **PCE FILL pan defaults to centred per-cart**, not hard-coded 16.
+  Computed from `pcec_viewport()`'s `vw`/`vh`: 16 on 256×224 carts
+  (Bonk, Soldier Blade), 8 on 256×240 (R-Type), 48 on 336×240. The
+  hard-coded 16 in 1.08 pinned wider/taller modes against the right
+  edge.
+- **Picker hero-view PC ENGINE label.** The `tab_label[]` array was
+  sized to `TAB_COUNT` (7) but only listed 6 entries — the PCE tab
+  fell off the end and showed no system name in the hero view. Fixed.
+- **Lobby NES tile label includes PCE.** Bottom-of-screen tagline
+  under the NES tile now reads `NES / SMS / GG / GB / MD / PCE`
+  (or without `/ MD` in the no-MD build) so users see at a glance
+  that the slot covers PC Engine HuCards.
 
 ### v1.08 — PC Engine / TurboGrafx-16, tab strip facelift, LCD reliability
 

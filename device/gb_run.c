@@ -483,6 +483,13 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     bool exit_after    = false;
 
     int pan_x = 16, pan_y = 8;
+    /* LB chord for play-while-cropped panning — mirrors md_run /
+     * pce_run. LB doubles as SELECT cart-side, so the strip-and-
+     * pulse pattern keeps a "tap LB" working as SELECT while the
+     * "hold LB + d-pad" chord pans the viewport. */
+    int  lb_held_frames  = 0;
+    bool lb_pan_used     = false;
+    int  lb_select_pulse = 0;
     int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
     int prev_lt = 0, prev_rt = 0, prev_a = 0;
 
@@ -537,19 +544,6 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 osd_text_ms = 800;
                 menu_consumed = 1;
             }
-            /* CROP mode: cart keeps running, MENU+dpad pans the
-             * viewport continuously. */
-            if (scale_mode == SCALE_CROP) {
-                const int PAN_STEP = 1;
-                if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
-                if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
-                if (lt_down) { pan_x -= PAN_STEP; menu_consumed = 1; }
-                if (rt_down) { pan_x += PAN_STEP; menu_consumed = 1; }
-                if (pan_x < 0)  pan_x = 0;
-                if (pan_x > 32) pan_x = 32;
-                if (pan_y < 0)  pan_y = 0;
-                if (pan_y > 16) pan_y = 16;
-            }
             /* MENU long hold (>= 500 ms with no chord) opens the
              * in-game menu. */
             if (menu_press_ms >= 500 && !menu_consumed) {
@@ -562,6 +556,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
                     cfg_dirty = true;
                     if (scale_mode == SCALE_CROP) { pan_x = 16; pan_y = 8; }
+                    else                          { pan_x = 0;  pan_y = 0; }
                 }
                 menu_press_ms = 0;
                 menu_was_down = 0;
@@ -672,6 +667,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (v_scale != (int)scale_mode) {
                 scale_mode = (scale_mode_t)v_scale;
                 if (scale_mode == SCALE_CROP) { pan_x = 16; pan_y = 8; }
+                else                          { pan_x = 0;  pan_y = 0; }
                 cfg_dirty = true;
             }
             if (v_vol   != volume       ) {
@@ -737,9 +733,51 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             last_input_us = (uint64_t)time_us_64();
         }
 
-        /* The cart always receives input — even in CROP mode. The
-         * pan controls live on MENU+dpad above. */
-        gbc_set_buttons(menu_down ? 0 : read_gb_buttons());
+        /* CROP pan: hold LB to engage. Same chord as md_run /
+         * pce_run — d-pad pans the viewport (cart sees no d-pad and
+         * LB→SELECT is suppressed). On LB release without pan:
+         * pulse SELECT for ~3 frames so a "tap LB" still acts as
+         * SELECT. */
+        if (lb_down && !menu_down) {
+            lb_held_frames++;
+            const int PAN_STEP = 1;
+            int dxp = (rt_down ? PAN_STEP : 0) - (lt_down ? PAN_STEP : 0);
+            int dyp = (dn_down ? PAN_STEP : 0) - (up_down ? PAN_STEP : 0);
+            if (scale_mode == SCALE_CROP && (dxp || dyp)) {
+                pan_x += dxp;
+                pan_y += dyp;
+                if (pan_x < 0)  pan_x = 0;
+                if (pan_x > 32) pan_x = 32;
+                if (pan_y < 0)  pan_y = 0;
+                if (pan_y > 16) pan_y = 16;
+                lb_pan_used = true;
+            }
+        } else {
+            if (lb_held_frames > 0 && !lb_pan_used) {
+                lb_select_pulse = 3;
+            }
+            lb_held_frames = 0;
+            lb_pan_used    = false;
+        }
+        if (lb_select_pulse > 0) lb_select_pulse--;
+
+        /* Apply LB chord. While LB is held in CROP the d-pad pans
+         * the viewport — strip direction bits + LB→SELECT. On LB
+         * release without pan, replay SELECT as a 3-frame pulse. */
+        uint8_t pad = read_gb_buttons();
+        if (menu_down) {
+            pad = 0;
+        } else {
+            if (lb_down) {
+                pad &= ~GBC_BTN_SELECT;
+                if (scale_mode == SCALE_CROP) {
+                    pad &= ~(GBC_BTN_UP | GBC_BTN_DOWN
+                             | GBC_BTN_LEFT | GBC_BTN_RIGHT);
+                }
+            }
+            if (lb_select_pulse > 0) pad |= GBC_BTN_SELECT;
+        }
+        gbc_set_buttons(pad);
 
         /* And the cart always ticks. */
         {

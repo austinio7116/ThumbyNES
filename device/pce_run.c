@@ -147,6 +147,21 @@ static uint16_t read_pce_buttons(void) {
  *          pannable both axes with LB+d-pad. Same chord as md_run.c.
  */
 
+/* Centred FILL pan_x = (vw - visible_w) / 2 where visible_w =
+ * min(vh, vw). For 256×224 cards this is 16 (the common case);
+ * for 256×240 carts (R-Type) it's 8; for wider 336× modes it's
+ * 56/48. Hard-coding 16 was right for 224-line carts only and
+ * pinned wider/taller modes against the right edge. */
+static int pce_fill_pan_x_centre(void) {
+    int vx, vy, vw, vh;
+    pcec_viewport(&vx, &vy, &vw, &vh);
+    if (vh <= 0 || vw <= 0) return 0;
+    int visible_w = vh;
+    if (visible_w > vw) visible_w = vw;
+    int max_pan = vw - visible_w; if (max_pan < 0) max_pan = 0;
+    return max_pan / 2;
+}
+
 /* --- per-ROM cfg --------------------------------------------------- */
 
 #define CFG_MAGIC   0x50434558u   /* 'PCEX' */
@@ -490,7 +505,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                      * different legal range. Stale pan_x=64 in FILL
                      * would clamp to 32 → permanently right-pinned. */
                     if      (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 48; }
-                    else if (scale_mode == SCALE_FILL) { pan_x = 16; pan_y = 0;  }
+                    else if (scale_mode == SCALE_FILL) { pan_x = pce_fill_pan_x_centre(); pan_y = 0; }
                     else                               { pan_x = 0;  pan_y = 0;  }
                 }
                 menu_press_ms = 0;

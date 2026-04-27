@@ -53,7 +53,7 @@
 #include "thumbyone_led.h"
 #endif
 
-#define THUMBYNES_VERSION "1.08"
+#define THUMBYNES_VERSION "1.09"
 
 /* Static framebuffer + filesystem state. */
 static uint16_t       fb[128 * 128];

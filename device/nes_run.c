@@ -114,7 +114,8 @@ static uint8_t read_nes_buttons(void) {
  *          top + bottom. Either nearest-neighbor (drop) or 2×2 box
  *          average depending on the orthogonal `blend` toggle.
  *   CROP — 1:1 native pixels, 128×128 viewport into the 256×240
- *          frame, pannable with the D-pad. Pauses emulation. */
+ *          frame, pannable with LB + d-pad while the cart keeps
+ *          running (same chord as md_run / pce_run). */
 typedef enum {
     SCALE_FIT  = 0,
     SCALE_CROP = 1,
@@ -397,6 +398,15 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     /* Pan position for CROP mode. Reset to centre on every entry. */
     int pan_x = 64;
     int pan_y = 56;
+    /* LB chord for play-while-cropped panning — mirrors md_run.c /
+     * pce_run.c. While LB is held in CROP mode the d-pad pans the
+     * source viewport instead of going to the cart, and LB→SELECT is
+     * suppressed so SELECT doesn't fire mid-pan. On LB release: if no
+     * pan motion happened during the hold, pulse SELECT to the cart
+     * for a few frames so a "tap LB" still acts as SELECT. */
+    int  lb_held_frames  = 0;
+    bool lb_pan_used     = false;
+    int  lb_select_pulse = 0;
     /* Edge-detect chord buttons so a held press fires once. */
     int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
     int prev_lt = 0, prev_rt = 0, prev_b = 0, prev_a = 0;
@@ -681,33 +691,68 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             last_input_us = (uint64_t)time_us_64();
         }
 
-        /* Input gating: in CROP mode the cart receives nothing — the
-         * D-pad pans the viewport instead so the user can read text
-         * without the game stealing inputs. The cart still ticks. */
-        if (scale_mode == SCALE_CROP) {
-            nesc_set_buttons(0);
-            const int STEP = 4;   /* px per frame while held */
-            if (!menu_down) {
-                if (up_down)    pan_y -= STEP;
-                if (dn_down)    pan_y += STEP;
-                if (!gpio_get(BTN_LEFT_GP))  pan_x -= STEP;
-                if (!gpio_get(BTN_RIGHT_GP)) pan_x += STEP;
+        /* CROP pan: hold LB to engage. Same chord as md_run / pce_run
+         * — d-pad pans the viewport (cart sees no d-pad and LB→SELECT
+         * is suppressed). Default — without LB held — d-pad + LB go
+         * to the cart, so the game stays fully playable while
+         * cropped. On LB release: pulse SELECT only if no pan motion
+         * happened during the hold (a "tap LB" still acts as SELECT);
+         * if the chord was used, swallow SELECT to avoid firing on
+         * chord exit. */
+        if (lb_down && !menu_down) {
+            lb_held_frames++;
+            const int PAN_STEP = 4;
+            int dxp = (rt_down ? PAN_STEP : 0) - (lt_down ? PAN_STEP : 0);
+            int dyp = (dn_down ? PAN_STEP : 0) - (up_down ? PAN_STEP : 0);
+            if (scale_mode == SCALE_CROP && (dxp || dyp)) {
+                pan_x += dxp;
+                pan_y += dyp;
                 if (pan_x < 0)   pan_x = 0;
                 if (pan_x > 128) pan_x = 128;
                 if (pan_y < 0)   pan_y = 0;
                 if (pan_y > 112) pan_y = 112;
+                lb_pan_used = true;
             }
         } else {
-            nesc_set_buttons(read_nes_buttons());
+            if (lb_held_frames > 0 && !lb_pan_used) {
+                /* Pulse SELECT for ~3 frames so the cart definitely
+                 * registers the press, regardless of when in its tick
+                 * cycle the read lands. */
+                lb_select_pulse = 3;
+            }
+            lb_held_frames = 0;
+            lb_pan_used    = false;
         }
+        if (lb_select_pulse > 0) lb_select_pulse--;
 
-        /* In CROP mode the cart is paused — skip the emulator step
-         * entirely so the user can read text without the game state
-         * advancing. NES always boots in FIT (cfg never restores
-         * scale_mode) so the buffer is populated by the time the
-         * user can toggle to CROP. Fast-forward otherwise runs 4
-         * frames per outer iteration. */
-        if (scale_mode != SCALE_CROP) {
+        /* Apply LB chord. While LB is held in CROP the d-pad pans the
+         * viewport — strip direction bits + LB→SELECT before the cart
+         * sees them. On LB release without pan, replay SELECT as a
+         * 3-frame pulse so a "tap LB" still acts as SELECT. MENU held
+         * masks all input so the long-hold-to-open-menu and MENU+A
+         * screenshot chord don't leak into the cart. */
+        uint8_t pad = read_nes_buttons();
+        if (menu_down) {
+            pad = 0;
+        } else {
+            if (lb_down) {
+                pad &= ~NESC_BTN_SELECT;
+                if (scale_mode == SCALE_CROP) {
+                    pad &= ~(NESC_BTN_UP | NESC_BTN_DOWN
+                             | NESC_BTN_LEFT | NESC_BTN_RIGHT);
+                }
+            }
+            if (lb_select_pulse > 0) {
+                pad |= NESC_BTN_SELECT;
+            }
+        }
+        nesc_set_buttons(pad);
+
+        /* Run the emulator. Fast-forward runs 4 frames per outer
+         * iteration. CROP no longer pauses (was the case until 1.09);
+         * the LB-chord above keeps inputs out of the cart while
+         * panning, so nothing else needs to gate the run. */
+        {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) nesc_run_frame();
             unsaved_play_frames += frame_runs;
@@ -737,9 +782,8 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             nes_lcd_present(fb);
         }
 
-        /* Audio out. Skipped in CROP mode (paused) so the speaker
-         * goes silent rather than holding the last frame's samples. */
-        if (scale_mode != SCALE_CROP) {
+        /* Audio out. */
+        {
             int n = nesc_audio_pull(audio, 1024);
             if (n > 0) {
                 scale_audio(audio, n, volume);

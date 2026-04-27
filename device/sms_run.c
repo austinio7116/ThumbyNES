@@ -172,14 +172,20 @@ static void blit_blend_sms(uint16_t *fb, const uint8_t *src,
  * Compiler (gcc -O3, ARM Cortex-M33) turns /9 into a multiply-high
  * + shift; no runtime division.
  */
+/* SMS FILL: 192-col centred slice of the 256-wide frame, scaled
+ * 192→128 (1.5:1) on both axes. pan_x slides the visible slice
+ * within [0, 64] source pixels (LB+L/R chord). The default centred
+ * crop is pan_x = 32 — the comment in the runner sets it on entry. */
 static void blit_fill_sms(uint16_t *fb, const uint8_t *src,
-                           const uint16_t *pal) {
+                           const uint16_t *pal, int pan_x) {
+    if (pan_x < 0)  pan_x = 0;
+    if (pan_x > 64) pan_x = 64;
     for (int dy = 0; dy < 128; dy++) {
         int sy    = (dy * 3) >> 1;
         int w_top = (dy & 1) ? 1 : 2;
         int w_bot = (dy & 1) ? 2 : 1;
-        const uint8_t *row_t = src + sy       * 256 + 32;
-        const uint8_t *row_b = src + (sy + 1) * 256 + 32;
+        const uint8_t *row_t = src + sy       * 256 + pan_x;
+        const uint8_t *row_b = src + (sy + 1) * 256 + pan_x;
         uint16_t      *drow  = fb  + dy * 128;
         for (int dx = 0; dx < 128; dx++) {
             int sx    = (dx * 3) >> 1;
@@ -463,9 +469,16 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  open_menu     = 0;
     bool exit_after    = false;
 
-    /* CROP only meaningful for SMS (256x192). For GG the asymmetric
-     * scale already shows the entire 160x144 frame. */
+    /* Pan position. Default = centred for SMS CROP (256x192 → 128x128
+     * window, max pan 128/64). FILL uses pan_x only ([0, 64], default
+     * 32). GG CROP uses [0, 32] x [0, 16] with default 16/8. */
     int pan_x = 64, pan_y = 32;
+    /* LB chord for play-while-cropped panning — mirrors md_run /
+     * pce_run. SMS/GG don't map LB to a cart button, so no
+     * strip-and-pulse pattern is needed; LB just gates the d-pad
+     * away from the cart while held. */
+    int  lb_held_frames = 0;
+    bool lb_pan_used    = false;
     int prev_lb = 0, prev_rb = 0, prev_up = 0, prev_dn = 0;
     int prev_lt = 0, prev_rt = 0, prev_a = 0;
 
@@ -520,20 +533,6 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 osd_text_ms = 800;
                 menu_consumed = 1;
             }
-            /* GG CROP: while MENU is held, the dpad continuously
-             * pans the viewport. SMS keeps its existing
-             * paused-with-bare-dpad-pan behavior below. */
-            if (gg && scale_mode == SCALE_CROP) {
-                const int PAN_STEP = 1;
-                if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
-                if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
-                if (lt_down) { pan_x -= PAN_STEP; menu_consumed = 1; }
-                if (rt_down) { pan_x += PAN_STEP; menu_consumed = 1; }
-                if (pan_x < 0)  pan_x = 0;
-                if (pan_x > 32) pan_x = 32;
-                if (pan_y < 0)  pan_y = 0;
-                if (pan_y > 16) pan_y = 16;
-            }
             /* MENU long hold (>= 500 ms with no chord) opens the
              * in-game pause menu. Replaces the old MENU-hold-to-exit
              * shortcut — Quit is now a menu item. */
@@ -552,9 +551,15 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                         scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
                     }
                     cfg_dirty = true;
+                    /* Recentre pan on mode change — each mode has a
+                     * different legal range. */
                     if (scale_mode == SCALE_CROP) {
                         if (gg) { pan_x = 16; pan_y = 8; }   /* GG */
                         else    { pan_x = 64; pan_y = 32; }  /* SMS */
+                    } else if (scale_mode == SCALE_FILL) {
+                        pan_x = 32; pan_y = 0;               /* SMS only */
+                    } else {
+                        pan_x = 0;  pan_y = 0;
                     }
                 }
                 menu_press_ms = 0;
@@ -663,6 +668,10 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 if (scale_mode == SCALE_CROP) {
                     if (gg) { pan_x = 16; pan_y = 8; }
                     else    { pan_x = 64; pan_y = 32; }
+                } else if (scale_mode == SCALE_FILL) {
+                    pan_x = 32; pan_y = 0;
+                } else {
+                    pan_x = 0;  pan_y = 0;
                 }
                 cfg_dirty = true;
             }
@@ -721,34 +730,60 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             last_input_us = (uint64_t)time_us_64();
         }
 
-        if (!gg && scale_mode == SCALE_CROP) {
-            /* SMS CROP: paused, dpad pans the viewport directly. */
-            smsc_set_buttons(0);
-            const int STEP = 4;
-            if (!menu_down) {
-                if (up_down)   pan_y -= STEP;
-                if (dn_down)   pan_y += STEP;
-                if (lt_down)   pan_x -= STEP;
-                if (rt_down)   pan_x += STEP;
-                if (pan_x < 0)   pan_x = 0;
-                if (pan_x > 128) pan_x = 128;
-                if (pan_y < 0)   pan_y = 0;
-                if (pan_y > 64)  pan_y = 64;
+        /* CROP / FILL pan: hold LB to engage. Same chord as md_run /
+         * pce_run — d-pad pans the viewport (cart sees no d-pad). LB
+         * has no SMS/GG cart-side mapping, so there's nothing to
+         * strip-and-pulse. CROP pans both axes; FILL pans X only. */
+        if (lb_down && !menu_down) {
+            lb_held_frames++;
+            const int PAN_STEP = 4;
+            int dxp = (rt_down ? PAN_STEP : 0) - (lt_down ? PAN_STEP : 0);
+            int dyp = (dn_down ? PAN_STEP : 0) - (up_down ? PAN_STEP : 0);
+            if (scale_mode == SCALE_CROP && (dxp || dyp)) {
+                pan_x += dxp;
+                pan_y += dyp;
+                if (gg) {
+                    if (pan_x < 0)  pan_x = 0;
+                    if (pan_x > 32) pan_x = 32;
+                    if (pan_y < 0)  pan_y = 0;
+                    if (pan_y > 16) pan_y = 16;
+                } else {
+                    if (pan_x < 0)   pan_x = 0;
+                    if (pan_x > 128) pan_x = 128;
+                    if (pan_y < 0)   pan_y = 0;
+                    if (pan_y > 64)  pan_y = 64;
+                }
+                lb_pan_used = true;
+            } else if (scale_mode == SCALE_FILL && !gg && dxp) {
+                /* SMS FILL — horizontal pan only inside [0, 64]. */
+                pan_x += dxp;
+                if (pan_x < 0)  pan_x = 0;
+                if (pan_x > 64) pan_x = 64;
+                lb_pan_used = true;
             }
         } else {
-            /* FIT for either system, or GG CROP — cart receives input.
-             * In GG CROP we additionally suppress the cart's view of
-             * the dpad while MENU is held so MENU+dpad can pan. */
-            smsc_set_buttons((gg && scale_mode == SCALE_CROP && menu_down)
-                              ? 0
-                              : read_sms_buttons(gg));
+            lb_held_frames = 0;
+            lb_pan_used    = false;
         }
 
-        /* SMS CROP is the only path where the cart pauses; GG CROP
-         * keeps ticking like FIT. SMS always boots in FIT (cfg never
-         * restores scale_mode) so the buffer is always populated by
-         * the time the user can toggle to CROP. */
-        if (gg || scale_mode != SCALE_CROP) {
+        /* Apply LB chord. While LB is held the d-pad pans the
+         * viewport — strip direction bits before the cart sees them.
+         * MENU held masks all input so the long-hold-to-open-menu and
+         * MENU+A screenshot chord don't leak into the cart. */
+        uint8_t pad = read_sms_buttons(gg);
+        if (menu_down) {
+            pad = 0;
+        } else if (lb_down && (scale_mode == SCALE_CROP
+                              || (scale_mode == SCALE_FILL && !gg))) {
+            pad &= ~(SMSC_BTN_UP | SMSC_BTN_DOWN
+                     | SMSC_BTN_LEFT | SMSC_BTN_RIGHT);
+        }
+        smsc_set_buttons(pad);
+
+        /* CROP no longer pauses (was the case for SMS until 1.09);
+         * the LB-chord above keeps inputs out of the cart while
+         * panning, so nothing else needs to gate the run. */
+        {
             int frame_runs = fast_forward ? 4 : 1;
             for (int i = 0; i < frame_runs; i++) smsc_run_frame();
             unsaved_play_frames += frame_runs;
@@ -771,7 +806,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                  * has no meaning here since nearest-neighbour isn't
                  * offered as an alternative. See blit_fill_sms for
                  * the weight math. */
-                blit_fill_sms(fb, frame, pal);
+                blit_fill_sms(fb, frame, pal, pan_x);
             } else if (blend) {
                 blit_blend_sms(fb, frame, pal);
             } else {
@@ -791,7 +826,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             nes_lcd_present(fb);
         }
 
-        if (gg || scale_mode != SCALE_CROP) {
+        {
             int n = smsc_audio_pull(audio, 1024);
             if (n > 0) {
                 scale_audio(audio, n, volume);
