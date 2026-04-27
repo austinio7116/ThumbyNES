@@ -5,12 +5,12 @@
 > This repo remains the standalone build of ThumbyNES and the source of truth for the emulator itself — the code here is what ThumbyOne's NES slot compiles. Use this repo if you specifically want NES-only firmware, or to hack on the emulator code.
 
 A bare-metal **NES + Sega Master System + Game Gear + Game Boy (DMG + Color)
-+ Sega Mega Drive / Genesis** emulator firmware for the **TinyCircuits
-Thumby Color** (RP2350, 128×128 RGB565 LCD, PWM audio, 520 KB SRAM, 16 MB
-flash).
++ Sega Mega Drive / Genesis + PC Engine / TurboGrafx-16 (HuCard)** emulator
+firmware for the **TinyCircuits Thumby Color** (RP2350, 128×128 RGB565 LCD,
+PWM audio, 520 KB SRAM, 16 MB flash).
 
-Drop `.nes`, `.sms`, `.gg`, `.gb`, `.gbc`, `.md`, `.gen`, or `.bin` ROMs
-onto the device over USB, browse them in a tabbed picker with thumbnail
+Drop `.nes`, `.sms`, `.gg`, `.gb`, `.gbc`, `.md`, `.gen`, `.bin`, or `.pce`
+ROMs onto the device over USB, browse them in a tabbed picker with thumbnail
 screenshots, play with sound. Per-ROM saves and **save states**, per-ROM and global
 settings, in-game pause menu, idle sleep, fast-forward, palettes,
 in-game screenshot capture, live-pan read mode for the handhelds,
@@ -33,6 +33,8 @@ firmware image.
 <img src="images/md-brian-lara-cricket.jpg" width="240" alt="Mega Drive — Brian Lara Cricket 96">
 </p>
 
+<!-- TODO: PCE shot row — capture from device once 1.08 is flashed -->
+
 [`firmware/nesrun_device.uf2`](firmware/nesrun_device.uf2) is committed
 to the repo if you want to flash without setting up the toolchain.
 
@@ -50,8 +52,8 @@ to the repo if you want to flash without setting up the toolchain.
 
 3. **Drop ROMs.** Plug the device into a host. It enumerates as a
    removable drive — copy any number of `.nes`, `.sms`, `.gg`, `.gb`,
-   `.gbc`, `.md`, `.gen`, or `.bin` files into the root. Eject from the
-   host. The device flushes the cache and the picker rescans.
+   `.gbc`, `.md`, `.gen`, `.bin`, or `.pce` files into the root. Eject
+   from the host. The device flushes the cache and the picker rescans.
 
 4. **Pick + play.** Browse with the **D-pad**, shoulder buttons
    switch tabs, **A** to launch.
@@ -76,13 +78,15 @@ overlay; the picker itself only ever exits via launching a ROM.
 A **tab strip** runs across the top of the picker:
 
 ```
-[★ FAV] [NES] [SMS] [GB] [GG] [MD]
+[★ FAV] [NES] [SMS] [GB] [GG] [MD] [PCE]
 ```
 
-Each tab shows a procedurally-drawn platform icon (controller for
-NES, cartridge for SMS, Game Boy silhouette for GB, handheld pill for
-GG, 6-button pad silhouette for MD, star for favorites) and the ROM
-count for that tab. Empty tabs are skipped automatically when stepping
+Each tab shows a hand-painted 12×8 platform icon (NES controller,
+SMS cartridge, Game Boy silhouette, GG pill, MD pad, PCE HuCard,
+star for favorites) and the ROM count for that tab. Active tabs are
+highlighted in orange; inactive tabs in grey (with a slightly darker
+grey on SMS / MD where the bigger silhouettes would otherwise visually
+dominate the strip). Empty tabs are skipped automatically when stepping
 with the shoulder buttons.
 
 Two views, swapped from the picker menu (`Display: HERO / LIST`):
@@ -104,8 +108,9 @@ Two views, swapped from the picker menu (`Display: HERO / LIST`):
   selected row's position-in-tab appears as a third line.
 
 The thumbnails are screenshots you've captured in-game (see below).
-ROMs without a screenshot fall back to a procedurally-drawn
-placeholder: the platform icon centred on a tinted panel.
+ROMs without a screenshot fall back to a placeholder: the same
+hand-painted platform icon nearest-neighbour upscaled to 24×16
+(list view) or 48×32 (hero view) inside a tinted panel.
 
 ### Picker controls
 
@@ -209,25 +214,26 @@ for `name + 16` so the leading `/` and any sidecar suffix
 
 ### Cart inputs
 
-| Thumby button | NES | SMS | Game Gear | Game Boy | Mega Drive / Genesis |
-|---|---|---|---|---|---|
-| **A** (right face) | A | Button 2 | Button 2 | A | B (jump/light attack) |
-| **B** (left face)  | B | Button 1 | Button 1 | B | A |
-| **D-pad**          | D-pad | D-pad | D-pad | D-pad | D-pad |
-| **LB**             | Select | — | — | Select | **Start** |
-| **RB**             | Start | Pause | Start | Start | C (heavy attack) |
+| Thumby button | NES | SMS | Game Gear | Game Boy | Mega Drive / Genesis | PC Engine |
+|---|---|---|---|---|---|---|
+| **A** (right face) | A | Button 2 | Button 2 | A | B (jump/light attack) | I |
+| **B** (left face)  | B | Button 1 | Button 1 | B | A | II |
+| **D-pad**          | D-pad | D-pad | D-pad | D-pad | D-pad | D-pad |
+| **LB**             | Select | — | — | Select | **Start** | **Select** |
+| **RB**             | Start | Pause | Start | Start | C (heavy attack) | Run |
 
-MD's **Start** is **LB** — but on MD specifically, START fires on
-RELEASE (a tap, not the press) so that holding LB can engage the
-[CROP / FILL pan chord](#md-pan-chord-lb--d-pad) below without
-spuriously hitting Start. Held LB still works for "press START to
-continue" prompts via the release pulse, and tap-dismiss of
-level-clear screens behaves as expected. MENU tap is reserved for
-scale-mode cycling (FIT / FILL / CROP). MENU+A still saves a
-screenshot, and MENU long-hold opens the in-game menu. 6-button
-sub-mode (X/Y/Z/MODE) stays available via the in-game toggle for
-any future rebind; by default it stays off and those bits are
-stripped so carts read a plain 3-button pad.
+MD's **Start** and PCE's **Select** are both on **LB** — but on
+those two cores LB fires on RELEASE (a tap, not the press) so that
+holding LB can engage the [CROP pan chord](#pan-chord-lb--d-pad)
+below without spuriously hitting the cart input. Held LB still
+works for "press START to continue" / "Select to cycle weapon"
+prompts via the release pulse, and tap-dismiss of level-clear
+screens behaves as expected. MENU tap is reserved for scale-mode
+cycling (FIT / FILL / CROP — or FIT / CROP on PCE). MENU+A still
+saves a screenshot, and MENU long-hold opens the in-game menu. On
+MD, the 6-button sub-mode (X/Y/Z/MODE) stays available via the
+in-game toggle for any future rebind; by default it stays off and
+those bits are stripped so carts read a plain 3-button pad.
 
 ### MENU chords during play
 
@@ -241,33 +247,34 @@ in-game menu (open with MENU long-hold) instead.
 | **MENU + A** | Save a screenshot (32×32 + 64×64 sidecars) |
 | **MENU + dpad** *(GG / GB only)* | Pan the live CROP viewport while the cart keeps running |
 
-### MD pan chord (LB + d-pad)
+### Pan chord (LB + d-pad)
 
-In CROP and FILL modes, **hold LB and press a d-pad direction** to
-pan the source viewport while the cart keeps running. CROP gets
-full XY pan (the 128×128 window slides anywhere inside the cart's
-native 320×224 / 256×224 frame); FILL gets left/right pan within
-the centre crop (Y always fills the screen). Pan offsets persist
-across pan sessions until the cart unloads.
+On **MD** (CROP and FILL) and **PCE** (CROP), **hold LB and press a
+d-pad direction** to pan the source viewport while the cart keeps
+running. MD CROP gets full XY pan inside the native 320×224 / 256×224
+frame; MD FILL gets left/right pan within the centre crop (Y always
+fills the screen); PCE CROP gets full XY pan inside the native
+256×224 frame. Pan offsets persist across pan sessions until the
+cart unloads.
 
 While the chord is active:
 
 - The cart sees no d-pad input — the d-pad is yours, for panning.
-- LB → MD START is suppressed so the game never sees a Start press
-  during a pan move.
-- Face buttons (A, B, RB → C) still reach the cart, so action games
-  keep responding to the rest of the input. Useful for "see the
-  HUD off-screen / dialog box / map / minimap" while you keep
-  jumping or punching.
+- LB → cart-input (MD START / PCE SELECT) is suppressed so the game
+  never sees a press during a pan move.
+- Face buttons (A, B, RB) still reach the cart, so action games keep
+  responding to the rest of the input. Useful for "see the HUD
+  off-screen / dialog box / map / minimap" while you keep jumping
+  or punching.
 
 On release of LB:
 
-- If no pan motion happened during the hold, START pulses to the
-  cart for a few frames so a "tap LB" still acts as Start. (This
-  is what lets LB feel like a normal Start button when you're not
-  panning.)
-- If you panned during the hold, the START pulse is swallowed so
-  chord exit doesn't accidentally pause the game.
+- If no pan motion happened during the hold, the LB-bound input
+  pulses to the cart for a few frames so a "tap LB" still acts
+  normally — Start on MD, Select on PCE. (This is what lets LB
+  feel like a normal cart button when you're not panning.)
+- If you panned during the hold, the pulse is swallowed so chord
+  exit doesn't accidentally fire the cart input.
 
 ### At boot
 
@@ -358,6 +365,13 @@ Choice is per-cart; takes effect on **next launch** because the
 sample rate is baked into PicoDrive's `PsndRerate` resampler tables
 and the opt flags are checked at `PicoCartInsert` time.
 
+The **PCE runner** mixes six PSG channels mono through the same
+22050 Hz PWM path as the other cores, with a single-pole low-pass at
+fc ≈ 7.3 kHz matching the analog DAC rolloff on real hardware and 6
+dB headroom against int16 clipping. Master volume comes from the
+same global slider; the per-channel cart fade (which upstream only
+applied to the noise channels) now scales the wave channels too.
+
 ---
 
 ## Overclock
@@ -415,6 +429,9 @@ never costs you more than half a minute.
 - **SMS / GG**: smsplus's `cart.sram` (32 KB)
 - **Game Boy**: peanut_gb's `cart_ram`, sized via `gb_get_save_size_s`
   per cart (0..32 KB depending on MBC)
+- **PC Engine**: HuExpress's HuCard BRAM (2 KB) for save-capable
+  HuCards. Most HuCards don't have battery backup and skip this
+  sidecar.
 
 ROMs without a battery flag in their header are unaffected.
 
@@ -430,6 +447,7 @@ core state to a single `<rom>.sta` sidecar via the in-game menu's
 | **smsplus** | full machine state via its `system_save_state` / `system_load_state` | same FatFs bridge |
 | **peanut_gb** | `struct gb_s` + `minigb_apu_ctx` (~17 KB) | direct memcpy with a `'GBCS'` header (magic / version / size); function pointers re-attached on load |
 | **PicoDrive (MD)** | full PicoDrive `PicoStateFP` chunked serializer (~130–200 KB per slot) | same FatFs bridge; routes `state_save` / `state_load`'s internal mallocs through a 4 KB scratch buffer pre-allocated at `mdc_init` (see below) |
+| **HuExpress (PCE)** | `THPE` format — magic + `hard_pce` + RAM + VRAM + Pal + SPRAM + IO blocks | direct FatFs writer (no upstream `state.c` to bridge — HuExpress has no portable serialiser, so we wrote our own) |
 
 The retro-go cores and PicoDrive both use libc stdio internally for
 the save/load calls. On the device build the relevant `fopen` /
@@ -503,6 +521,7 @@ The entire native frame is downscaled to fit the 128×128 display.
 | **Game Boy** | 160×144 | 128×128 | asymmetric 5:4 × 9:8, **fills the whole screen** |
 | **Mega Drive (H40)** | 320×224 | 128×90 | 19 px black bars top + bottom, 2.5:1 aspect preserved |
 | **Mega Drive (H32)** | 256×224 | 128×90 | same letterbox — sprites appear slightly wider |
+| **PC Engine** | 256×224 | 128×112 | 8 px black bars top + bottom, 8:7 aspect preserved |
 
 With **BLEND** on (the default on every system) each output pixel
 blends the source pixels that cover its footprint — softer image,
@@ -574,25 +593,26 @@ picture. Three flavours:
   game**. **MENU + dpad** pans the viewport while held. Designed
   for the handhelds where reading menus while the cart breathes is
   the point.
-- **Play-while-cropped CROP** (MD, *new in 1.06*): tap MENU to
-  enter CROP. The cart keeps running — we can't cleanly pause
-  PicoDrive's 68K/Z80/VDP pipeline mid-frame — and the d-pad goes
-  to the cart by default so the game stays fully playable in the
-  cropped view. Hold **LB** to engage the pan chord: while LB is
-  held the d-pad pans the source viewport instead, and LB → MD
-  START is suppressed so you don't accidentally pause. Release LB
-  with no pan motion → START pulses (so a tap LB still acts as
-  Start); release after panning → START is swallowed. Designed for
-  the MD's much-larger-than-128px native frame where reading HUDs
-  / signage / minimaps off the centred crop is the point. *(Prior
-  to 1.06 the d-pad always panned the CROP viewport in MD —
-  releasing the cart's d-pad input permanently. The chord change
-  restores normal play in CROP.)*
+- **Play-while-cropped CROP** (MD + PCE): tap MENU to enter CROP.
+  The cart keeps running — neither PicoDrive's 68K/Z80/VDP pipeline
+  nor HuExpress's HuC6280/VDC pipeline can be cleanly paused
+  mid-frame — and the d-pad goes to the cart by default so the
+  game stays fully playable in the cropped view. Hold **LB** to
+  engage the pan chord: while LB is held the d-pad pans the source
+  viewport instead, and LB → cart-input (MD START / PCE SELECT) is
+  suppressed so you don't accidentally fire it. Release LB with no
+  pan motion → the cart input pulses (so a tap LB still acts as
+  Start / Select); release after panning → the pulse is swallowed.
+  Designed for the MD's and PCE's much-larger-than-128px native
+  frames where reading HUDs / signage / minimaps off the centred
+  crop is the point. *(MD shipped with this in 1.06; PCE adopted
+  the same chord in 1.08 — see the changelog below.)*
 
 The CROP pan range is whatever the source frame allows: NES has 128
 horizontal × 112 vertical of slack, SMS has 128 × 64, GB and GG both
 have 32 × 16, MD (H40 + V28, most common) has 192 × 96, MD H32 has
-128 × 96. V30 carts extend the vertical slack to 112.
+128 × 96, PCE has 128 × 96. V30 MD carts extend the vertical slack
+to 112.
 
 ---
 
@@ -639,6 +659,14 @@ byte.
 of work on busy scenes. PAL carts lock 50 FPS with adaptive VDP skip
 (see "Adaptive skip-render" below); NTSC carts typically run at
 ~44-49 FPS in FULL audio. Try HALF or OFF audio mode to close the gap.
+
+### PC Engine
+
+The runner sets HuExpress's `Country` field at cart load via
+`PCEC_REGION_AUTO`, which defaults to JP. Most HuCard dumps —
+including US Hudson releases — boot correctly under that default.
+See the [v1.08 changelog](#v108--pc-engine--turbograf16-tab-strip-facelift-lcd-reliability)
+for why JP-default beats US-default on this core.
 
 ---
 
@@ -1220,6 +1248,179 @@ Explicit scope cuts to protect the RAM/CPU budget:
 ---
 
 ## Changelog
+
+### v1.08 — PC Engine / TurboGrafx-16, tab strip facelift, LCD reliability
+
+- **PC Engine / TurboGrafx-16 (HuCard) emulation** via vendored
+  [HuExpress](https://github.com/pelle7/odroid-go-pcengine-huexpress)
+  (GPLv2, ODROID-GO fork pinned by commit). Drops `.pce` ROMs into
+  the picker as a sixth core alongside NES / SMS / GG / GB / GBC /
+  MD. Plays HuCards at native 60 fps on the 250 MHz overclock with
+  PSG audio, save state, region detect, master volume.
+
+  - **HuCard-only build trim.** Vendored at `vendor/huexpress/` with
+    CD support, the 74 KB `CD_track[]` BSS, Arcade Card, netplay,
+    SDL OSD, Haiku frontend, iniconfig, and the keyboard mapper all
+    stripped out. Compile-only footprint after the trim:
+    **~70 KB flash + ~5 KB BSS + ~97 KB heap** (32 KB RAM + 64 KB
+    VRAM + palette / SPRAM / small structures). Smallest core in
+    our set in flash terms — NES alone is ~630 KB; same heap class
+    as SMS.
+
+  - **Scanline renderer rewrite — direct framebuffer binding**
+    (`src/pce_render.c`). HuExpress shipped with four full-frame
+    scratch buffers between the VDC and the host display — `XBUF`
+    (220 KB), `SPM` sprite mask / priority (220 KB), `VRAM2` (64
+    KB), `VRAMS` (64 KB). **~568 KB total** that didn't fit on
+    Thumby Color. Replaced with a per-scanline pipeline writing
+    straight into the LCD framebuffer in RGB565: per-frame state
+    drops to **~600 bytes** (`s_line` + `s_line_prev` + `s_spr[16]`).
+    Pipeline:
+    1. `render_bg_line` walks the BAT, decodes 8×8 tiles via
+       `tile_pixel`, writes `Pal[bank*16+p]` palette indices into
+       `s_line` (matches upstream's packed-byte semantics so the
+       256-entry RGB565 LUT in `pce_core.c` can decode any pixel).
+    2. `scan_sprites` indexes 0..63 in order, keeping the first 16
+       visible — hardware behaviour: high indices drop, not low.
+    3. `draw_sprites_line` iterates in reverse so low indices land
+       on top, with 16/32-wide cell-pair hflip swap.
+    4. `emit_row` does 2:1 nearest downsample, optional 2×2 box
+       blend in packed RGB565 space (same `exp565` / `pak565`
+       trick as nes / gb / md).
+
+    Mid-frame `BYR` raster effects work via the upstream
+    `ScrollYDiff` latch (`IO_write.h` sets `ScrollYDiff =
+    scanline-1-VPR` on BYR write).
+
+  - **`exe_go` in static IRAM.** The h6280 interpreter dispatcher
+    runs from the SDK's `.time_critical.pce` section (load to flash,
+    copy to SRAM at boot via `crt0`). The linker auto-generates
+    long-call veneers for cross-section BLs — none of the
+    dynamic-IRAM relocation gymnastics MD's cz80 dispatcher needed.
+    Conservative tagging: only `exe_go` (with `USE_INSTR_SWITCH`
+    inlining every opcode). The four other functions tagged in the
+    initial perf pass (`IO_read_`, `IO_read_raw`, `IO_write_`,
+    `WriteBuffer`) all stay in flash — measured first, only tag if
+    perf actually needs it. Big performance lift over the
+    flash-XIP baseline.
+
+  - **Double-buffered LCD framebuffer + adaptive frameskip.** 32 KB
+    BSS for the back buffer; the scanline composer writes into one
+    while the previous frame ships to the GC9107 via DMA, with
+    `wait_idle` moved to right before present so the two phases
+    overlap (without this, every frame stalled ~10 ms on
+    `wait_idle`). Buffer toggle uses its own counter, not the
+    1-second FPS-window counter, which would race + ghost. Skip
+    frames neither render nor present, so the LCD keeps the last
+    good frame instead of alternating with garbage. Adaptive skip
+    mirrors `md_run.c`: skip when last frame's emu+render overran
+    the refresh budget; cap at 2 consecutive skips.
+
+  - **PSG audio path.** Six PSG channels mixed mono through the same
+    PWM pipeline as the other cores. **Mono not stereo** dodges an
+    upstream bug at `mix.c:249` where the silent-channel early-
+    return memsets `dwSize * sample_size` bytes — short by half in
+    stereo mode (R retains stale audio from the last time the
+    channel was active). Master volume from `io.psg_volume` is now
+    applied to the wave channels (upstream only used master on the
+    noise channels, so the cart's master fade was being ignored on
+    most output). Single-pole low-pass `y += ((x-y)*7) >> 3` ≈
+    fc 7.3 kHz matching the analog DAC rolloff on real hardware,
+    with a `>> 1` after the per-channel sum for ~6 dB headroom
+    against int16 clipping. Pull capped at `sample_rate / 60` with
+    a phase accumulator (alternates 368 / 367 over a 60-frame
+    window at 22050 Hz) — without the cap the PWM ring overflowed
+    in ~10 frames and tails were dropped silently (heard as
+    chopped audio with clicks). LPF integrator `s_audio_lpf` is
+    file-scope so `pcec_shutdown` and `pcec_load_state` can reset
+    it; without that, state transitions carried the previous mix
+    as a DC step (audible thump).
+
+  - **Joypad phantom-press fix.** `IO_read $1000` auto-advances
+    through pads 0..4 on each button-nibble read and XORs the byte
+    with `0xFF` before returning. Unset pad slots (calloc default
+    = 0) therefore appeared as "all buttons pressed on pads 1..4"
+    — harmless in single-player but confused multi-tap probes.
+    Fix: init `JOY[0..4] = 0xFF` (= no buttons pressed after XOR)
+    in `pcec_load_rom`.
+
+  - **AUTO region defaults JP.** Once we removed in-line software
+    bit-reversing, ROMs in flash are in PCE-native format
+    regardless of the cart's distribution region. Hudson generally
+    produced JP carts and bit-reversed them for US, so a
+    pre-decoded "USA" cart's CPU code is the JP code that expects
+    `$1000` bit 6 = 0. Defaulting `Country = 0x40` (US) hung 5 of
+    8 USA test carts in early boot with display disabled
+    (`CR=0x0000` for 120+ frames). Forcing `Country = 0` (JP)
+    unhangs them and doesn't break the JP carts.
+
+  - **HuCard compatibility — strict-mode aborts neutered.** Two
+    abort paths in HuExpress's strict bus decoder rejected real
+    carts: `0xFC` writes (a few JP carts use them defensively for
+    VRAM ops) and VDC register-select values past the documented
+    set. Both converted to silent no-ops. Test set: 8 carts
+    (Blazing Lazers, Dragon's Curse, Galaga '90, Image Fight,
+    Super Star Soldier, Final Soldier, R-Type, Legendary Axe II)
+    all booting in pcehost and on device.
+
+  - **Save / load state** via a custom `THPE` file format
+    (HuExpress has no portable serialiser, so we wrote our own —
+    magic + `hard_pce` + RAM + VRAM + Pal + SPRAM + IO blocks,
+    direct FatFs writer). Same in-game menu entry as every other
+    core; sidecar at `<basename>.sta`.
+
+  - **Pan chord (LB + d-pad)** mirroring the v1.06 MD chord —
+    LB → SELECT fires on RELEASE, hold LB in CROP to pan with
+    d-pad, no SELECT/d-pad leakage to the cart while the chord is
+    active, tap LB still acts as SELECT. Same state-machine
+    pattern as `md_run.c`. See [Pan chord](#pan-chord-lb--d-pad)
+    above.
+
+  - **ThumbyOne six-core coexistence — leak fixes.** Adding PCE
+    squeezed the slot heap from 213 KB → 201 KB free, and the
+    second emulator launched after PCE / SMS hung. Two latent bugs:
+    - **PCE per-session leak.** HuExpress allocates ~120 KB
+      through `my_special_alloc` (RAM / VRAM / WRAM / IOAREA /
+      SPRAM / Pal / VCE / `psg_da_data` / …). Upstream
+      deliberately leaked these at shutdown because freeing
+      tripped a glibc double-free assertion — but only because of
+      a bulk-frame sprite underflow that does not exist under our
+      scanline renderer. Fixed by tracking every `my_special_alloc`
+      in a session list, walked + freed at `pcec_shutdown`, plus
+      freeing `trap_ram_read` / `trap_ram_write` / `PopRAM` /
+      `IOAREA` and NULL'ing every aliased global so a stray
+      dereference between sessions traps cleanly.
+      `s_palette_built` reset so the RGB565 LUT rebuilds on next
+      `pcec_init`.
+    - **SMS smsplus latent leaks** (came up in the same audit).
+      `render.c`'s 64 KB pixel LUT and `tms.c`'s ~46 KB TMS
+      tables were `calloc`'d and never freed.
+
+    No flash partition or FAT-layout change — the trimmed HuCard
+    core fits inside the existing ThumbyNES slot, so upgrading
+    from 1.07 doesn't trigger a FAT migration. Heap budget after
+    the fixes: 296 KB → 275 KB free in the slot baseline (no
+    emulator loaded), still well above the pre-PCE 213 KB target.
+
+  - **Vendored HuExpress patches** — full catalogue in
+    [`vendor/VENDORING.md`](vendor/VENDORING.md).
+
+- **Tab strip facelift.** The procedural icon drawing in
+  `nes_thumb.c` (~150 lines of per-icon shape code) is replaced by
+  hand-painted 4 bpp bitmaps — 12×8 each, 7 icons × 56 bytes =
+  **392 B total**, smaller than the code it replaced. The same
+  bitmaps drive the no-screenshot placeholder thumbnails
+  (nearest-neighbour upscaled to 24×16 in the list view, 48×32 in
+  the hero view). Active tabs render in orange (`COL_TITLE`);
+  inactive in `COL_DIM` grey, with **SMS and MD overridden to a
+  darker grey** because their silhouettes are wider blocks of tint
+  and the standard dim was visually dominating the strip.
+
+- **LCD cold-boot reliability.** GC9107 init now issues an explicit
+  `SWRESET` + `INVOFF` before configuring orientation and pixel
+  format. Fixes a rare cold-boot artefact where the panel came up
+  rotated 180° or with colours inverted until the next power cycle.
+  Same fix in the ThumbyOne lobby's display init.
 
 ### v1.07 — defrag overhaul, MD B-stuck fix, 300 MHz removed
 

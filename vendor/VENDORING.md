@@ -542,18 +542,28 @@ directories / files were **not** imported:
    already applied to `ac_extra_mem` and `cd_extra_mem`. The pointer
    stays non-NULL so unused CD fallback paths don't deref NULL.
 
-### Pending work (see PCE_PLAN.md §5, §8)
+### Pending audit (1.08 release)
 
-- **Scanline render mode** — upstream has the `MY_VIDEO_MODE_SCANLINES`
-  macro scaffolded across `gfx.h`, `gfx_render_lines.h`,
-  `gfx_Loop6502.h`, `sprite_RefreshLine.h`. Currently the core
-  allocates a 220 KB XBUF render buffer, which won't fit in the
-  device's 520 KB SRAM alongside the other cores. Enabling scanline
-  mode is tracked in task #12 and gated by `PCE_SCANLINE_RENDER` in
-  `pce_core.c`; `THUMBYNES_WITH_PCE=ON` is unsafe on-device until
-  this is plumbed.
+Both items previously listed as Pending work shipped in 1.08:
 
-- **Save-state format** — HuExpress has no portable serialisation.
-  Will write a `THPE` format (magic + hard_pce + RAM + VRAM + Pal +
-  SPRAM + IO) and route through `thumby_state_bridge.h` like the
-  other cores.
+- **Scanline render mode** — implemented; the core now compiles
+  under `PCE_SCANLINE_RENDER` and routes through our own
+  `src/pce_render.c` per-scanline compositor (~600 bytes of state,
+  vs the 568 KB of upstream scratch the full-frame path needed).
+  See the [v1.08 changelog in the main README](../README.md#v108--pc-engine--turbograf16-tab-strip-facelift-lcd-reliability)
+  for the pipeline overview.
+- **Save-state serialisation** — implemented as the `THPE` format
+  (magic + `hard_pce` + RAM + VRAM + Pal + SPRAM + IO blocks),
+  written directly through FatFs rather than through
+  `thumby_state_bridge.h` (HuExpress had no upstream `state.c` to
+  bridge).
+
+Beyond patches 1–5 above, getting PCE running on real carts and
+coexisting with the other five cores in ThumbyOne required further
+modifications to the vendored tree (region detect, joypad-port
+read wiring, HuCard strict-mode abort softening, mix-path audio
+tuning, leak fixes for six-core coexistence). The full
+patch-by-patch enumeration matching MD's catalogue style is a TODO
+for a future audit pass — see the v1.08 changelog and the commit
+messages on `pce_core.c`, `pce_run.c`, and the modified files
+under `vendor/huexpress/engine/` for the technical detail.
