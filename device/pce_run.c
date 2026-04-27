@@ -111,8 +111,14 @@ static void battery_save(const char *rom_name) {
 
 /* PCE joypad bitmask from Thumby buttons. MENU is reserved for the
  * in-game menu (long-hold) and gets masked out of the cart's view
- * when held; we can't reuse it for RUN. Map shoulders instead:
- *   LB → SELECT,  RB → RUN. */
+ * when held. Shoulders map:
+ *   LB → SELECT  (doubles as the CROP-pan modifier — main loop
+ *                 strips SELECT while LB is held and re-asserts it
+ *                 as a release pulse only if no pan happened, so
+ *                 a tap still acts as SELECT and the chord never
+ *                 leaks SELECT to the cart mid-pan).
+ *   RB → RUN
+ * Same release-pulse pattern md_run.c uses for LB → START. */
 static uint16_t read_pce_buttons(void) {
     uint16_t m = 0;
     if (!gpio_get(BTN_A_GP))     m |= PCEC_BTN_I;
@@ -138,8 +144,8 @@ static uint16_t read_pce_buttons(void) {
  *                     output pixel averages four source indices
  *                     through the palette LUT. Used when BLEND is ON.
  *   blit_crop_pce   — 1:1 native 128×128 viewport into the 256×224
- *                     frame, pannable with MENU + d-pad. Max pan is
- *                     (128, 96).
+ *                     frame, pannable with LB + d-pad (LB-chord —
+ *                     same shape as md_run.c). Max pan is (128, 96).
  *
  * Source format: palette indices, stride = PCEC_PITCH bytes, 224
  * visible rows starting at (0, 0). The core's pcec_palette_rgb565()
@@ -362,6 +368,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         free(pce_fb_back); pce_fb_back = NULL;
         return -10;
     }
+
     battery_load(name);
 
     int          volume       = VOL_DEF;
@@ -405,6 +412,16 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int pan_x = 64, pan_y = 48;       /* 256-128=128 /2, 224-128=96 /2 → centred */
     int prev_a = 0;
 
+    /* LB chord for play-while-cropped panning — mirrors md_run.c.
+     * While LB is held in CROP mode the d-pad pans the source
+     * viewport instead of going to the cart, and LB→SELECT is
+     * suppressed so SELECT doesn't fire mid-pan. On LB release: if
+     * no pan motion happened during the hold, pulse SELECT to the
+     * cart for a few frames so a "tap LB" still acts as SELECT. */
+    int  lb_held_frames  = 0;
+    bool lb_pan_used     = false;
+    int  lb_select_pulse = 0;
+
     int16_t audio[1024];
 
     const uint32_t FRAME_US = 1000000u / (uint32_t)pcec_refresh_rate();
@@ -432,14 +449,16 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     while (!exit_after) {
         int menu_down = !gpio_get(BTN_MENU_GP);
+        int lb_down   = !gpio_get(BTN_LB_GP);
         int up_down   = !gpio_get(BTN_UP_GP);
         int dn_down   = !gpio_get(BTN_DOWN_GP);
         int lt_down   = !gpio_get(BTN_LEFT_GP);
         int rt_down   = !gpio_get(BTN_RIGHT_GP);
         int a_down    = !gpio_get(BTN_A_GP);
-        int any_input = menu_down || up_down || dn_down || lt_down || rt_down
+        int any_input = menu_down || lb_down || up_down || dn_down
+                        || lt_down || rt_down
                         || a_down || !gpio_get(BTN_B_GP)
-                        || !gpio_get(BTN_LB_GP) || !gpio_get(BTN_RB_GP);
+                        || !gpio_get(BTN_RB_GP);
 
         if (any_input) {
             last_input_us = (uint64_t)time_us_64();
@@ -458,28 +477,55 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
         if (sleeping) { sleep_ms(50); continue; }
 
+        /* CROP pan: hold LB to engage. Same chord as md_run.c —
+         * d-pad pans the viewport (cart sees no d-pad and LB→SELECT
+         * is suppressed). Default — without LB held — d-pad + LB go
+         * to the cart, so the game stays fully playable while
+         * cropped. On LB release: pulse SELECT only if no pan
+         * motion happened during the hold (a "tap LB" still acts as
+         * SELECT); if the chord was used, swallow SELECT to avoid
+         * accidentally firing on chord exit. */
+        if (lb_down) {
+            lb_held_frames++;
+            const int PAN_STEP = 2;
+            int dx = (rt_down ? PAN_STEP : 0) - (lt_down ? PAN_STEP : 0);
+            int dy = (dn_down ? PAN_STEP : 0) - (up_down ? PAN_STEP : 0);
+            if (scale_mode == SCALE_CROP && (dx || dy)) {
+                pan_x += dx;
+                pan_y += dy;
+                if (pan_x < 0)   pan_x = 0;
+                if (pan_x > 128) pan_x = 128;
+                if (pan_y < 0)   pan_y = 0;
+                if (pan_y > 96)  pan_y = 96;
+                lb_pan_used = true;
+            }
+        } else {
+            if (lb_held_frames > 0 && !lb_pan_used) {
+                /* Pulse SELECT for ~3 frames so the cart definitely
+                 * registers the press, regardless of when in its tick
+                 * cycle the read lands. */
+                lb_select_pulse = 3;
+            }
+            lb_held_frames = 0;
+            lb_pan_used    = false;
+        }
+        if (lb_select_pulse > 0) lb_select_pulse--;
+
         if (menu_down) {
             menu_press_ms += 16;
             menu_was_down = 1;
             /* MENU+A: framebuffer snapshot. */
             if (a_down && !prev_a) {
                 int rc = nes_thumb_save(fb, name);
+                /* Force the .scr32/.scr64 writes through the FAT
+                 * write-cache to flash. Without this, a power-off
+                 * before the next battery_save / cfg_save / shutdown
+                 * loses the screenshot. */
+                if (rc == 0) nes_flash_disk_flush();
                 snprintf(osd_text, sizeof(osd_text),
                           rc == 0 ? "shot saved" : "shot fail");
                 osd_text_ms = 800;
                 menu_consumed = 1;
-            }
-            /* CROP pan via MENU + d-pad. */
-            if (scale_mode == SCALE_CROP) {
-                const int PAN_STEP = 2;
-                if (up_down) { pan_y -= PAN_STEP; menu_consumed = 1; }
-                if (dn_down) { pan_y += PAN_STEP; menu_consumed = 1; }
-                if (lt_down) { pan_x -= PAN_STEP; menu_consumed = 1; }
-                if (rt_down) { pan_x += PAN_STEP; menu_consumed = 1; }
-                if (pan_x < 0)   pan_x = 0;
-                if (pan_x > 128) pan_x = 128;
-                if (pan_y < 0)   pan_y = 0;
-                if (pan_y > 96)  pan_y = 96;
             }
             /* Long-hold MENU (≥ 500 ms, no chord) opens in-game menu. */
             if (menu_press_ms >= 500 && !menu_consumed) {
@@ -635,8 +681,28 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             last_input_us = (uint64_t)time_us_64();
         }
 
-        /* Cart always sees input — pan controls live on MENU+dpad. */
-        pcec_set_buttons(menu_down ? 0 : read_pce_buttons());
+        /* Apply LB chord. While LB is held in CROP the d-pad pans the
+         * viewport — strip direction bits + LB→SELECT before the cart
+         * sees them. On LB release without pan, replay SELECT as a
+         * 3-frame pulse so a "tap LB" still acts as SELECT. MENU held
+         * masks all input so the long-hold-to-open-menu and MENU+A
+         * screenshot chord don't leak into the cart. */
+        uint16_t pad = read_pce_buttons();
+        if (menu_down) {
+            pad = 0;
+        } else {
+            if (lb_down) {
+                pad &= ~PCEC_BTN_SELECT;
+                if (scale_mode == SCALE_CROP) {
+                    pad &= ~(PCEC_BTN_UP | PCEC_BTN_DOWN
+                             | PCEC_BTN_LEFT | PCEC_BTN_RIGHT);
+                }
+            }
+            if (lb_select_pulse > 0) {
+                pad |= PCEC_BTN_SELECT;
+            }
+        }
+        pcec_set_buttons(pad);
 
         /* Adaptive frameskip — if last frame's emulation alone blew
          * the budget, skip the scanline composer this frame. Never
@@ -758,6 +824,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     battery_save(name);
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
+
     pcec_shutdown();
     free(rom_alloc);
     free(pce_fb_back); pce_fb_back = NULL;     /* 32 KB back to heap */

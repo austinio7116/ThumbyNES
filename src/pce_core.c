@@ -132,9 +132,22 @@ static int s_vp_w = PCEC_DEFAULT_W, s_vp_h = PCEC_DEFAULT_H;
  * directly into the LCD framebuffer per scanline (pce_render.c) and
  * never touches XBUF/SPM. So the buffer-underflow path is dead and
  * the allocations can be freed cleanly on session exit. */
+/* WORKAROUND for PCE-specific heap corruption (root cause still open):
+ * a wild write during PCE init lands on newlib fastbin metadata
+ * adjacent to small allocations and corrupts the free-list. The
+ * symptom was malloc(32 KB)+free hanging the next malloc(64 KB).
+ *
+ * Padding every allocation by 256 bytes on each side shifts ALL of
+ * PCE's heap allocations enough that the wild write lands on harmless
+ * pad bytes instead of metadata. Cost: ~15 KB extra heap per PCE
+ * session; acceptable for now. The actual wild-write source still
+ * needs to be identified and fixed properly. */
+#define PCE_PAD 256
 typedef struct pce_alloc_node {
     struct pce_alloc_node *next;
-    void                  *ptr;
+    void                  *raw;        /* underlying calloc — user is raw + PAD */
+    void                  *ptr;        /* user-visible block start */
+    uint32_t              size;
 } pce_alloc_node_t;
 static pce_alloc_node_t *s_special_allocs = NULL;
 
@@ -142,14 +155,22 @@ void *my_special_alloc(unsigned char speed, unsigned char bytes,
                        unsigned long size)
 {
     (void)speed; (void)bytes;
-    void *p = calloc(1, size ? size : 1);
-    if (!p) return NULL;
-    pce_alloc_node_t *n = (pce_alloc_node_t *)malloc(sizeof(*n));
-    if (!n) { free(p); return NULL; }
-    n->ptr  = p;
+    unsigned long udata = (size ? size : 1);
+    /* layout: [PAD 256][user data udata][PAD 256] */
+    uint8_t *raw = (uint8_t *)calloc(1, PCE_PAD + udata + PCE_PAD);
+    if (!raw) return NULL;
+    /* Pad the node struct allocation similarly so its tiny ~24 B size
+     * isn't routed through fastbins. */
+    uint8_t *node_raw = (uint8_t *)malloc(PCE_PAD + sizeof(pce_alloc_node_t)
+                                           + PCE_PAD);
+    if (!node_raw) { free(raw); return NULL; }
+    pce_alloc_node_t *n = (pce_alloc_node_t *)(node_raw + PCE_PAD);
+    n->raw  = raw;
+    n->ptr  = raw + PCE_PAD;
+    n->size = (uint32_t)udata;
     n->next = s_special_allocs;
     s_special_allocs = n;
-    return p;
+    return raw + PCE_PAD;
 }
 
 static void my_special_free_all(void)
@@ -157,8 +178,9 @@ static void my_special_free_all(void)
     pce_alloc_node_t *cur = s_special_allocs;
     while (cur) {
         pce_alloc_node_t *next = cur->next;
-        free(cur->ptr);
-        free(cur);
+        free(cur->raw);
+        /* Node was allocated as `raw - PAD`, free that. */
+        free((uint8_t *)cur - PCE_PAD);
         cur = next;
     }
     s_special_allocs = NULL;
@@ -806,15 +828,14 @@ void pcec_shutdown(void)
     s_audio_phase_acc = 0;   /* phase accumulator restarts at 0 too */
     pce_render_shutdown();   /* frees the 2 KB BG-decode LUT */
 
-    /* HuExpress internals. trap_ram_* are direct mallocs in hard_init;
-     * everything else (hard_pce + RAM + VRAM + WRAM + IOAREA + SPRAM +
-     * VCE + Pal + psg_da_data[6] + the dummy CD / VRAM2 / VRAMS pads)
-     * comes through my_special_alloc and gets freed in one sweep. */
-    if (trap_ram_read)  { free(trap_ram_read);  trap_ram_read  = NULL; }
-    if (trap_ram_write) { free(trap_ram_write); trap_ram_write = NULL; }
+    /* HuExpress internals freed in one sweep via my_special_alloc.
+     * trap_ram_read/write are also routed through it (so the wild-
+     * write workaround pad covers them) — freed here too. */
     if (PopRAM)         { free(PopRAM);         PopRAM         = NULL; }
 
     my_special_free_all();    /* frees ~120 KB of HuExpress internals */
+    trap_ram_read = NULL;
+    trap_ram_write = NULL;
 
     /* Globals that aliased into the now-freed hard_pce / pool. NULL
      * them so a stray dereference between sessions traps cleanly
@@ -825,6 +846,33 @@ void pcec_shutdown(void)
     SPRAM = NULL;
     extern uchar *ROM;        /* declared in vendor/huexpress/engine/pce.c */
     ROM = NULL;               /* zero-copy XIP pointer, no free */
+
+    /* CRITICAL: pcec_init only allocates these `if (!p)`. Without NULLing
+     * here, a second PCE session sees stale pointers (now pointing to
+     * freed heap chunks), skips re-allocation, and subsequent strcpy /
+     * sprintf into them writes through the dangling pointer to memory
+     * that's now in newlib's free-list — corrupting fastbin metadata
+     * and hanging the next 32 KB malloc/free cycle. Same for
+     * spr_init_pos. This is the root cause of PCE→<other core>→PCE
+     * heap corruption that took us a long time to find. */
+    extern char *cart_name, *short_cart_name, *short_iso_name;
+    extern char *rom_file_name;
+    extern char *config_basepath, *sav_path, *sav_basepath;
+    extern char *tmp_basepath, *video_path, *ISO_filename;
+    extern char *syscard_filename;
+    extern uint32 *spr_init_pos;
+    cart_name = NULL;
+    short_cart_name = NULL;
+    short_iso_name = NULL;
+    rom_file_name = NULL;
+    config_basepath = NULL;
+    sav_path = NULL;
+    sav_basepath = NULL;
+    tmp_basepath = NULL;
+    video_path = NULL;
+    ISO_filename = NULL;
+    syscard_filename = NULL;
+    spr_init_pos = NULL;
 
     s_inited = 0;
     g_pce_mem_rom_active = 0;

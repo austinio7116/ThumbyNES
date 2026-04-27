@@ -384,7 +384,16 @@
 
             /* Select PSG channel */
         case 0:
+            /* THUMBYNES: V & 7 allows 6 and 7 but the PSG arrays are
+             * [6] (PSG, wave, psg_da_data, psg_da_index, psg_da_count,
+             * psg_channel_disabled). On the real HuC6280 only channels
+             * 0..5 exist; writes selecting 6/7 are silently ignored.
+             * Upstream's & 7 was a 1-of-3 bytes worth of OOB, in
+             * particular psg_da_data[6] reads a non-pointer field from
+             * the IO struct as a pointer and the next data write lands
+             * on a wild address (heap corruption). Clamp to 0..5. */
             io.psg_ch = V & 7;
+            if (io.psg_ch > 5) io.psg_ch = 0;
             return;
 
             /* Select global volume */

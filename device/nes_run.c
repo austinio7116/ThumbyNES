@@ -465,6 +465,7 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
              * inline / hero thumbnails. */
             if (a_down && !prev_a) {
                 int rc = nes_thumb_save(fb, name);
+                if (rc == 0) nes_flash_disk_flush();
                 snprintf(osd_text, sizeof(osd_text),
                           rc == 0 ? "shot saved" : "shot fail");
                 osd_text_ms = 800;

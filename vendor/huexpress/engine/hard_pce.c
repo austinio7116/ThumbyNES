@@ -180,10 +180,12 @@ hard_init(void)
     PageW = (uchar **)my_special_alloc(true, 1, 8 * sizeof(uchar *));
     //ROMMapR = (uchar **)my_special_alloc(true, 4,256*4);
     //ROMMapW = (uchar **)my_special_alloc(true, 4,256*4);
-	trap_ram_read = malloc(0x2000);
-	trap_ram_write = malloc(0x2000);
-	//trap_ram_read = my_special_alloc(true, 1, 0x2000);
-    //trap_ram_write = my_special_alloc(true, 1, 0x2000);
+	/* THUMBYNES: route through my_special_alloc so they get the same
+	 * 256-byte pad-on-each-side as everything else (workaround for
+	 * the still-undiagnosed PCE wild-write that corrupts adjacent
+	 * heap metadata) and so they're freed in one sweep on shutdown. */
+	trap_ram_read = (uchar *)my_special_alloc(true, 1, 0x2000);
+	trap_ram_write = (uchar *)my_special_alloc(true, 1, 0x2000);
 
 	if ((trap_ram_read == NULL) || (trap_ram_write == NULL))
 		fprintf(stderr, "Couldn't allocate trap_ram* (%s:%d)", __FILE__,
@@ -224,10 +226,12 @@ hard_init(void)
 	hard_pce->RAM = (uchar *)my_special_alloc(fast1, 1, 0x8000);//[0x8000]
 #ifdef PCE_HUCARD_ONLY
     /* ThumbyNES patch: PCM buffer is for CD ADPCM — 64 KB lost when CD
-     * isn't present. Allocate a 4-byte placeholder so pointer arithmetic
-     * in disabled CD paths stays valid. Same idiom as ac_extra_mem below. */
-    hard_pce->PCM = (uchar *)my_special_alloc(false, 1, 4);
-    memset(hard_pce->PCM, 0, 4);
+     * isn't present. Allocate a stub. 256 bytes (not 4) absorbs a stray
+     * OOB write of <256 bytes; we burn 252 bytes of heap to keep the
+     * adjacent malloc chunks safe. Same idiom on the cd_extra_* /
+     * VRAM2 / VRAMS / vchange / vchanges stubs below. */
+    hard_pce->PCM = (uchar *)my_special_alloc(false, 1, 256);
+    memset(hard_pce->PCM, 0, 256);
 #else
     hard_pce->PCM = (uchar *)my_special_alloc(false, 1, 0x10000);//[0x10000]
     memset(hard_pce->PCM, 0, 0x10000*sizeof(uchar));
@@ -245,10 +249,10 @@ hard_init(void)
      * placeholder allocs keep pointer derefs safe (upstream writes
      * VRAM2[tile] / vchange[tile] in some code paths we haven't
      * severed) without the 128 KB + 2.5 KB price tag. */
-    hard_pce->VRAM2    = (uchar *)my_special_alloc(false, 1, 4);
-    hard_pce->VRAMS    = (uchar *)my_special_alloc(false, 1, 4);
-    hard_pce->vchange  = (uchar *)my_special_alloc(false, 1, 4);
-    hard_pce->vchanges = (uchar *)my_special_alloc(false, 1, 4);
+    hard_pce->VRAM2    = (uchar *)my_special_alloc(false, 1, 256);
+    hard_pce->VRAMS    = (uchar *)my_special_alloc(false, 1, 256);
+    hard_pce->vchange  = (uchar *)my_special_alloc(false, 1, 256);
+    hard_pce->vchanges = (uchar *)my_special_alloc(false, 1, 256);
 #else
     hard_pce->VRAM2 = (uchar *)my_special_alloc(false, 1, VRAMSIZE);//[VRAMSIZE];
     hard_pce->VRAMS = (uchar *)my_special_alloc(false, 1, VRAMSIZE);//[VRAMSIZE];
@@ -266,10 +270,14 @@ hard_init(void)
 #define ac_extra_mem_size 0x200000
 #define cd_sector_buffer_size 0x2000
 */
-#define cd_extra_mem_size 4
-#define cd_extra_super_mem_size 4
-#define ac_extra_mem_size 4
-#define cd_sector_buffer_size 4
+/* Stubs for unused CD/Arcade buffers. 256 bytes (not 4) is a debug
+ * cushion: it absorbs a stray OOB write of <256 bytes from a code
+ * path we haven't severed instead of letting it stomp the next
+ * heap chunk's metadata. */
+#define cd_extra_mem_size 256
+#define cd_extra_super_mem_size 256
+#define ac_extra_mem_size 256
+#define cd_sector_buffer_size 256
 
     hard_pce->cd_extra_mem = (uchar *)my_special_alloc(false, 1, cd_extra_mem_size);//[0x10000];
     hard_pce->cd_extra_super_mem = (uchar *)my_special_alloc(false, 1, cd_extra_super_mem_size);//[0x30000];
