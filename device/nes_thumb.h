@@ -1,9 +1,10 @@
 /*
  * ThumbyNES — picker thumbnail / icon helpers.
  *
- * Procedural platform icons (drawn from code, no bitmap assets) and
- * a tiny RGB565 thumbnail loader for the .scr32 / .scr64 sidecars
- * that the runners write on MENU+A.
+ * Hand-painted 12×8 platform icons (4 bpp tinted bitmaps in
+ * nes_tab_icons.inc — see device/nes_thumb.c) and a tiny RGB565
+ * thumbnail loader for the .scr32 / .scr64 sidecars the runners
+ * write on MENU+A.
  */
 #ifndef THUMBYNES_THUMB_H
 #define THUMBYNES_THUMB_H
@@ -22,11 +23,18 @@
 #define ICON_SYS_PCE   ROM_SYS_PCE
 #define ICON_SYS_STAR  255
 
-/* Draw a 12×8 procedural tab icon at (x, y) into the 128×128
- * framebuffer. `tint` is used as the foreground; the icon background
- * is left transparent (caller fills the tab cell behind it). */
+/* Draw a 12×8 tab icon at (x, y) into the 128×128 framebuffer.
+ * `tint` recolours the icon's tint pixels (index 1 in the bitmap);
+ * literal accent pixels and transparent pixels are unaffected. */
 void nes_thumb_icon(uint16_t *fb, int x, int y, uint8_t which,
                      uint16_t tint);
+
+/* Inactive-tab tint resolver. Returns `default_tint` for most icons,
+ * but a darker grey for SMS and MD because their silhouettes are
+ * larger blocks of tint and the picker's standard COL_DIM left them
+ * looking too bright on the strip. Caller passes its default
+ * inactive-tint colour and uses the result as the actual tint. */
+uint16_t nes_thumb_inactive_tint(uint8_t which, uint16_t default_tint);
 
 /* Draw a procedural placeholder thumbnail (used when no .scrNN
  * sidecar is on disk for a ROM). `size` must be 32 or 64. The

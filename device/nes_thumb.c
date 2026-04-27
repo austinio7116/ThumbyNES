@@ -98,6 +98,17 @@ void nes_thumb_icon(uint16_t *fb, int x, int y, uint8_t which, uint16_t tint) {
     blit_icon(fb, x, y, icon_slot(which), tint, 1);
 }
 
+uint16_t nes_thumb_inactive_tint(uint8_t which, uint16_t default_tint) {
+    /* SMS and MD silhouettes are bigger blocks of tint than the other
+     * icons; at the picker's standard COL_DIM (~rgb 131) they ended up
+     * looking brighter than the rest of the strip. Drop them to a
+     * darker grey (~rgb 50) so the visual weight matches. */
+    if (which == ICON_SYS_SMS || which == ICON_SYS_MD) {
+        return 0x3186;   /* RGB565 ≈ (49, 49, 49) — closest to (50,50,50) */
+    }
+    return default_tint;
+}
+
 void nes_thumb_placeholder(uint16_t *fb, int x, int y, int size, uint8_t system) {
     /* A coloured panel with the platform icon scaled to roughly half
      * the panel size. Reads as "no screenshot yet, system X". */
@@ -120,7 +131,12 @@ void nes_thumb_placeholder(uint16_t *fb, int x, int y, int size, uint8_t system)
     /* Centre the upscaled 12s × 8s icon inside the panel. */
     int ix = x + (size - ICON_W * s) / 2;
     int iy = y + (size - ICON_H * s) / 2;
-    blit_icon(fb, ix, iy, slot, 0xFFFF, s);
+    /* Same dim grey scheme the picker uses for inactive tabs
+     * (COL_DIM = 0x8410, with the SMS/MD darker override) — the
+     * placeholder is a "no screenshot yet" cue, not the focal
+     * point, so the muted treatment matches its role. */
+    uint16_t tint = nes_thumb_inactive_tint(system, 0x8410);
+    blit_icon(fb, ix, iy, slot, tint, s);
 }
 
 /* --- screenshot sidecar I/O ---------------------------------------- */

@@ -3238,11 +3238,43 @@ void nes_picker_global_set_clock_mhz(int mhz) {
 #define SORT_SIZE  2   /* largest first */
 #define SORT_COUNT 3
 
+/* Tab-strip theme table — declared here (rather than next to
+ * draw_tab_bar) because picker_pref_t and pref_load below reference
+ * TAB_THEME_COUNT for clamping. Adding a theme: append to the array,
+ * bump TAB_THEME_COUNT, regenerate via tools/render_tab_themes.py
+ * which prints the matching initialiser line. */
+typedef struct {
+    uint16_t bg_inactive;   /* cell fill on non-active tabs */
+    uint16_t bg_active;     /* cell fill on the active tab */
+    uint16_t underline;     /* 1-px highlight under the active tab */
+    uint16_t separator;     /* 1-px line under the strip — bright in-family hue */
+    const char *name;
+} tab_theme_t;
+
+#define TAB_THEME_COUNT 7
+
+static const tab_theme_t TAB_THEMES[TAB_THEME_COUNT] = {
+    { /* forest         */ 0x0902, 0x1a04, 0xfd20, 0x3ce9, "forest" },
+    { /* pine           */ 0x1183, 0x2b07, 0xfe27, 0x5e2d, "pine" },
+    { /* navy           */ 0x0886, 0x196b, 0xfd20, 0x3b78, "navy" },
+    { /* deep teal      */ 0x0945, 0x1a69, 0xfe27, 0x3555, "deep teal" },
+    { /* aubergine      */ 0x2064, 0x40e9, 0xfe27, 0xaa57, "aubergine" },
+    { /* sepia          */ 0x20c1, 0x49a3, 0xfecc, 0xd4aa, "sepia" },
+    { /* dark slate-blue*/ 0x10a4, 0x298a, 0xfd20, 0x6c18, "dark slate-blue" },
+};
+
+/* Active theme — updated from pref.theme at boot and whenever the
+ * picker menu changes the choice. draw_tab_bar reads it directly so
+ * draw_hero / draw_list_view don't have to thread the index through
+ * their signatures. */
+static const tab_theme_t *g_tab_theme = &TAB_THEMES[0];
+
 typedef struct {
     uint8_t view;   /* VIEW_HERO / VIEW_LIST */
     uint8_t tab;    /* TAB_*                  */
     uint8_t sort;   /* SORT_*                 */
-    uint8_t _pad;
+    uint8_t theme;  /* index into TAB_THEMES[] (was _pad in 1.07 — */
+                    /* old files load with theme=0 = forest, default) */
     /* Per-tab last-selected ROM name. Empty string == no memory.
      * Loaded from /.picker_view if the file is large enough; older
      * files (4-byte version) leave the array zero-filled which the
@@ -3263,6 +3295,7 @@ static void pref_load(picker_pref_t *p) {
     if (p->view >  VIEW_LIST ) p->view = VIEW_HERO;
     if (p->tab  >= TAB_COUNT ) p->tab  = TAB_NES;
     if (p->sort >= SORT_COUNT) p->sort = SORT_ALPHA;
+    if (p->theme >= TAB_THEME_COUNT) p->theme = 0;
     /* Defensive: clamp every tab_sel string to the buffer length so
      * a partially-truncated file can't cause an unterminated read. */
     for (int t = 0; t < TAB_COUNT; t++) {
@@ -3352,6 +3385,9 @@ static void tab_counts(const nes_rom_entry *e, int n, int counts[TAB_COUNT]) {
 }
 
 /* --- tab strip ----------------------------------------------------- */
+/* Theme table + g_tab_theme live earlier in the file (near the
+ * picker_pref_t definition) because pref_load needs TAB_THEME_COUNT
+ * for the load-time clamp. */
 
 #define TAB_BAR_H 11
 
@@ -3383,10 +3419,11 @@ static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUN
         int t = vis[i];
         int x = i * cell_w;
         int hl = (t == active_tab);
-        uint16_t bg = hl ? 0x39E7 : 0x10A2;
+        uint16_t bg = hl ? g_tab_theme->bg_active : g_tab_theme->bg_inactive;
         fb_rect(fb, x, 0, cell_w, TAB_BAR_H - 1, bg);
-        if (hl) fb_rect(fb, x, TAB_BAR_H - 2, cell_w, 1, COL_TITLE);
-        uint16_t tint = hl ? COL_TITLE : COL_DIM;
+        if (hl) fb_rect(fb, x, TAB_BAR_H - 2, cell_w, 1, g_tab_theme->underline);
+        uint16_t tint = hl ? g_tab_theme->underline
+                           : nes_thumb_inactive_tint(icon_for[t], COL_DIM);
         nes_thumb_icon(fb, x + 2, 1, icon_for[t], tint);
         if (show_count) {
             char lab[8];
@@ -3396,7 +3433,7 @@ static void draw_tab_bar(uint16_t *fb, int active_tab, const int counts[TAB_COUN
                           hl ? COL_FG : COL_DIM);
         }
     }
-    fb_rect(fb, 0, TAB_BAR_H, FB_W, 1, COL_DIM);
+    fb_rect(fb, 0, TAB_BAR_H, FB_W, 1, g_tab_theme->separator);
 }
 
 /* --- hero view (default, single ROM per screen) -------------------- */
@@ -3600,6 +3637,7 @@ int nes_picker_run(uint16_t *fb,
     favs_load();
     picker_pref_t pref;
     pref_load(&pref);
+    g_tab_theme = &TAB_THEMES[pref.theme];
 
     int counts[TAB_COUNT];
     tab_counts(entries, n_entries, counts);
@@ -3813,9 +3851,10 @@ int nes_picker_run(uint16_t *fb,
         if (open_menu) {
             open_menu = 0;
 
-            int v_view = (pref.view == VIEW_HERO) ? 0 : 1;
-            int v_sort = pref.sort;
-            int v_vol  = nes_picker_global_volume();
+            int v_view  = (pref.view == VIEW_HERO) ? 0 : 1;
+            int v_sort  = pref.sort;
+            int v_theme = pref.theme;
+            int v_vol   = nes_picker_global_volume();
 #ifdef THUMBYONE_SLOT_MODE
             /* ThumbyOne global brightness (0..255). */
             int v_bri  = thumbyone_settings_load_brightness();
@@ -3907,6 +3946,14 @@ int nes_picker_run(uint16_t *fb,
             static const char * const clock_choices[] = { "125MHz", "150MHz", "200MHz", "250MHz" };
             static const int          clock_mhz[]     = {  125,      150,      200,      250 };
 
+            /* Theme choice labels — built once from the theme table
+             * so adding a theme to TAB_THEMES[] doesn't need a
+             * matching edit here. */
+            const char *theme_choices[TAB_THEME_COUNT];
+            for (int i = 0; i < TAB_THEME_COUNT; i++) {
+                theme_choices[i] = TAB_THEMES[i].name;
+            }
+
             /* ACT_LOBBY is only offered when compiled into ThumbyOne
              * (standalone NES has nothing to fall back to). The
              * menu_item enum stays stable otherwise so the picker
@@ -3933,6 +3980,9 @@ int nes_picker_run(uint16_t *fb,
                 { .kind = NES_MENU_KIND_CHOICE, .label = "Sort",
                   .value_ptr = &v_sort, .choices = sort_choices, .num_choices = 3,
                   .enabled = true },
+                { .kind = NES_MENU_KIND_CHOICE, .label = "Theme",
+                  .value_ptr = &v_theme, .choices = theme_choices,
+                  .num_choices = TAB_THEME_COUNT, .enabled = true },
                 { .kind = NES_MENU_KIND_INFO, .label = "Battery",
                   .info_text = battery_text,
                   .value_ptr = &v_batt_pct, .min = 0, .max = 100,
@@ -3990,6 +4040,13 @@ int nes_picker_run(uint16_t *fb,
                 n_view = build_view(entries, n_entries, view, pref.tab, pref.sort);
                 sel = reseat_sel(view, n_view, prev_real);
                 top = (sel >= LIST_ROWS) ? sel - LIST_ROWS + 1 : 0;
+            }
+            if (v_theme >= 0 && v_theme < TAB_THEME_COUNT
+                && (uint8_t)v_theme != pref.theme) {
+                pref.theme = (uint8_t)v_theme;
+                g_tab_theme = &TAB_THEMES[pref.theme];
+                /* pref_save call already happens further down via the
+                 * existing menu-close path that writes /.picker_view. */
             }
 
             if (r.kind == NES_MENU_ACTION && r.action_id == ACT_DEFRAG) {
