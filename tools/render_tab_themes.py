@@ -56,14 +56,19 @@ ACTIVE_INDEX = 1   # which tab is "active" in the mockups — NES (slot 1 after 
 # but staying in the same colour family as the cells so it doesn't
 # look like a random accent stripe. Underline keeps the warm
 # yellow/orange accent (the "active tab" affordance is universal).
+# Order matters: index 0 is the default for new installs and for old
+# /.picker_view files written before the theme byte existed (the
+# previously-padding byte loads as 0). Aubergine wins as default
+# because the contrast against the icon greys is the strongest of
+# the eight options.
 THEMES = [
     # name,            inactive_bg,    active_bg,      underline,        separator
     ("current (grey)", (16, 22, 22),   (60, 60, 60),   (255, 166,   0), (140, 140, 140)),
+    ("aubergine",      (32, 12, 36),   (64, 28, 72),   (255, 200,  60), (170,  72, 190)),
     ("forest",         ( 8, 32, 16),   (24, 64, 32),   (255, 166,   0), ( 56, 156,  72)),
     ("pine",           (20, 50, 28),   (44, 96, 56),   (255, 200,  60), ( 90, 200, 110)),
     ("navy",           ( 8, 16, 48),   (24, 44, 88),   (255, 166,   0), ( 60, 110, 200)),
     ("deep teal",      ( 8, 40, 40),   (24, 76, 76),   (255, 200,  60), ( 50, 170, 170)),
-    ("aubergine",      (32, 12, 36),   (64, 28, 72),   (255, 200,  60), (170,  72, 190)),
     ("sepia",          (36, 24, 12),   (76, 52, 24),   (255, 220, 100), (210, 150,  80)),
     ("dark slate-blue",(16, 20, 36),   (40, 48, 80),   (255, 166,   0), (110, 130, 200)),
 ]

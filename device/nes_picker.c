@@ -3253,12 +3253,16 @@ typedef struct {
 
 #define TAB_THEME_COUNT 7
 
+/* Index 0 is the default for new installs and for /.picker_view
+ * files written before the theme byte existed (the previously-padding
+ * byte loads as 0). Aubergine wins as default — strongest contrast
+ * against the icons' grey accents of the seven options. */
 static const tab_theme_t TAB_THEMES[TAB_THEME_COUNT] = {
+    { /* aubergine      */ 0x2064, 0x40e9, 0xfe27, 0xaa57, "aubergine" },
     { /* forest         */ 0x0902, 0x1a04, 0xfd20, 0x3ce9, "forest" },
     { /* pine           */ 0x1183, 0x2b07, 0xfe27, 0x5e2d, "pine" },
     { /* navy           */ 0x0886, 0x196b, 0xfd20, 0x3b78, "navy" },
     { /* deep teal      */ 0x0945, 0x1a69, 0xfe27, 0x3555, "deep teal" },
-    { /* aubergine      */ 0x2064, 0x40e9, 0xfe27, 0xaa57, "aubergine" },
     { /* sepia          */ 0x20c1, 0x49a3, 0xfecc, 0xd4aa, "sepia" },
     { /* dark slate-blue*/ 0x10a4, 0x298a, 0xfd20, 0x6c18, "dark slate-blue" },
 };
