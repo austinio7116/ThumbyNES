@@ -542,7 +542,7 @@ directories / files were **not** imported:
    already applied to `ac_extra_mem` and `cd_extra_mem`. The pointer
    stays non-NULL so unused CD fallback paths don't deref NULL.
 
-### Pending audit (1.08 release)
+### Patches landed in 1.08
 
 Both items previously listed as Pending work shipped in 1.08:
 
@@ -558,12 +558,82 @@ Both items previously listed as Pending work shipped in 1.08:
   `thumby_state_bridge.h` (HuExpress had no upstream `state.c` to
   bridge).
 
-Beyond patches 1–5 above, getting PCE running on real carts and
-coexisting with the other five cores in ThumbyOne required further
-modifications to the vendored tree (region detect, joypad-port
-read wiring, HuCard strict-mode abort softening, mix-path audio
-tuning, leak fixes for six-core coexistence). The full
-patch-by-patch enumeration matching MD's catalogue style is a TODO
-for a future audit pass — see the v1.08 changelog and the commit
-messages on `pce_core.c`, `pce_run.c`, and the modified files
-under `vendor/huexpress/engine/` for the technical detail.
+Additional patches against the vendored tree (beyond the five
+listed above) that landed in 1.08:
+
+6. **`engine/IO_write.h` — PSG channel-select clamp.** Upstream's
+   `case 0x0800/case 0` does `io.psg_ch = V & 7`, but the PCE PSG
+   only has 6 channels (0..5). The HuC6280 silently ignores writes
+   that select 6 or 7. Upstream's mask leaves `io.psg_ch` at 6/7,
+   which would index `io.psg_da_data[6/7]` 1-of-3 bytes' worth past
+   the 6-pointer array, producing a wild `uint8_t*` that the next
+   DDA write would deref. We now clamp to 0 if `>5`. None of the
+   ROMs we tested actually wrote 6/7, but the OOB read was real.
+
+7. **`engine/hard_pce.c` — stub allocations bumped 4 → 256 bytes.**
+   Buffers we keep as placeholders for the disabled CD / Arcade
+   Card / shadow-VRAM paths (`PCM`, `VRAM2`, `VRAMS`, `vchange`,
+   `vchanges`, `cd_extra_mem`, `cd_extra_super_mem`, `ac_extra_mem`,
+   `cd_sector_buffer`) are now 256 bytes each instead of 4. A
+   stray write of <256 bytes past one of these from a code path
+   we haven't fully severed gets absorbed by the stub itself
+   instead of escaping into the next heap chunk's metadata.
+
+8. **`engine/hard_pce.c` — `trap_ram_read/write` routed through
+   `my_special_alloc`.** Upstream `malloc()`'d these directly. We
+   now route them through the wrapper's tracker so they get the
+   same 256-byte pad-on-each-side as everything else (see the open
+   wild-write workaround documented in `PCE_HEAP_BUG.md`) and so
+   they're freed in one sweep on `pcec_shutdown` rather than
+   needing their own explicit `free()` calls.
+
+9. **`engine/pce.h::IO_VDC_active_set` — strict-abort softened.**
+   Upstream `abort()`s when a HuCard writes a non-existent VDC
+   register select (≥0x15). Real HuCards (Dragon's Curse on boot)
+   do this; the cart still works because the subsequent data write
+   goes nowhere meaningful. We now park `IO_VDC_active_ref` on a
+   safe slot (`IO_VDC_14`) instead of aborting.
+
+10. **`engine/bios.c::handle_bios` — abort softened.** Upstream
+    `abort()`s on opcode `0xFC` (HuCard executes it accidentally
+    when bank-switching landing on garbage). We now NOP it (advance
+    PC by 2, charge 8 cycles) so the cart can recover.
+
+11. **`engine/IO_write.h` — VRAM/MAWR mask.** VRAM-VRAM DMA
+    (`SOUR`/`DISTR`) and the VWR data write loop now mask the
+    16-bit register value down to 15-bit MAWR decode (`& (VRAMSIZE
+    - 1)`). Real PCE hardware decodes the bottom 15 bits of MAWR
+    only; without this mask, a high MAWR.W value would write past
+    the 64 KB `VRAM` allocation and clobber adjacent heap.
+
+Wrapper-side modifications (in `src/pce_core.c` rather than the
+vendored tree) that also landed in 1.08:
+
+  - **Path-string globals NULL'd in `pcec_shutdown`** (`cart_name`,
+    `rom_file_name`, the 11 PATH_MAX strings, `spr_init_pos`).
+    `pcec_init` allocates these `if (!p)`, so without NULLing here
+    a second PCE session in the same firmware image would skip
+    re-allocation and `strcpy(cart_name, …)` in `CartLoad` would
+    write to freed heap.
+  - **`my_special_alloc` allocates each PCE buffer as `[256 B
+    pad][user data][256 B pad]`** as a workaround for an
+    unidentified wild write. The pad shifts the heap layout enough
+    that the wild write lands on harmless pad bytes. Cost ~15 KB
+    heap per session. Root cause still open — see
+    `PCE_HEAP_BUG.md` for the full investigation.
+  - **Country-byte default flips to JP** (`Country = (region ==
+    PCEC_REGION_US) ? 0x40 : 0x00`). Hudson typically wrote a JP
+    cart and bit-reversed it for US distribution; once a cart is
+    pre-decoded into PCE-native format, its boot code expects
+    bit 6 = 0. Setting bit 6 (US) made every USA cart we tested
+    hang in early boot with display disabled.
+  - **PSG audio mix path** — single-pole IIR LPF at fc≈7.3 kHz
+    (close to the real PCE analog DAC rolloff), 6 dB headroom
+    margin, master-volume scaling that upstream omitted on wave
+    channels. Sample-rate cap to one frame's worth so the device
+    PWM ring doesn't overflow at 2.78× drain rate.
+
+The full list of all sub-changes inside each modified file is
+captured in the 1.08 commit messages (`PCE: …` series under
+`git log src/pce_core.c vendor/huexpress/`). MD's per-file
+catalogue style is still a future-audit pass for HuExpress.
