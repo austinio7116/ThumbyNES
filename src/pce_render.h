@@ -10,18 +10,28 @@
 
 #include <stdint.h>
 
-/* Bind the output LCD framebuffer + palette LUT + blend mode for
- * the upcoming frame(s). Safe to call each frame (the wrapper does).
+/* Bind the output LCD framebuffer + palette LUT + scale/blend mode
+ * for the upcoming frame(s). Safe to call each frame (the wrapper does).
  *   lcd_fb:           128×128 RGB565 output.
  *   palette_rgb565:   256-entry LUT keyed on the palette-byte encoding
  *                     HuExpress stores in Pal[] (bits [7:5]=G, [4:2]=R,
  *                     [1:0]=B — see pce_core.c::build_palette_once).
- *   blend:            0 = nearest-neighbour 2:1 downscale, 1 = 2×2
- *                     box average in packed RGB565.
+ *   scale_mode:       0 = FIT  (2:1 nearest/blend, letterboxed Y).
+ *                     1 = FILL (preserve aspect via Y scale → square
+ *                               output, src cols cropped, pannable
+ *                               horizontally via pan_x).
+ *                     2 = CROP (1:1 native 128×128 window into src,
+ *                               pannable both axes via pan_x/pan_y).
+ *   blend:            0 = nearest-neighbour, 1 = 2×2 box average in
+ *                     packed RGB565 (FIT/FILL only — CROP is 1:1).
+ *   pan_x, pan_y:     CROP/FILL pan offsets in source pixels. Clamped
+ *                     internally to the legal range for the running
+ *                     game's act_w / act_h.
  */
 void pce_render_set_target(uint16_t *lcd_fb,
                             const uint16_t *palette_rgb565,
-                            int blend);
+                            int scale_mode, int blend,
+                            int pan_x, int pan_y);
 
 /* Call once at the start of each frame — paints the letterbox bars
  * on the LCD fb and resets the vertical-blend carry state. */

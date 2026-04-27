@@ -52,12 +52,13 @@
 #define BTN_B_GP     25
 #define BTN_MENU_GP  26
 
-/* PCE natively 256×224 (most carts). The core's framebuffer is 600
- * wide (XBUF padding) so stride = PCEC_PITCH. Active viewport sits
- * at (0,0); we clip anything wider at 256. */
+/* PCE natively 256×224 (most carts). The scanline renderer composites
+ * directly into the bound LCD framebuffer; the core's full XBUF was
+ * removed when src/pce_render.c landed. PCE_SRC_W / PCE_SRC_H below
+ * are still used as the LB-pan defaults for CROP/FILL — actual source
+ * dimensions come from io.screen_w / io.screen_h at frame time. */
 #define PCE_SRC_W   256
 #define PCE_SRC_H   224
-#define PCE_FIT_H   (PCE_SRC_H / 2)      /* 112 — 8 px letterbox top & bottom */
 
 /* Second LCD-shaped framebuffer for double-buffered DMA. The scanline
  * renderer writes directly to whichever buffer is not currently being
@@ -132,89 +133,19 @@ static uint16_t read_pce_buttons(void) {
     return m;
 }
 
-/* --- scalers ------------------------------------------------------- *
+/* --- scaling ------------------------------------------------------- *
  *
- * Three blits, selected by scale_mode + blend toggle (same structure
- * as nes_run.c / gb_run.c):
+ * The scanline renderer (src/pce_render.c) does the FIT/FILL/CROP
+ * conversion directly into the 128×128 LCD framebuffer. The runner's
+ * job is to forward the menu's scale_mode + the LB-pan offsets to
+ * pcec_set_scale_target each frame; no per-row blit lives here.
  *
- *   blit_fit_pce    — 2:1 nearest, 8-row letterbox top & bottom.
- *                     Sharp pixels, drops every 2nd source column
- *                     and row. Used when BLEND is OFF.
- *   blit_blend_pce  — 2×2 box average in packed-RGB565 space. Each
- *                     output pixel averages four source indices
- *                     through the palette LUT. Used when BLEND is ON.
- *   blit_crop_pce   — 1:1 native 128×128 viewport into the 256×224
- *                     frame, pannable with LB + d-pad (LB-chord —
- *                     same shape as md_run.c). Max pan is (128, 96).
- *
- * Source format: palette indices, stride = PCEC_PITCH bytes, 224
- * visible rows starting at (0, 0). The core's pcec_palette_rgb565()
- * returns a 256-entry RGB565 LUT keyed on those indices (see the
- * VCE packed-byte encoding in pce_core.c::build_palette_once).
+ *   FIT  — 2:1 nearest/blend, letterboxed Y.
+ *   FILL — preserve aspect via Y scale → square output, src cols
+ *          cropped, pannable horizontally with LB+L/R.
+ *   CROP — 1:1 native 128×128 window into src (256×224 typical),
+ *          pannable both axes with LB+d-pad. Same chord as md_run.c.
  */
-
-/* 256×224 → 128×112, 2:1 nearest with 8-row letterbox top and bottom. */
-static void blit_fit_pce(uint16_t *fb, const uint8_t *src,
-                          const uint16_t *pal) {
-    memset(fb, 0, 128 * 8 * 2);
-    for (int dy = 0; dy < PCE_FIT_H; dy++) {
-        const uint8_t *srow = src + (dy * 2) * PCEC_PITCH;
-        uint16_t      *drow = fb + (8 + dy) * 128;
-        for (int dx = 0; dx < 128; dx++) {
-            drow[dx] = pal[srow[dx * 2]];
-        }
-    }
-    memset(fb + (8 + PCE_FIT_H) * 128, 0, 128 * 8 * 2);
-}
-
-/* 256×224 → 128×112 with 2×2 box average per output pixel. Four source
- * palette indices per destination → four pal lookups → channel-split
- * sum / 4 in packed RGB565 bit positions. Same letterbox as FIT. */
-static void blit_blend_pce(uint16_t *fb, const uint8_t *src,
-                            const uint16_t *pal) {
-    memset(fb, 0, 128 * 8 * 2);
-    for (int dy = 0; dy < PCE_FIT_H; dy++) {
-        const uint8_t *r0 = src + (dy * 2)     * PCEC_PITCH;
-        const uint8_t *r1 = src + (dy * 2 + 1) * PCEC_PITCH;
-        uint16_t      *drow = fb + (8 + dy) * 128;
-        for (int dx = 0; dx < 128; dx++) {
-            int sx = dx * 2;
-            uint16_t a = pal[r0[sx]];
-            uint16_t b = pal[r0[sx + 1]];
-            uint16_t c = pal[r1[sx]];
-            uint16_t d = pal[r1[sx + 1]];
-            /* Sum each channel across the 4 source pixels.
-             * Max channel sum: R 4*31=124, G 4*63=252, B 4*31=124. */
-            uint32_t rsum = ((a >> 11) & 0x1F) + ((b >> 11) & 0x1F)
-                          + ((c >> 11) & 0x1F) + ((d >> 11) & 0x1F);
-            uint32_t gsum = ((a >>  5) & 0x3F) + ((b >>  5) & 0x3F)
-                          + ((c >>  5) & 0x3F) + ((d >>  5) & 0x3F);
-            uint32_t bsum = (a & 0x1F) + (b & 0x1F)
-                          + (c & 0x1F) + (d & 0x1F);
-            drow[dx] = (uint16_t)(((rsum >> 2) << 11)
-                                | ((gsum >> 2) <<  5)
-                                |  (bsum >> 2));
-        }
-    }
-    memset(fb + (8 + PCE_FIT_H) * 128, 0, 128 * 8 * 2);
-}
-
-/* 1:1 native crop. Copies a 128×128 window starting at (pan_x, pan_y),
- * clamped so the window stays inside the 256×224 active area. */
-static void blit_crop_pce(uint16_t *fb, const uint8_t *src,
-                           const uint16_t *pal, int pan_x, int pan_y) {
-    if (pan_x < 0)   pan_x = 0;
-    if (pan_x > 128) pan_x = 128;        /* 256 - 128 */
-    if (pan_y < 0)   pan_y = 0;
-    if (pan_y > 96)  pan_y = 96;         /* 224 - 128 */
-    for (int dy = 0; dy < 128; dy++) {
-        const uint8_t *srow = src + (pan_y + dy) * PCEC_PITCH + pan_x;
-        uint16_t      *drow = fb + dy * 128;
-        for (int dx = 0; dx < 128; dx++) {
-            drow[dx] = pal[srow[dx]];
-        }
-    }
-}
 
 /* --- per-ROM cfg --------------------------------------------------- */
 
@@ -225,7 +156,11 @@ static void blit_crop_pce(uint16_t *fb, const uint8_t *src,
 #define VOL_MAX  30
 #define VOL_DEF  15
 
-typedef enum { SCALE_FIT = 0, SCALE_CROP = 1, SCALE_COUNT } scale_mode_t;
+/* Mirror md_run.c numbering so pce_render.c sees the same encoding:
+ *   0 = FIT (letterboxed 2:1), 1 = FILL (aspect-preserving),
+ *   2 = CROP (1:1 native window). */
+typedef enum { SCALE_FIT = 0, SCALE_FILL = 1, SCALE_CROP = 2,
+                SCALE_COUNT } scale_mode_t;
 
 #define BLEND_UNSET  0xFFu
 
@@ -409,7 +344,12 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
      * render races the in-flight DMA → ghosting + flicker). */
     int       fb_toggle = 0;
 
-    int pan_x = 64, pan_y = 48;       /* 256-128=128 /2, 224-128=96 /2 → centred */
+    /* Pan offsets in source pixels. Defaults centre the source window:
+     *   CROP: (256-128)/2 = 64,  (224-128)/2 = 48
+     *   FILL: (256-224)/2 = 16,  unused y (FILL doesn't pan vertically)
+     * Reset on mode change so a switch into FILL doesn't pin pan_x at
+     * 64 (FILL clamps to [0, 32], so 64 would be visually right-pinned). */
+    int pan_x = 64, pan_y = 48;
     int prev_a = 0;
 
     /* LB chord for play-while-cropped panning — mirrors md_run.c.
@@ -491,12 +431,21 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             int dx = (rt_down ? PAN_STEP : 0) - (lt_down ? PAN_STEP : 0);
             int dy = (dn_down ? PAN_STEP : 0) - (up_down ? PAN_STEP : 0);
             if (scale_mode == SCALE_CROP && (dx || dy)) {
+                /* CROP — full pan range (256-128, 224-128). */
                 pan_x += dx;
                 pan_y += dy;
                 if (pan_x < 0)   pan_x = 0;
                 if (pan_x > 128) pan_x = 128;
                 if (pan_y < 0)   pan_y = 0;
                 if (pan_y > 96)  pan_y = 96;
+                lb_pan_used = true;
+            } else if (scale_mode == SCALE_FILL && dx) {
+                /* FILL — horizontal only. Visible window is 224 cols
+                 * (= act_h) inside 256-wide src, so pan_x has a tight
+                 * [0, 32] range. dy ignored. */
+                pan_x += dx;
+                if (pan_x < 0)  pan_x = 0;
+                if (pan_x > 32) pan_x = 32;
                 lb_pan_used = true;
             }
         } else {
@@ -537,7 +486,12 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 if (!menu_consumed && menu_press_ms > 0 && menu_press_ms < 300) {
                     scale_mode = (scale_mode_t)((scale_mode + 1) % SCALE_COUNT);
                     cfg_dirty = true;
-                    if (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 48; }
+                    /* Recentre pan on mode change — each mode has a
+                     * different legal range. Stale pan_x=64 in FILL
+                     * would clamp to 32 → permanently right-pinned. */
+                    if      (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 48; }
+                    else if (scale_mode == SCALE_FILL) { pan_x = 16; pan_y = 0;  }
+                    else                               { pan_x = 0;  pan_y = 0;  }
                 }
                 menu_press_ms = 0;
                 menu_was_down = 0;
@@ -571,7 +525,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (cart_clock_mhz == 200) v_clock = 3;
             if (cart_clock_mhz == 250) v_clock = 4;
 
-            static const char * const display_choices[] = { "FIT", "CROP" };
+            static const char * const display_choices[] = { "FIT", "FILL", "CROP" };
             static const char * const clock_choices[]   = { "global","125MHz","150MHz","200MHz","250MHz" };
             static const int          clock_mhz_arr[]   = {  0,       125,     150,     200,     250 };
 
@@ -593,7 +547,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .label = "Load state", .enabled = sta_exists, .action_id = ACT_LOAD_STATE };
             items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_CHOICE,
                   .label = "Display", .value_ptr = &v_scale,
-                  .choices = display_choices, .num_choices = 2, .enabled = true };
+                  .choices = display_choices, .num_choices = 3, .enabled = true };
             items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_SLIDER,
                   .label = "Volume", .value_ptr = &v_vol,
                   .min = VOL_MIN, .max = VOL_MAX, .enabled = true };
@@ -608,7 +562,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                   .label = "Show FPS", .value_ptr = &v_fps, .enabled = true };
             items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_TOGGLE,
                   .label = "Blend", .value_ptr = &v_blend,
-                  .enabled = (scale_mode == SCALE_FIT) };
+                  .enabled = (scale_mode != SCALE_CROP) };
             items[n_items++] = (nes_menu_item_t){ .kind = NES_MENU_KIND_CHOICE,
                   .label = "Overclock", .value_ptr = &v_clock,
                   .choices = clock_choices, .num_choices = 5,
@@ -626,7 +580,9 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
             if (v_scale != (int)scale_mode) {
                 scale_mode = (scale_mode_t)v_scale;
-                if (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 48; }
+                if      (scale_mode == SCALE_CROP) { pan_x = 64; pan_y = 48; }
+                else if (scale_mode == SCALE_FILL) { pan_x = 16; pan_y = 0;  }
+                else                               { pan_x = 0;  pan_y = 0;  }
                 cfg_dirty = true;
             }
             if (v_vol != volume) {
@@ -744,7 +700,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         uint32_t t_emu0 = (uint32_t)time_us_64();
         for (int i = 0; i < frame_runs; i++) {
             uint16_t *target = (i != frame_runs - 1) ? NULL : cur_fb;
-            pcec_set_scale_target(target, blend);
+            pcec_set_scale_target(target, (int)scale_mode, blend, pan_x, pan_y);
             pcec_run_frame();
         }
         prev_emu_us = (uint32_t)time_us_64() - t_emu0;

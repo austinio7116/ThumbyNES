@@ -478,9 +478,11 @@ const uint8_t *pcec_framebuffer(void)
     return dummy;
 }
 
-void pcec_set_scale_target(uint16_t *lcd_fb, int blend)
+void pcec_set_scale_target(uint16_t *lcd_fb, int scale_mode, int blend,
+                            int pan_x, int pan_y)
 {
-    pce_render_set_target(lcd_fb, s_palette_rgb565, blend);
+    pce_render_set_target(lcd_fb, s_palette_rgb565,
+                           scale_mode, blend, pan_x, pan_y);
 }
 
 const uint16_t *pcec_palette_rgb565(void)

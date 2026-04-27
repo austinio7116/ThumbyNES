@@ -88,7 +88,7 @@ int main(int argc, char **argv)
                                          LCD_W, LCD_H);
 
     uint16_t lcd_fb[128 * 128];          /* 32 KB on host stack region */
-    pcec_set_scale_target(lcd_fb, /*blend=*/1);
+    pcec_set_scale_target(lcd_fb, /*scale_mode=*/0, /*blend=*/1, 0, 0);
 
     /* Audio: 22050 Hz mono signed 16-bit, pushed per frame.
      * SDL_QueueAudio batches samples; we just ensure the queue
@@ -127,7 +127,7 @@ int main(int argc, char **argv)
         pcec_set_buttons(read_pad(SDL_GetKeyboardState(NULL)));
         /* Re-bind each frame so the user can flip the blend toggle
          * later without restarting. */
-        pcec_set_scale_target(lcd_fb, /*blend=*/1);
+        pcec_set_scale_target(lcd_fb, /*scale_mode=*/0, /*blend=*/1, 0, 0);
         pcec_run_frame();
 
         SDL_UpdateTexture(tex, NULL, lcd_fb, LCD_W * 2);

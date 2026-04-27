@@ -116,12 +116,16 @@ void pcec_set_buttons(uint16_t mask);
  * the frame-pacing logic in device/pce_run.c when falling behind. */
 void pcec_set_skip_render(int skip);
 
-/* Bind the 128×128 RGB565 output framebuffer and blend mode the
+/* Bind the 128×128 RGB565 output framebuffer + scale/blend mode the
  * scanline renderer should write into. Call once before each
  * pcec_run_frame (the binding is cheap; the runners call it per
- * frame in case the runner toggles the blend flag from its menu).
+ * frame in case the menu toggles scale/blend or LB-pan moves).
  *
- * blend: 0 = nearest-neighbour, 1 = 2×2 box average in packed RGB565.
+ * scale_mode: 0 = FIT  (2:1, letterboxed Y).
+ *             1 = FILL (preserve aspect via Y scale, pannable in X).
+ *             2 = CROP (1:1 native 128×128, pannable in X and Y).
+ * blend:      0 = nearest-neighbour, 1 = 2×2 box average (FIT/FILL).
+ * pan_x/y:    source-pixel offsets (CROP/FILL). Clamped internally.
  *
  * pcec_run_frame composites BG + sprites DIRECTLY into `lcd_fb` —
  * there is no intermediate full framebuffer. Peak per-session RAM
@@ -131,7 +135,8 @@ void pcec_set_skip_render(int skip);
  * in that case the core still runs but no pixels are written. Those
  * binaries use pcec_framebuffer() instead to pull an already-rendered
  * target for SDL display. */
-void pcec_set_scale_target(uint16_t *lcd_fb, int blend);
+void pcec_set_scale_target(uint16_t *lcd_fb, int scale_mode, int blend,
+                            int pan_x, int pan_y);
 
 /* Pull n int16 mono samples produced by the most recent frame. Returns
  * the count actually written (= sndrate / 60 + 1 per frame typically).
