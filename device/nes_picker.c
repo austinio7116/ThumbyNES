@@ -3943,8 +3943,17 @@ int nes_picker_run(uint16_t *fb,
             }
 #endif
 
+            /* When built inside ThumbyOne, the parent CMake passes
+             * THUMBYONE_FW_VERSION as a compile define so this About
+             * line follows the unified release version automatically.
+             * Standalone ThumbyNES builds fall back to the inline
+             * version below — bump on standalone releases. */
             char about_text[24];
-            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.09");
+#ifdef THUMBYONE_FW_VERSION
+            snprintf(about_text, sizeof(about_text), "ThumbyNES v" THUMBYONE_FW_VERSION);
+#else
+            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.10");
+#endif
 
             static const char * const view_choices[]  = { "HERO", "LIST" };
             static const char * const sort_choices[]  = { "ALPHA", "FAVS", "SIZE" };
