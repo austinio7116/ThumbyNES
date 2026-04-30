@@ -737,28 +737,22 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         {
             nes_lcd_wait_idle();
             if (show_fps) {
-                /* Overlay values are all rollover-sampled (once per
-                 * 1-second window), so text width is stable and we
-                 * can draw without a black-background wipe — each
-                 * frame's redraw overwrites the same pixels. */
-                /* Fixed-width format so the string length never changes —
-                 * each frame's draw overwrites exactly the same pixels
-                 * without leaving stale glyphs. One-char tag (space when
-                 * FULL), 2-digit FPS, 5-digit emul us, 2-digit skipped. */
-                char atag = fast_forward          ? 'F'
-                          : (audio_mode == AUDIO_HALF) ? 'h'
-                          : (audio_mode == AUDIO_OFF ) ? 'm'
-                          :                              ' ';
-                char ftxt[32];
-                snprintf(ftxt, sizeof(ftxt), "%2d%c e%5u k%2u",
-                         fps_show, atag,
-                         (unsigned)phase_emu_show,
-                         (unsigned)skipped_show);
-                /* Strip-wipe behind text ONLY in FIT mode, where the
-                 * wiped strip sits within the already-black letterbox
-                 * (invisible). FILL / CROP draw over game content
-                 * directly; fixed-width format keeps stale digits
-                 * from appearing in practice. */
+                /* fps, with " FF" when fast-forwarding and " k<N>"
+                 * only when frames were skipped in the last window.
+                 * Variable-width: in FIT mode we strip-wipe behind
+                 * the text so transitioning between widths doesn't
+                 * leave stale glyphs. */
+                char ftxt[16];
+                if (skipped_show > 0) {
+                    snprintf(ftxt, sizeof(ftxt), "%d%s k%u",
+                             fps_show,
+                             fast_forward ? " FF" : "",
+                             (unsigned)skipped_show);
+                } else {
+                    snprintf(ftxt, sizeof(ftxt), "%d%s",
+                             fps_show,
+                             fast_forward ? " FF" : "");
+                }
                 if (scale_mode == SCALE_FIT)
                     memset(fb + 5 * 128, 0, NES_FONT_CELL_H * 128 * 2);
                 nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);

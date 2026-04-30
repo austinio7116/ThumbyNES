@@ -723,12 +723,19 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         if (cur_fb) {
             if (show_fps) {
-                /* fps + frames skipped in the last 1-sec window.
-                 * Drawn on top of the game without a black bar. */
+                /* fps, with " FF" when fast-forwarding and " k<N>"
+                 * only when frames were skipped in the last window. */
                 char ftxt[16];
-                snprintf(ftxt, sizeof(ftxt), "%2d k%2u%s",
-                         fps_show, (unsigned)skipped_show,
-                         fast_forward ? " FF" : "");
+                if (skipped_show > 0) {
+                    snprintf(ftxt, sizeof(ftxt), "%d%s k%u",
+                             fps_show,
+                             fast_forward ? " FF" : "",
+                             (unsigned)skipped_show);
+                } else {
+                    snprintf(ftxt, sizeof(ftxt), "%d%s",
+                             fps_show,
+                             fast_forward ? " FF" : "");
+                }
                 nes_font_draw(cur_fb, ftxt, 2, 5, 0xFFE0);
             }
             if (osd_text_ms > 0) {
