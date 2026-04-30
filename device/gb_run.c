@@ -42,6 +42,11 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+
+#ifdef THUMBYONE_SLOT_MODE
+#include "thumbyone_rtc.h"
+#include <time.h>
+#endif
 #include "pico/time.h"
 #include "hardware/gpio.h"
 #include "ff.h"
@@ -80,17 +85,178 @@ static void battery_load(const char *rom_name) {
     f_close(&f);
 }
 
-static void battery_save(const char *rom_name) {
+#ifdef THUMBYONE_SLOT_MODE
+/* ---- MBC3 cart-RTC wall-clock tracking -------------------------------
+ *
+ * Pokemon Crystal/Gold/Silver expect cart_rtc to be a monotonically
+ * advancing counter that ticks even while the device is off. They
+ * read cart_rtc at boot, compute (current - last_seen_in_cart_RAM),
+ * and advance the in-game day/night and berry-growth clocks by that
+ * delta — ON THE FIRST BOOT-LIKE READ. Some games then write zeros to
+ * cart_rtc as part of their RTC management, so seeding cart_rtc to
+ * wall clock at every game-load makes Pokemon perceive a HUGE delta
+ * on the first reload after a fresh save (because cart RAM
+ * `last_seen` was written when cart_rtc was small, not wall clock).
+ *
+ * Sidecar approach: at battery_save, persist current cart_rtc + wall
+ * clock to a `.rtc` file. At battery_load, read the sidecar and
+ * compute new cart_rtc = saved_cart_rtc + (now - saved_wall). This
+ * way cart_rtc at boot reads as exactly `last_seen + real_wall_delta`,
+ * which is what Pokemon would see on a real cart whose RTC kept
+ * ticking through power-off. Pokemon's elapsed math then yields the
+ * actual real-world wall delta. */
+
+#define RTC_SIDECAR_SIZE   (5 + 8)   /* 5 bytes cart_rtc + i64 wall secs */
+
+/* Read the BM8563 and return unix-epoch seconds. Returns 0 on read
+ * failure, in which case callers should skip wall-delta math. */
+static int64_t rtc_wall_unix_secs(void) {
+    struct tm now;
+    memset(&now, 0, sizeof(now));
+    if (thumbyone_rtc_get(&now) != 0) return 0;
+    /* mktime treats struct tm as local; we run TZ-less so it is also
+     * UTC. The absolute value isn't important — only deltas are. */
+    time_t t = mktime(&now);
+    return (t == (time_t)-1) ? 0 : (int64_t)t;
+}
+
+/* Add `delta_secs` to a cart_rtc[5] tuple, propagating carries
+ * through sec/min/hour and into the 9-bit day counter. Sets the
+ * MBC3 day-overflow bit (cart_rtc[4] bit 7) on >9-bit overflow.
+ * Preserves the halt bit (cart_rtc[4] bit 6). Negative or zero
+ * deltas are no-ops. */
+static void advance_cart_rtc(uint8_t rtc[5], int64_t delta_secs) {
+    if (delta_secs <= 0) return;
+    uint64_t total = (uint64_t)rtc[0]
+                   + (uint64_t)rtc[1] * 60ull
+                   + (uint64_t)rtc[2] * 3600ull
+                   + ((uint64_t)((rtc[4] & 1) << 8 | rtc[3])) * 86400ull
+                   + (uint64_t)delta_secs;
+    rtc[0] = (uint8_t)(total % 60); total /= 60;
+    rtc[1] = (uint8_t)(total % 60); total /= 60;
+    rtc[2] = (uint8_t)(total % 24); total /= 24;
+    uint64_t day = total;
+    uint8_t  carry = (day > 0x1FFu) ? 0x80 : 0;
+    uint8_t  day_hi_bit = (day >> 8) & 0x01;
+    rtc[3] = (uint8_t)(day & 0xFF);
+    /* Preserve halt bit (0x40); clear/set day-hi (bit 0) and
+     * carry (bit 7); other bits are unused on real MBC3. */
+    rtc[4] = (uint8_t)((rtc[4] & 0x40) | day_hi_bit | carry);
+}
+
+/* Atomic .rtc sidecar writer. Returns 0 on success. */
+static int rtc_sidecar_save(const char *rom_name,
+                            const uint8_t cart_rtc[5],
+                            int64_t       wall_secs) {
+    char path[NES_PICKER_PATH_MAX];
+    make_sidecar_path(path, sizeof(path), rom_name, ".rtc");
+    char tmp_path[NES_PICKER_PATH_MAX];
+    make_sidecar_path(tmp_path, sizeof(tmp_path), rom_name, ".rtc.tmp");
+
+    uint8_t buf[RTC_SIDECAR_SIZE];
+    for (int i = 0; i < 5; i++) buf[i] = cart_rtc[i];
+    for (int i = 0; i < 8; i++) buf[5 + i] = (uint8_t)((wall_secs >> (8 * i)) & 0xFF);
+
+    FIL f;
+    if (f_open(&f, tmp_path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return -1;
+    UINT bw = 0;
+    FRESULT wr = f_write(&f, buf, (UINT)sizeof(buf), &bw);
+    FRESULT cr = f_close(&f);
+    if (wr != FR_OK || bw != (UINT)sizeof(buf) || cr != FR_OK) {
+        f_unlink(tmp_path);
+        return -1;
+    }
+    f_unlink(path);
+    if (f_rename(tmp_path, path) != FR_OK) return -1;
+    return 0;
+}
+
+/* Read the .rtc sidecar. Returns 0 on success and fills the outputs;
+ * returns -1 if the file is missing or malformed (callers should
+ * treat that as "no prior persisted RTC" — fresh game). */
+static int rtc_sidecar_load(const char *rom_name,
+                            uint8_t  out_cart_rtc[5],
+                            int64_t *out_wall_secs) {
+    char path[NES_PICKER_PATH_MAX];
+    make_sidecar_path(path, sizeof(path), rom_name, ".rtc");
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return -1;
+    uint8_t buf[RTC_SIDECAR_SIZE];
+    UINT br = 0;
+    FRESULT rr = f_read(&f, buf, (UINT)sizeof(buf), &br);
+    f_close(&f);
+    if (rr != FR_OK || br != (UINT)sizeof(buf)) return -1;
+    for (int i = 0; i < 5; i++) out_cart_rtc[i] = buf[i];
+    int64_t w = 0;
+    for (int i = 0; i < 8; i++) w |= ((int64_t)buf[5 + i]) << (8 * i);
+    *out_wall_secs = w;
+    return 0;
+}
+#endif /* THUMBYONE_SLOT_MODE */
+
+/* Atomic .sav writer. Returns 0 on success, negative on failure.
+ *
+ * Why atomic: the original implementation used FA_CREATE_ALWAYS
+ * which truncates the existing .sav to zero BEFORE writing the new
+ * data. If the new write fails (disk full being the canonical case)
+ * the previous good save is gone too — the user loses everything
+ * including the in-game save the cart did fine. We instead write
+ * to <name>.sav.tmp, only rename over the real .sav once the tmp
+ * write was fully successful. On failure the old .sav is untouched.
+ *
+ * Why we need to detect failure: with no return code the original
+ * silently dropped writes when the FAT had less free space than
+ * the cart-RAM size (Pokemon Crystal = 32 KB). Game appeared to
+ * save (Pokemon's UI confirms), but the .sav file ended up 0
+ * bytes; reload showed only New Game with no obvious cause. Now
+ * the caller can show an OSD warning. */
+static int battery_save(const char *rom_name) {
     uint8_t *ram = gbc_battery_ram();
     size_t   sz  = gbc_battery_size();
-    if (!ram || sz == 0) return;
+    if (!ram || sz == 0) return 0;   /* no save needed — not an error */
+
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
+    char tmp_path[NES_PICKER_PATH_MAX];
+    make_sidecar_path(tmp_path, sizeof(tmp_path), rom_name, ".sav.tmp");
+
     FIL f;
-    if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
+    if (f_open(&f, tmp_path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+        return -1;
+    }
     UINT bw = 0;
-    f_write(&f, ram, (UINT)sz, &bw);
-    f_close(&f);
+    FRESULT wr = f_write(&f, ram, (UINT)sz, &bw);
+    FRESULT cr = f_close(&f);
+    if (wr != FR_OK || bw != (UINT)sz || cr != FR_OK) {
+        /* Drop the partial / failed tmp so we don't leak it. The
+         * original .sav (if any) is still intact — we never touched it. */
+        f_unlink(tmp_path);
+        return -1;
+    }
+
+    /* Replace old .sav with the new tmp. f_rename on FatFs requires
+     * the destination not to exist, so unlink first (ignore errors —
+     * may not exist on first save). */
+    f_unlink(path);
+    if (f_rename(tmp_path, path) != FR_OK) {
+        /* Bizarre case — write succeeded but rename failed. Leave
+         * the tmp file in place so the user can recover it manually. */
+        return -1;
+    }
+
+#ifdef THUMBYONE_SLOT_MODE
+    /* Persist cart_rtc + wall clock so the next cart load can
+     * restore cart_rtc to (saved + real_wall_delta). Failure here is
+     * not fatal for the .sav itself (already on disk) — Pokemon's
+     * day/night just won't track wall clock perfectly across the
+     * next power-off until the next successful save. */
+    {
+        uint8_t crtc[5] = {0};
+        gbc_peek_cart_rtc(crtc);
+        (void)rtc_sidecar_save(rom_name, crtc, rtc_wall_unix_secs());
+    }
+#endif
+    return 0;
 }
 
 /* GB joypad bitmask from Thumby buttons. */
@@ -442,6 +608,59 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
     battery_load(name);
 
+#ifdef THUMBYONE_SLOT_MODE
+    /* MBC3 cart RTC seed. Pokemon Crystal/Gold/Silver carry a real-
+     * time clock inside the cart for berry growth, day-night cycle
+     * and time-of-day-only encounters. peanut_gb already implements
+     * the cart-side RTC bytes; we just hand it the wall clock from
+     * the BM8563 so the cart's RTC tracks real time.
+     *
+     * Pokemon stores its "RTC last seen" inside cart RAM (which
+     * `battery_load` just restored). On boot it computes elapsed =
+     * now - last_seen and grows berries / advances the clock
+     * accordingly — so as long as cart_rtc tracks real wall time
+     * here, the math works whether or not the BM8563 keeps time
+     * across power-off:
+     *   - chip kept time → wall clock is genuinely "now", elapsed
+     *     is the real wall-clock gap since the previous play
+     *     session, berry growth is correct
+     *   - chip lost time → wall clock is "session-local now", elapsed
+     *     is at least the in-session play time; the gap between
+     *     play sessions is lost but the in-session day/night still
+     *     works.
+     * The compromised flag is checked but not acted on: a stale read
+     * still gives reasonable in-session behaviour. */
+    /* MBC3 cart RTC restore. If a .rtc sidecar exists for this ROM
+     * we restore cart_rtc to (saved_cart_rtc + real_wall_delta) so
+     * Pokemon's first cart_rtc read at boot equals what its
+     * `last_seen` snapshot in cart RAM was, plus the wall time the
+     * device spent off. Pokemon's elapsed math then gives the actual
+     * real-world delta and day/night/berry growth track wall clock.
+     *
+     * For brand-new games (no .rtc sidecar yet) we leave cart_rtc at
+     * the post-gbc_init memset zero. Pokemon's bootcode zeros
+     * cart_rtc anyway as part of its RTC init sequence, so any seed
+     * we put here would be clobbered before the game's first poll. */
+    thumbyone_rtc_init();
+    {
+        uint8_t saved_rtc[5];
+        int64_t saved_wall = 0;
+        if (rtc_sidecar_load(name, saved_rtc, &saved_wall) == 0) {
+            int64_t now_wall = rtc_wall_unix_secs();
+            /* Skip the advance if either timestamp is bogus (BM8563
+             * read failed now, or sidecar was written before the
+             * RTC was set). The user just gets cart_rtc resumed at
+             * the previously-saved value — same as if no time had
+             * passed. */
+            if (saved_wall > 0 && now_wall > 0) {
+                int64_t delta = now_wall - saved_wall;
+                advance_cart_rtc(saved_rtc, delta);
+            }
+            gbc_poke_cart_rtc(saved_rtc);
+        }
+    }
+#endif
+
     int          volume       = VOL_DEF;
     int          palette      = GBC_PALETTE_GREEN;
     bool         show_fps     = false;
@@ -525,7 +744,11 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
         if (!sleeping &&
             (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
-            battery_save(name);
+            int srv = battery_save(name);
+            if (srv != 0) {
+                snprintf(osd_text, sizeof(osd_text), "save fail: disk full?");
+                osd_text_ms = 3000;
+            }
             unsaved_play_frames = 0;
             sleeping = true;
             nes_lcd_backlight(0);
@@ -709,7 +932,11 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             if (r.kind == NES_MENU_ACTION) {
                 switch (r.action_id) {
                 case ACT_SAVE_STATE: {
-                    int rc = gbc_save_state(sta_path);
+                    int64_t wall_at_save = 0;
+#ifdef THUMBYONE_SLOT_MODE
+                    wall_at_save = rtc_wall_unix_secs();
+#endif
+                    int rc = gbc_save_state(sta_path, wall_at_save);
                     nes_flash_disk_flush();
                     snprintf(osd_text, sizeof(osd_text),
                               rc == 0 ? "state saved" : "save fail");
@@ -717,7 +944,25 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                     break;
                 }
                 case ACT_LOAD_STATE: {
-                    int rc = gbc_load_state(sta_path);
+                    int64_t saved_wall = 0;
+                    int rc = gbc_load_state(sta_path, &saved_wall);
+#ifdef THUMBYONE_SLOT_MODE
+                    /* V2 state files embed the wall clock at save —
+                     * advance cart_rtc by (now - saved) so Pokemon's
+                     * day/night and berry-growth track real elapsed
+                     * wall time across the time the state file sat
+                     * on disk. V1 (or unavailable BM8563) gives
+                     * saved_wall=0 and we skip the advance. */
+                    if (rc == 0 && saved_wall > 0) {
+                        int64_t now_wall = rtc_wall_unix_secs();
+                        if (now_wall > 0) {
+                            uint8_t crtc[5] = {0};
+                            gbc_peek_cart_rtc(crtc);
+                            advance_cart_rtc(crtc, now_wall - saved_wall);
+                            gbc_poke_cart_rtc(crtc);
+                        }
+                    }
+#endif
                     snprintf(osd_text, sizeof(osd_text),
                               rc == 0 ? "state loaded" : "load fail");
                     osd_text_ms = 1000;
@@ -786,6 +1031,29 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             unsaved_play_frames += frame_runs;
         }
 
+#ifdef THUMBYONE_SLOT_MODE
+        /* MBC3 RTC: advance the cart RTC once per real-world second.
+         * peanut_gb's gb_tick_rtc internally honours the cart's halt
+         * bit, so this is a no-op for non-RTC carts and for halted-
+         * RTC games. We pace off wall-clock time rather than frame
+         * count so fast-forward / scaler stalls don't desync the
+         * cart's clock from reality. */
+        {
+            static uint64_t last_rtc_tick_us = 0;
+            uint64_t now_us = (uint64_t)time_us_64();
+            if (last_rtc_tick_us == 0) {
+                last_rtc_tick_us = now_us;
+            } else {
+                uint64_t elapsed = now_us - last_rtc_tick_us;
+                while (elapsed >= 1000000u) {
+                    gbc_tick_rtc();
+                    last_rtc_tick_us += 1000000u;
+                    elapsed -= 1000000u;
+                }
+            }
+        }
+#endif
+
         const uint16_t *frame = gbc_framebuffer();
         if (frame) {
             nes_lcd_wait_idle();
@@ -811,8 +1079,22 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
                 nes_font_draw(fb, ftxt, 2, 5, 0xFFE0);
             }
             if (osd_text_ms > 0) {
-                int w = nes_font_width(osd_text);
-                nes_font_draw(fb, osd_text, (128 - w) / 2, 60, 0xFFE0);
+                int w  = nes_font_width(osd_text);
+                int tx = (128 - w) / 2;
+                int ty = 60;
+                int bx = tx - 2;
+                int by = ty - 1;
+                int bw = w + 4;
+                int bh = NES_FONT_CELL_H + 1;
+                if (bx < 0) { bw += bx; bx = 0; }
+                if (by < 0) { bh += by; by = 0; }
+                if (bx + bw > 128) bw = 128 - bx;
+                if (by + bh > 128) bh = 128 - by;
+                for (int yy = 0; yy < bh; ++yy) {
+                    uint16_t *row = fb + (by + yy) * 128 + bx;
+                    for (int xx = 0; xx < bw; ++xx) row[xx] = 0x0000;
+                }
+                nes_font_draw(fb, osd_text, tx, ty, 0xFFE0);
                 osd_text_ms -= 16;
             }
             nes_lcd_present(fb);
@@ -828,7 +1110,11 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         if (unsaved_play_frames > 0 &&
             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
-            battery_save(name);
+            int srv = battery_save(name);
+            if (srv != 0) {
+                snprintf(osd_text, sizeof(osd_text), "save fail: disk full?");
+                osd_text_ms = 3000;
+            }
             last_autosave_us    = (uint64_t)time_us_64();
             unsaved_play_frames = 0;
         }
@@ -846,7 +1132,12 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
     }
 
-    battery_save(name);
+    /* Exit cleanup save. If this fails the previous .sav is still
+     * intact (atomic-write guarantee); we can't usefully OSD here
+     * since the screen is about to be replaced by the lobby's hand-
+     * off. The 30 s autosave during play already warned the user
+     * about disk-full so this case is the second line of defence. */
+    (void)battery_save(name);
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, palette, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     gbc_shutdown();

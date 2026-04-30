@@ -3952,7 +3952,7 @@ int nes_picker_run(uint16_t *fb,
 #ifdef THUMBYONE_FW_VERSION
             snprintf(about_text, sizeof(about_text), "ThumbyNES v" THUMBYONE_FW_VERSION);
 #else
-            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.10");
+            snprintf(about_text, sizeof(about_text), "ThumbyNES v1.11");
 #endif
 
             static const char * const view_choices[]  = { "HERO", "LIST" };

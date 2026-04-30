@@ -367,28 +367,67 @@ size_t gbc_battery_size(void) {
     return s_cart_ram_size;
 }
 
-/* Save state magic + version. Bumped if the gb_s struct ever changes
- * shape across a peanut_gb update. */
-#define GBC_STATE_MAGIC   0x47424353u   /* 'GBCS' */
-#define GBC_STATE_VERSION 1u
+#include <time.h>
+
+void gbc_set_rtc(const struct tm *t) {
+    if (!s_loaded || !t) return;
+    /* peanut_gb takes a non-const struct tm * (legacy API); copy off
+     * the const since the lib doesn't actually mutate the input. */
+    struct tm copy = *t;
+    gb_set_rtc(&s_gb, &copy);
+}
+
+void gbc_tick_rtc(void) {
+    if (!s_loaded) return;
+    /* peanut_gb's gb_tick_rtc handles the "halt RTC" bit (bit 6 of
+     * the day-high byte) internally — no-op if the cart has stopped
+     * the clock via a write to the day register. */
+    gb_tick_rtc(&s_gb);
+}
+
+void gbc_peek_cart_rtc(uint8_t out[5]) {
+    if (!out) return;
+    if (!s_loaded) { for (int i = 0; i < 5; i++) out[i] = 0xFF; return; }
+    for (int i = 0; i < 5; i++) out[i] = s_gb.cart_rtc[i];
+}
+
+void gbc_poke_cart_rtc(const uint8_t in[5]) {
+    if (!in || !s_loaded) return;
+    for (int i = 0; i < 5; i++) s_gb.cart_rtc[i] = in[i];
+}
+
+/* Save state magic + version.
+ * V1: hdr[3] = magic, version, payload_size. payload = gb_s + apu.
+ * V2: hdr[3] = magic, version, payload_size. payload = gb_s + apu +
+ *     int64 wall_clock_unix_secs_at_save (8 bytes). On load, the
+ *     runner can advance cart_rtc by (now - saved) so Pokemon's day/
+ *     night and berry growth track real wall clock across the time
+ *     a state was sitting on disk. V1 still loadable (we read 0 for
+ *     wall-clock and skip the advance). */
+#define GBC_STATE_MAGIC     0x47424353u   /* 'GBCS' */
+#define GBC_STATE_VERSION_1 1u
+#define GBC_STATE_VERSION_2 2u
+#define GBC_STATE_VERSION   GBC_STATE_VERSION_2
 
 #ifdef THUMBY_STATE_BRIDGE
 #  include "thumby_state_bridge.h"
 #endif
 
-int gbc_save_state(const char *path) {
+int gbc_save_state(const char *path, int64_t wall_clock_unix_secs) {
     if (!s_loaded || !path) return -1;
+    uint32_t payload_sz = (uint32_t)(sizeof(s_gb) + sizeof(s_apu) + sizeof(int64_t));
     uint32_t hdr[3] = {
         GBC_STATE_MAGIC,
         GBC_STATE_VERSION,
-        (uint32_t)(sizeof(s_gb) + sizeof(s_apu)),
+        payload_sz,
     };
 #ifdef THUMBY_STATE_BRIDGE
     thumby_state_io_t *io = thumby_state_open(path, "wb");
     if (!io) return -2;
     if (thumby_state_write(hdr, sizeof(hdr), 1, io) != 1
      || thumby_state_write(&s_gb,  sizeof(s_gb),  1, io) != 1
-     || thumby_state_write(&s_apu, sizeof(s_apu), 1, io) != 1) {
+     || thumby_state_write(&s_apu, sizeof(s_apu), 1, io) != 1
+     || thumby_state_write(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, io) != 1) {
         thumby_state_close(io);
         return -3;
     }
@@ -399,39 +438,71 @@ int gbc_save_state(const char *path) {
     if (!f) return -2;
     int ok = fwrite(hdr, sizeof(hdr), 1, f) == 1
           && fwrite(&s_gb,  sizeof(s_gb),  1, f) == 1
-          && fwrite(&s_apu, sizeof(s_apu), 1, f) == 1;
+          && fwrite(&s_apu, sizeof(s_apu), 1, f) == 1
+          && fwrite(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, f) == 1;
     fclose(f);
     return ok ? 0 : -3;
 #endif
 }
 
-int gbc_load_state(const char *path) {
+int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
     if (!s_loaded || !path) return -1;
     uint32_t hdr[3];
+    /* Pre-zero the out pointer so a V1 file (which lacks the wall-
+     * clock tail) leaves the runner with 0 — runner treats that as
+     * "no wall-delta info, advance nothing". */
+    if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = 0;
+
+    /* Accept V1 (no wall-clock tail) or V2 (with wall-clock tail).
+     * Payload size is what tells V1/V2 apart at parse time. */
+    uint32_t v1_payload = (uint32_t)(sizeof(s_gb) + sizeof(s_apu));
+    uint32_t v2_payload = v1_payload + (uint32_t)sizeof(int64_t);
 #ifdef THUMBY_STATE_BRIDGE
     thumby_state_io_t *io = thumby_state_open(path, "rb");
     if (!io) return -2;
     if (thumby_state_read(hdr, sizeof(hdr), 1, io) != 1) { thumby_state_close(io); return -3; }
-    if (hdr[0] != GBC_STATE_MAGIC || hdr[1] != GBC_STATE_VERSION
-     || hdr[2] != (uint32_t)(sizeof(s_gb) + sizeof(s_apu))) {
+    if (hdr[0] != GBC_STATE_MAGIC) { thumby_state_close(io); return -4; }
+    bool is_v2 = false;
+    if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
+        is_v2 = false;
+    } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
+        is_v2 = true;
+    } else {
         thumby_state_close(io); return -4;
     }
     if (thumby_state_read(&s_gb,  sizeof(s_gb),  1, io) != 1
      || thumby_state_read(&s_apu, sizeof(s_apu), 1, io) != 1) {
         thumby_state_close(io); return -5;
     }
+    if (is_v2) {
+        int64_t wall = 0;
+        if (thumby_state_read(&wall, sizeof(wall), 1, io) != 1) {
+            thumby_state_close(io); return -5;
+        }
+        if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
+    }
     thumby_state_close(io);
 #else
     FILE *f = fopen(path, "rb");
     if (!f) return -2;
     if (fread(hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return -3; }
-    if (hdr[0] != GBC_STATE_MAGIC || hdr[1] != GBC_STATE_VERSION
-     || hdr[2] != (uint32_t)(sizeof(s_gb) + sizeof(s_apu))) {
+    if (hdr[0] != GBC_STATE_MAGIC) { fclose(f); return -4; }
+    bool is_v2 = false;
+    if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
+        is_v2 = false;
+    } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
+        is_v2 = true;
+    } else {
         fclose(f); return -4;
     }
     if (fread(&s_gb,  sizeof(s_gb),  1, f) != 1
      || fread(&s_apu, sizeof(s_apu), 1, f) != 1) {
         fclose(f); return -5;
+    }
+    if (is_v2) {
+        int64_t wall = 0;
+        if (fread(&wall, sizeof(wall), 1, f) != 1) { fclose(f); return -5; }
+        if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
     }
     fclose(f);
 #endif

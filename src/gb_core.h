@@ -112,12 +112,53 @@ int  gbc_audio_pull(int16_t *out, int n);
 uint8_t *gbc_battery_ram (void);
 size_t   gbc_battery_size(void);
 
+/* MBC3 cart RTC support. Pokemon Crystal/Gold/Silver and a handful of
+ * other GBC carts have a real-time clock built into the cartridge
+ * (used for berry growth, day-night cycles, time-of-day-only
+ * encounters). peanut_gb already implements the cart-side RTC bytes
+ * + the gb_tick_rtc / gb_set_rtc primitives; the wrapper exposes
+ * them here so the device runner can drive them off the BM8563. No-op
+ * if no cart is loaded.
+ *
+ * gbc_set_rtc(): seed the cart RTC from a struct tm — typically called
+ * once at game load with the wall-clock time read from BM8563. Pokemon
+ * stores its "RTC last seen" inside cart RAM, so as long as cart_rtc
+ * tracks real wall time, the elapsed-time math the game does on boot
+ * works whether the BM8563 keeps time across power-off or not.
+ *
+ * gbc_tick_rtc(): advance the cart RTC by one second. Call once per
+ * real-world second from the runner's frame loop. */
+struct tm;
+void gbc_set_rtc(const struct tm *t);
+void gbc_tick_rtc(void);
+
+/* Copy current cart_rtc[5] bytes into `out` (must be at least 5
+ * bytes). Used to capture cart_rtc state for sidecar persistence. */
+void gbc_peek_cart_rtc(uint8_t out[5]);
+
+/* Write 5 raw bytes into peanut_gb's cart_rtc. Used to restore from
+ * a sidecar file, bypassing the tm-based gbc_set_rtc API. */
+void gbc_poke_cart_rtc(const uint8_t in[5]);
+
 /* Save / load runtime state to a sidecar file (absolute FAT path,
  * e.g. "/Tetris.sta"). peanut_gb's struct gb_s plus minigb_apu_ctx
  * is small enough (~17 KB total) to memcpy whole — we just write
- * both blobs to disk and reverse on load. Returns 0 on success. */
-int gbc_save_state(const char *path);
-int gbc_load_state(const char *path);
+ * both blobs to disk and reverse on load. Returns 0 on success.
+ *
+ * V2 file format also embeds the wall-clock unix seconds at save
+ * moment; on load the runner uses (now - saved) to advance the
+ * cart_rtc so MBC3 carts (Pokemon Crystal/Gold/Silver) track real
+ * elapsed wall clock across the time a state was sitting on disk.
+ *
+ * gbc_save_state(): pass the current wall-clock unix-seconds via
+ * `wall_clock_unix_secs` (or 0 if unavailable — load will then
+ * skip the advance).
+ *
+ * gbc_load_state(): writes the saved wall-clock unix-seconds back
+ * via `*out_saved_wall_unix_secs` (or 0 for V1 files / unavailable);
+ * pass NULL if you don't need it. */
+int gbc_save_state(const char *path, int64_t wall_clock_unix_secs);
+int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs);
 
 /* Tear down. Frees the cart-ram allocation; the rom buffer is
  * caller-owned and not touched. */
