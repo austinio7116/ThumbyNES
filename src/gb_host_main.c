@@ -73,9 +73,14 @@ int main(int argc, char **argv)
 
     int16_t audio_buf[2048];
 
-    /* 60 Hz pacing — vsync alone doesn't help on a 144 Hz host display. */
-    const Uint32 frame_ms  = 1000 / gbc_refresh_rate();
-    Uint32       next_tick = SDL_GetTicks();
+    /* 60 Hz pacing — vsync alone doesn't help on a 144 Hz host
+     * display. Use microsecond-resolution timing via the SDL perf
+     * counter; integer-millisecond pacing (1000/60 = 16) actually
+     * runs at 62.5 fps, which makes minigb_apu produce samples
+     * 4 % faster than SDL drains them and audibly crackles. */
+    const Uint64 perf_freq = SDL_GetPerformanceFrequency();
+    const Uint64 frame_ticks = perf_freq / (Uint64)gbc_refresh_rate();
+    Uint64       next_tick   = SDL_GetPerformanceCounter();
 
     bool running = true;
     int  palette = 0;
@@ -116,10 +121,25 @@ int main(int argc, char **argv)
         int n = gbc_audio_pull(audio_buf, sizeof(audio_buf) / sizeof(audio_buf[0]));
         if (dev && n > 0) SDL_QueueAudio(dev, audio_buf, n * sizeof(int16_t));
 
-        next_tick += frame_ms;
-        Uint32 now = SDL_GetTicks();
-        if ((Sint32)(next_tick - now) > 0) SDL_Delay(next_tick - now);
-        else next_tick = now;
+        next_tick += frame_ticks;
+        Uint64 now = SDL_GetPerformanceCounter();
+        if ((Sint64)(next_tick - now) > 0) {
+            /* Spin-wait for the last ~1 ms of the frame so we hit
+             * the exact target tick without depending on OS scheduler
+             * jitter — SDL_Delay on Linux can over-sleep by 1-3 ms. */
+            Uint64 spin_threshold = perf_freq / 1000;   /* 1 ms */
+            while ((Sint64)(next_tick - now) > (Sint64)spin_threshold) {
+                SDL_Delay(1);
+                now = SDL_GetPerformanceCounter();
+            }
+            while ((Sint64)(next_tick - now) > 0) {
+                now = SDL_GetPerformanceCounter();
+            }
+        } else {
+            /* Fell behind — re-anchor instead of catching up so we
+             * don't burst the audio queue. */
+            next_tick = now;
+        }
     }
 
     gbc_shutdown();

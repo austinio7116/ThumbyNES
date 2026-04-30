@@ -372,6 +372,35 @@ dB headroom against int16 clipping. Master volume comes from the
 same global slider; the per-channel cart fade (which upstream only
 applied to the noise channels) now scales the wave channels too.
 
+The **GB / GBC runner** runs minigb_apu at **44100 Hz internal**,
+not 22050. The GB APU's natural rate is ~1 MHz; minigb_apu integrates
+each output sample over a box-filter window which only gives ~13 dB
+of stop-band rejection, so at 22050 Hz output the harmonics of a
+square-wave channel above 11 kHz folded back into the audible band
+as a crunchy high-frequency aliasing artefact (worse on chord-heavy
+GBC tracks like the Pokemon Crystal soundtrack and Zelda Oracle
+overworld). Generating internally at 44100 Hz pushes the bulk of
+the worst aliases above 22050 Hz; the runner then decimates 2:1 to
+22050 with a 5-tap binomial FIR (`[1,4,6,4,1] / 16`, -3 dB at fs/4
+= output Nyquist) and runs the result through a one-pole DC-blocker
+IIR (cutoff ~7 Hz) so envelope-change DC pulses don't pop. CPU cost
+is roughly 2× the per-frame APU loop iterations vs. the old path,
+~2 % of one RP2350 core — easily affordable. Filter and DC-blocker
+state are persistent across frames so we don't get a click every
+frame boundary; reset only at ROM (re)load.
+
+Frame pacing has a **catch-up clamp** in every runner. minigb_apu
+emits `AUDIO_SAMPLE_RATE / 60` samples per frame locked to the
+frame counter, so any frame-rate overshoot directly becomes a
+sample-rate overshoot — generated faster than the PWM drains the
+ring, samples drop, and the audio crackles + speeds up. The clamp
+catches the canonical "frame body ran over budget, `next_frame` is
+now in the past" case where `sleep_until` would otherwise return
+immediately and the runner would turbo-loop to make up the deficit;
+instead we re-anchor `next_frame` to `now`, accepting the missed
+budget without producing a burst of extra frames. Visible as
+strict 60 fps on the FPS overlay.
+
 ---
 
 ## Overclock

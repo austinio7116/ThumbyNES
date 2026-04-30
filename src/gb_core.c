@@ -44,15 +44,32 @@ uint8_t audio_read (uint16_t addr);
 
 /* minigb_apu requires the format + sample-rate defines before its
  * header is included. The .c shim sets the same values for the impl
- * translation unit. */
-#define AUDIO_SAMPLE_RATE              22050
+ * translation unit.
+ *
+ * Why 44100 Hz internal:
+ *   The GB APU's natural rate is ~1 MHz; minigb_apu integrates each
+ *   sample over a box-filter-like window which gives only ~13 dB of
+ *   stop-band rejection. At 22050 Hz that means square-wave harmonics
+ *   above 11 kHz fold back into the audible band as crunchy aliasing
+ *   artefacts. Generating internally at 44100 (twice the eventual
+ *   output rate) pushes most of the worst aliases above the audible
+ *   range, then a properly-designed 2:1 decimating FIR in the runner
+ *   cleans up what's left before we publish samples for the device
+ *   PWM / host SDL. CPU cost is roughly 2x more APU loop iterations
+ *   per frame — ~2% of an RP2350 core, easily affordable. */
+#define AUDIO_SAMPLE_RATE              44100
 #define MINIGB_APU_AUDIO_FORMAT_S16SYS
 #include "minigb_apu.h"
 
 /* AUDIO_SAMPLES is computed from a float division so it's not a
  * compile-time constant — use a generous fixed cap for our static
- * buffers (22050 / 59.7275 ≈ 369 stereo samples per frame). */
-#define GBC_MAX_FRAME_SAMPLES  512
+ * stereo buffer. At 44100 Hz / 59.7275 fps that's ~738 stereo
+ * frames per video frame; round up to 1024 to absorb fps jitter. */
+#define GBC_MAX_FRAME_SAMPLES  1024
+
+/* Output sample rate after 2:1 decimation. Matches the device PWM-IRQ
+ * rate and the host's SDL audio open rate. */
+#define GBC_OUTPUT_SAMPLE_RATE 22050
 
 /* --- module state --------------------------------------------------- */
 
@@ -110,6 +127,12 @@ static bool     s_cgb_mode;
  * the mono mix the runner pulls from. */
 static int16_t  s_apu_stereo[GBC_MAX_FRAME_SAMPLES * 2];
 static int16_t  s_mixbuf    [GBC_MAX_FRAME_SAMPLES];
+
+/* 2:1 decimating FIR + DC-blocker state, persistent across frames so
+ * the filter doesn't get "reset" twice per second and audibly click. */
+static int16_t  s_fir_hist[4];      /* last 4 mono samples at 44100 Hz */
+static int32_t  s_dc_x_prev;        /* DC blocker x[n-1]               */
+static int32_t  s_dc_y_prev;        /* DC blocker y[n-1]               */
 static int      s_mixcount;
 
 /* Built-in palettes (RGB565, shade 0 = lightest, shade 3 = darkest).
@@ -237,6 +260,13 @@ int gbc_init(int sample_rate) {
     memset(s_gb_ptr, 0, sizeof(struct gb_s));
     memset(s_vidbuf, 0, GBC_SCREEN_W * GBC_SCREEN_H * sizeof(uint16_t));
     memset(s_cart_ram, 0, GBC_CART_RAM_MAX);
+    /* Anti-alias FIR + DC-blocker state belongs to the audio
+     * pipeline, not to a particular cart — but resetting here
+     * avoids a brief click at boot when we'd otherwise convolve
+     * the new APU output with the previous cart's tail samples. */
+    memset(s_fir_hist, 0, sizeof(s_fir_hist));
+    s_dc_x_prev = 0;
+    s_dc_y_prev = 0;
     gbc_set_palette(GBC_PALETTE_GREEN);
     return 0;
 }
@@ -310,20 +340,69 @@ void gbc_run_frame(void) {
     if (!s_loaded) return;
     gb_run_frame(&s_gb);
 
-    /* Pull one frame's worth of audio from minigb_apu and mix to
-     * mono with hard clipping. */
+    /* Pull one frame's worth of audio from minigb_apu (44100 Hz
+     * stereo). We mix to mono, low-pass-filter with a 5-tap binomial
+     * FIR ([1,4,6,4,1]/16, -3 dB at fs/4 = output Nyquist), decimate
+     * 2:1 to 22050 Hz, and run the result through a one-pole DC-
+     * blocker before clipping into the int16 output buffer. */
     minigb_apu_audio_callback(&s_apu, s_apu_stereo);
-    int n = (int)AUDIO_SAMPLES;   /* runtime float -> int, ~369 */
-    if (n > GBC_MAX_FRAME_SAMPLES) n = GBC_MAX_FRAME_SAMPLES;
-    for (int i = 0; i < n; i++) {
+    int n_in = (int)AUDIO_SAMPLES;
+    if (n_in > GBC_MAX_FRAME_SAMPLES) n_in = GBC_MAX_FRAME_SAMPLES;
+
+    /* Local FIR/DC state copies — keep registers warm in the inner
+     * loop instead of bouncing through the static globals. */
+    int32_t h0 = s_fir_hist[0];
+    int32_t h1 = s_fir_hist[1];
+    int32_t h2 = s_fir_hist[2];
+    int32_t h3 = s_fir_hist[3];
+    int32_t dc_x = s_dc_x_prev;
+    int32_t dc_y = s_dc_y_prev;
+
+    int n_out = 0;
+    for (int i = 0; i < n_in; i++) {
         int32_t l = s_apu_stereo[i * 2];
         int32_t r = s_apu_stereo[i * 2 + 1];
-        int32_t s = (l + r) >> 1;
-        if (s >  32767) s =  32767;
-        if (s < -32768) s = -32768;
-        s_mixbuf[i] = (int16_t)s;
+        int32_t mono = (l + r) >> 1;
+
+        /* 5-tap FIR centered on h2 (= input sample 2 frames ago).
+         * Window is [h0, h1, h2, h3, mono] → x[i-4..i]. The output
+         * corresponds to input x[i-2]; group delay is 2 input
+         * samples (~45 us at 44100 Hz, inaudible). */
+        int32_t y = h0 + 4 * h1 + 6 * h2 + 4 * h3 + mono;
+        y >>= 4;   /* /16 */
+
+        /* Slide history: drop h0, append mono. */
+        h0 = h1;
+        h1 = h2;
+        h2 = h3;
+        h3 = mono;
+
+        /* Decimate 2:1 — keep only every other filtered sample. */
+        if ((i & 1) == 0) continue;
+
+        /* DC blocker: y[n] = x[n] - x[n-1] + a * y[n-1], a ≈ 0.998
+         * (a = 32700/32768). Cutoff ≈ 7 Hz at 22050 Hz — removes the
+         * envelope-change DC pulses that minigb_apu doesn't model
+         * (real GB hardware has a ~120 Hz HPF on each channel). */
+        int32_t x_now = y;
+        y = x_now - dc_x + ((dc_y * 32700) >> 15);
+        dc_x = x_now;
+        dc_y = y;
+
+        if (y >  32767) y =  32767;
+        if (y < -32768) y = -32768;
+        s_mixbuf[n_out++] = (int16_t)y;
     }
-    s_mixcount = n;
+
+    /* Persist FIR/DC state for next frame. */
+    s_fir_hist[0] = (int16_t)h0;
+    s_fir_hist[1] = (int16_t)h1;
+    s_fir_hist[2] = (int16_t)h2;
+    s_fir_hist[3] = (int16_t)h3;
+    s_dc_x_prev   = dc_x;
+    s_dc_y_prev   = dc_y;
+
+    s_mixcount = n_out;
 }
 
 int gbc_refresh_rate(void) {
