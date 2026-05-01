@@ -805,16 +805,21 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
          * past the target — i.e. when the emulator is the bottleneck. */
         fps_frames++;
         if (!fast_forward) {
+            /* Advance the schedule unconditionally. Don't snap
+             * next_frame back to "now" on a small overrun — that
+             * permanently loses any over-budget render time and
+             * drives the wall-clock loop rate below the refresh
+             * target (audio buffer drains in lockstep with the
+             * drift). The next iter's sleep_until naturally absorbs
+             * a small slip; resync only on >4-frame outliers so a
+             * one-off heavy frame can't trigger a multi-frame
+             * catch-up burst. The audio ring is 4096 samples
+             * (~186 ms), more than enough to absorb the modest
+             * burst that legitimate catchup produces. */
             next_frame = delayed_by_us(next_frame, FRAME_US);
-            /* Clamp catch-up. If the frame body ran over budget and
-             * `next_frame` is now in the past, sleep_until returns
-             * immediately and the runner would turbo-loop to make up
-             * the deficit — producing audio samples faster than the
-             * PWM ring drains them, which crackles. Re-anchor to
-             * `now` so we stay at strict refresh rate with no audio
-             * sample-rate overshoot. */
             absolute_time_t now = get_absolute_time();
-            if (absolute_time_diff_us(now, next_frame) < 0) {
+            int slip = (int)absolute_time_diff_us(now, next_frame);
+            if (slip < -((int)FRAME_US * 4)) {
                 next_frame = now;
             }
             sleep_until(next_frame);

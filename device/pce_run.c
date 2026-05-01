@@ -384,9 +384,10 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     absolute_time_t fps_window = get_absolute_time();
     int fps_frames = 0, fps_show = 0;
 
-    /* Adaptive frameskip — same shape as md_run.c. Skip the scanline
-     * composer when emulation alone overran last frame's budget,
-     * with a hard cap so we don't freeze the display for long. */
+    /* Adaptive frameskip — same shape as md_run.c. Slip-based: skip
+     * the scanline composer when wall-clock has fallen behind the
+     * pacing schedule. prev_emu_us is kept for the FPS-overlay
+     * diagnostic, not the skip decision. */
     uint32_t prev_emu_us     = 0;
     uint32_t prev_cycle_us   = 0;     /* end-to-end loop iter time */
     uint32_t prev_wait_us    = 0;     /* DMA-wait at top of cycle */
@@ -399,7 +400,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     uint32_t skipped_count   = 0;
     uint32_t skipped_show    = 0;
     uint32_t emu_us_show     = 0;
-    const int SKIP_BUDGET_US = (int)FRAME_US;
+    const int SKIP_SLIP_US    = -1000;             /* 1 ms+ behind = skip */
     const int SKIP_STREAK_MAX = 2;
 
     while (!exit_after) {
@@ -675,20 +676,24 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         }
         pcec_set_buttons(pad);
 
-        /* Adaptive frameskip — if last frame's emulation alone blew
-         * the budget, skip the scanline composer this frame. Never
-         * under fast-forward (already running flat out) and never
-         * more than SKIP_STREAK_MAX in a row. */
+        /* Adaptive frameskip — slip-based trigger. If the schedule
+         * (next_frame) is already in the past at the top of this
+         * iter, skip the scanline composer to catch up. Never under
+         * fast-forward, never more than SKIP_STREAK_MAX in a row.
+         * See md_run.c for why slip beats "last frame over budget"
+         * (which self-stabilizes at 1:1 alternation regardless of
+         * how far behind we are). */
         int skip_this = 0;
-        if (!fast_forward
-            && (int)prev_emu_us > SKIP_BUDGET_US
-            && skip_streak < SKIP_STREAK_MAX)
-        {
-            skip_this = 1;
-            skip_streak++;
-            skipped_count++;
-        } else {
-            skip_streak = 0;
+        if (!fast_forward) {
+            int slip_us = (int)absolute_time_diff_us(
+                              get_absolute_time(), next_frame);
+            if (slip_us < SKIP_SLIP_US && skip_streak < SKIP_STREAK_MAX) {
+                skip_this = 1;
+                skip_streak++;
+                skipped_count++;
+            } else {
+                skip_streak = 0;
+            }
         }
         pcec_set_skip_render(skip_this);
 
@@ -774,10 +779,14 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         fps_frames++;
         if (!fast_forward) {
+            /* See nes_run.c. Bounded resync only — preserve the
+             * schedule across iterations so the slip-based skip
+             * trigger is meaningful and small overruns get absorbed
+             * by the next iter's sleep_until rather than snapped. */
             next_frame = delayed_by_us(next_frame, FRAME_US);
-            /* Clamp catch-up — see nes_run.c / gb_run.c rationale. */
             absolute_time_t now = get_absolute_time();
-            if (absolute_time_diff_us(now, next_frame) < 0) {
+            int slip = (int)absolute_time_diff_us(now, next_frame);
+            if (slip < -((int)FRAME_US * 4)) {
                 next_frame = now;
             }
             sleep_until(next_frame);

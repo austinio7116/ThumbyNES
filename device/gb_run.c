@@ -1121,21 +1121,21 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         fps_frames++;
         if (!fast_forward) {
+            /* Bounded resync. The previous version snapped next_frame
+             * to "now" on any overrun, ostensibly to avoid a turbo-
+             * loop catchup that overshoots audio sample rate. But
+             * each iter is bounded by emu compute time (not infinite
+             * throughput), so the catchup burst is small, and the
+             * ring is 4096 samples (~186 ms) — plenty to absorb it.
+             * Snapping aggressively was instead bleeding 1-2 ms of
+             * schedule per overrun and pulling sustained loop rate
+             * below 60 Hz (audible as too-slow music vs the briefer
+             * speedup the snap was trying to prevent). Resync only
+             * on >4 frame outliers. */
             next_frame = delayed_by_us(next_frame, FRAME_US);
-            /* Clamp catch-up. If the frame body ran over budget (slow
-             * scaler / DMA stall / save state) and `next_frame` is
-             * now in the past, we'd otherwise turbo-loop the runner
-             * to "catch up" — producing frames faster than 60 Hz
-             * until the deficit is paid off. That spike pushes audio
-             * samples into the PWM ring faster than it drains them
-             * (minigb_apu emits AUDIO_SAMPLE_RATE/60 samples per
-             * frame, locked to frame count, so frame-rate overshoot
-             * directly becomes a sample-rate overshoot), the ring
-             * overflows, samples drop, and we get audible crackling
-             * + sped-up music. Re-anchoring to `now` here means we
-             * just resume at strict 60 Hz with no compensation. */
             absolute_time_t now = get_absolute_time();
-            if (absolute_time_diff_us(now, next_frame) < 0) {
+            int slip = (int)absolute_time_diff_us(now, next_frame);
+            if (slip < -((int)FRAME_US * 4)) {
                 next_frame = now;
             }
             sleep_until(next_frame);

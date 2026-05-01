@@ -843,10 +843,13 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         fps_frames++;
         if (!fast_forward) {
+            /* See nes_run.c for rationale. Bounded resync only — a
+             * small overrun should be absorbed by the next iter's
+             * sleep_until, not snapped away. */
             next_frame = delayed_by_us(next_frame, FRAME_US);
-            /* Clamp catch-up — see nes_run.c / gb_run.c rationale. */
             absolute_time_t now = get_absolute_time();
-            if (absolute_time_diff_us(now, next_frame) < 0) {
+            int slip = (int)absolute_time_diff_us(now, next_frame);
+            if (slip < -((int)FRAME_US * 4)) {
                 next_frame = now;
             }
             sleep_until(next_frame);
