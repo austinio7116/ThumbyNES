@@ -346,17 +346,24 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     uint32_t phase_emu_acc  = 0, phase_pres_acc = 0, phase_aud_acc = 0;
     uint32_t phase_emu_show = 0, phase_pres_show = 0, phase_aud_show = 0;
 
-    /* Adaptive VDP-skip: if the previous frame overran the refresh
-     * budget, we skip the VDP render pass on the next one to catch
-     * up. 68K+Z80+audio continue normally — only the line composite
-     * + FinalizeLine are elided, saving ~6-8 ms. LCD holds last fb
-     * for one extra refresh, so at PAL 50 Hz a ~20 ms hold is
-     * usually imperceptible in action gameplay. */
-    uint32_t prev_emu_us    = 0;
+    /* Adaptive VDP-skip: skip the VDP composite pass when the loop
+     * is at risk of falling behind wall-clock. 68K+Z80+audio continue
+     * normally — only the line composite + FinalizeLine are elided,
+     * saving ~6-8 ms. LCD holds last fb for one extra refresh, so at
+     * PAL 50 Hz a ~20 ms hold is usually imperceptible in action.
+     *
+     * Trigger: slip-based. If next_frame is already in the past by
+     * more than 1 ms when we hit the top of a new iteration, we are
+     * (or will be) behind real time — skip this one to catch up. The
+     * pacing block at the bottom of the loop preserves next_frame as
+     * the schedule (no aggressive snap-to-now), so this slip number
+     * actually means something. Net behaviour with render=22 ms,
+     * skip=12 ms is a clean 1:1 alternation = 50 fps wall-clock and
+     * 25 fps visual update. */
     uint32_t skip_streak    = 0;   /* cap consecutive skips so we don't freeze */
     uint32_t skipped_count  = 0;   /* diagnostic: frames skipped in window */
     uint32_t skipped_show   = 0;
-    const int  SKIP_BUDGET_US = (int)FRAME_US;      /* skip if we overran */
+    const int  SKIP_SLIP_US    = -1000;             /* skip if 1 ms+ behind */
     const int  SKIP_STREAK_MAX = 2;                 /* never skip > 2 in a row */
 
     while (!exit_after) {
@@ -708,16 +715,19 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
         /* Adaptive skip-render decision — set before running the
          * frame. Never skip under fast-forward (already running flat
-         * out) or when audio=OFF (we're at 50 FPS locked anyway). */
+         * out) or when audio=OFF (we're at 50 FPS locked anyway).
+         * Trigger on wall-clock slip — see SKIP variable comments. */
         int skip_this = 0;
-        if (!fast_forward
-            && audio_mode != AUDIO_OFF
-            && (int)prev_emu_us > SKIP_BUDGET_US
-            && skip_streak < SKIP_STREAK_MAX)
-        {
-            skip_this = 1;
-            skip_streak++;
-            skipped_count++;
+        if (!fast_forward && audio_mode != AUDIO_OFF) {
+            int slip_us = (int)absolute_time_diff_us(
+                              get_absolute_time(), next_frame);
+            if (slip_us < SKIP_SLIP_US && skip_streak < SKIP_STREAK_MAX) {
+                skip_this = 1;
+                skip_streak++;
+                skipped_count++;
+            } else {
+                skip_streak = 0;
+            }
         } else {
             skip_streak = 0;
         }
@@ -730,7 +740,6 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         for (int i = 0; i < frame_runs; i++) mdc_run_frame();
         unsaved_play_frames += frame_runs;
         uint32_t t_emu1 = time_us_32();
-        prev_emu_us = t_emu1 - t_emu0;
 
         /* Per-line callbacks have filled `fb`. Wait for any in-flight
          * DMA to drain, then overlay + present. */
@@ -787,10 +796,22 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         frame_tick++;
         fps_frames++;
         if (!fast_forward) {
+            /* Advance the schedule unconditionally and sleep to it.
+             * If we overran (next_frame in the past), sleep_until is
+             * a no-op and the next iter naturally absorbs the slip
+             * via its own sleep_until call. Don't snap the schedule
+             * back to `now` after a small overrun — that would lose
+             * the 2 ms render-overrun permanently every cycle and
+             * drive the loop rate below mdc_refresh_rate(), starving
+             * the audio buffer.
+             *
+             * Resync only on large outliers (>4 frames behind) so a
+             * one-off heavy frame can't trigger a multi-frame catch-
+             * up burst. */
             next_frame = delayed_by_us(next_frame, FRAME_US);
-            /* Clamp catch-up — see nes_run.c / gb_run.c rationale. */
             absolute_time_t now = get_absolute_time();
-            if (absolute_time_diff_us(now, next_frame) < 0) {
+            int slip = (int)absolute_time_diff_us(now, next_frame);
+            if (slip < -((int)FRAME_US * 4)) {
                 next_frame = now;
             }
             sleep_until(next_frame);
