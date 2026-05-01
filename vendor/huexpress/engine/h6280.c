@@ -307,10 +307,25 @@ exe_instruct(void)
 #endif
 
 #ifdef MY_INLINE
+#ifdef PCEC_DEBUG_TRACE
+extern uint32_t pcec_irq_called[4];
+extern uint32_t pcec_irq_delivered[4];
+#define _PCEC_IRQ_TRACE_CALL(Type) \
+    pcec_irq_called[(Type) == INT_NMI ? 0 : (Type) == INT_TIMER ? 1 \
+                  : (Type) == INT_IRQ ? 2 : (Type) == INT_IRQ2 ? 3 : 0]++;
+#define _PCEC_IRQ_TRACE_DELIV(Type) \
+    pcec_irq_delivered[(Type) == INT_NMI ? 0 : (Type) == INT_TIMER ? 1 \
+                     : (Type) == INT_IRQ ? 2 : (Type) == INT_IRQ2 ? 3 : 0]++;
+#else
+#define _PCEC_IRQ_TRACE_CALL(Type)
+#define _PCEC_IRQ_TRACE_DELIV(Type)
+#endif
 #define Int6502(Type)                                       \
 {                                                           \
     uint16 J;                                               \
+    _PCEC_IRQ_TRACE_CALL(Type)                              \
     if ((Type == INT_NMI) || (!(reg_p & FL_I))) {           \
+        _PCEC_IRQ_TRACE_DELIV(Type)                         \
         cycles += 7;                                        \
         push_16bit(reg_pc);                                 \
         push_8bit(reg_p);                                   \
@@ -340,7 +355,20 @@ Int6502(uchar Type)
 {
 	uint16 J;
 
+#ifdef PCEC_DEBUG_TRACE
+	extern uint32_t pcec_irq_called[4];
+	extern uint32_t pcec_irq_delivered[4];
+	int idx = (Type == INT_NMI) ? 0
+	        : (Type == INT_TIMER) ? 1
+	        : (Type == INT_IRQ)   ? 2
+	        : (Type == INT_IRQ2)  ? 3 : 0;
+	pcec_irq_called[idx]++;
+#endif
+
 	if ((Type == INT_NMI) || (!(reg_p & FL_I))) {
+#ifdef PCEC_DEBUG_TRACE
+		pcec_irq_delivered[idx]++;
+#endif
 		cycles += 7;
 		push_16bit(reg_pc);
 		push_8bit(reg_p);

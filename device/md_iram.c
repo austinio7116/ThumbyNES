@@ -38,6 +38,11 @@ int __wrap_Cz80_Exec(void *cpu, int cycles) {
     return s_cz80_exec(cpu, cycles);
 }
 
+/* Tried: dynamic-IRAM treatment for GenPlus YM2612's YMGP_Update,
+ * same as Cz80_Exec. The pool grew from 17 KB to 27 KB and the heap
+ * copy with it — pushed the lobby's menu allocation past the SRAM
+ * limit. Reverted; only Cz80_Exec stays in the pool. */
+
 static void *iram_remap(void *flash_fn) {
     uintptr_t flash_addr = ((uintptr_t)flash_fn) & ~1u;
     uintptr_t offset     = flash_addr - (uintptr_t)__md_iram_pool_start;

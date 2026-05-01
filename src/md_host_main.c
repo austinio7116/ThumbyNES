@@ -104,6 +104,43 @@ int main(int argc, char **argv)
     const char *fb_dump_path = getenv("MDHOST_FB_DUMP");
     const int   max_frames   = getenv("MDHOST_MAX_FRAMES")
                                ? atoi(getenv("MDHOST_MAX_FRAMES")) : 0;
+
+    /* MDHOST_WAV: capture pulled audio into a 16-bit mono PCM .wav for
+     * offline analysis (used to compare YM2612 implementations against
+     * a real-hardware reference). Header is patched on close so we
+     * don't need to know the total sample count up front. */
+    const char *wav_path = getenv("MDHOST_WAV");
+    FILE       *wav_f    = NULL;
+    long        wav_data_bytes = 0;
+    if (wav_path) {
+        wav_f = fopen(wav_path, "wb");
+        if (wav_f) {
+            unsigned char hdr[44] = {
+                'R','I','F','F', 0,0,0,0,
+                'W','A','V','E','f','m','t',' ',
+                16,0,0,0,                    /* fmt chunk size */
+                1,0,                         /* PCM */
+                1,0,                         /* channels = 1 */
+                0,0,0,0, 0,0,0,0,            /* sample rate, byte rate */
+                2,0,                         /* block align */
+                16,0,                        /* bits/sample */
+                'd','a','t','a', 0,0,0,0,
+            };
+            unsigned int rate = SAMPLE_RATE;
+            hdr[24] = (unsigned char)(rate);
+            hdr[25] = (unsigned char)(rate >> 8);
+            hdr[26] = (unsigned char)(rate >> 16);
+            hdr[27] = (unsigned char)(rate >> 24);
+            unsigned int byte_rate = rate * 2;  /* mono, 16-bit */
+            hdr[28] = (unsigned char)(byte_rate);
+            hdr[29] = (unsigned char)(byte_rate >> 8);
+            hdr[30] = (unsigned char)(byte_rate >> 16);
+            hdr[31] = (unsigned char)(byte_rate >> 24);
+            fwrite(hdr, 1, sizeof(hdr), wav_f);
+        } else {
+            fprintf(stderr, "MDHOST_WAV: fopen %s failed\n", wav_path);
+        }
+    }
     /* Peak non-black tracking — guards against the final-frame
      * snapshot landing on a fade/transition and looking "stuck on
      * black" when the game was actually rendering content earlier.
@@ -173,6 +210,10 @@ int main(int argc, char **argv)
 
         int n = mdc_audio_pull(audio_buf, sizeof(audio_buf) / sizeof(audio_buf[0]));
         if (dev && n > 0) SDL_QueueAudio(dev, audio_buf, n * sizeof(int16_t));
+        if (wav_f && n > 0) {
+            fwrite(audio_buf, sizeof(int16_t), (size_t)n, wav_f);
+            wav_data_bytes += (long)n * (long)sizeof(int16_t);
+        }
 
         next_tick += frame_ms;
         Uint32 now = SDL_GetTicks();
@@ -233,6 +274,26 @@ int main(int argc, char **argv)
                total ? (100.0 * (double)nonblack / (double)total) : 0.0,
                peak_pct, peak_frame);
         fflush(stdout);
+    }
+
+    if (wav_f) {
+        /* Patch RIFF + data chunk lengths now that we know the total. */
+        unsigned int data_size = (unsigned int)wav_data_bytes;
+        unsigned int riff_size = 36 + data_size;
+        unsigned char tmp[4];
+        fseek(wav_f, 4, SEEK_SET);
+        tmp[0] = (unsigned char)(riff_size);
+        tmp[1] = (unsigned char)(riff_size >> 8);
+        tmp[2] = (unsigned char)(riff_size >> 16);
+        tmp[3] = (unsigned char)(riff_size >> 24);
+        fwrite(tmp, 1, 4, wav_f);
+        fseek(wav_f, 40, SEEK_SET);
+        tmp[0] = (unsigned char)(data_size);
+        tmp[1] = (unsigned char)(data_size >> 8);
+        tmp[2] = (unsigned char)(data_size >> 16);
+        tmp[3] = (unsigned char)(data_size >> 24);
+        fwrite(tmp, 1, 4, wav_f);
+        fclose(wav_f);
     }
 
     mdc_shutdown();

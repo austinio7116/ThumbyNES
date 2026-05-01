@@ -501,6 +501,78 @@ const uint16_t *pcec_palette_rgb565(void)
     return s_palette_rgb565;
 }
 
+/* ---- Sprite / IRQ debug helpers ----------------------------------
+ *
+ * Used only by the host runner under PCEC_DEBUG_TRACE for the
+ * ongoing sprite-rendering investigation. Gated explicitly so the
+ * device build doesn't carry the symbols (and so the linker doesn't
+ * need to know to strip them via gc-sections). */
+#ifdef PCEC_DEBUG_TRACE
+extern pair IO_VDC_05_CR;
+extern pair IO_VDC_13_SATB;
+extern uint16 *SPRAM;
+extern uchar  *VRAM;
+
+/* Dump the live SATB (64 sprite entries × 4 words). Caller passes
+ * a buffer of >= 64*4 uint16 to receive it. */
+void pcec_debug_satb(uint16_t *out, int max_entries)
+{
+    if (!SPRAM || !out || max_entries <= 0) return;
+    int n = max_entries < 64 ? max_entries : 64;
+    for (int i = 0; i < n * 4; i++) out[i] = SPRAM[i];
+}
+
+/* Dump the SATB area as it sits in VRAM (before the SATB DMA copies
+ * it into SPRAM). If this differs from what's in SPRAM, the DMA is
+ * dropping entries; if it matches an "only-2-sprites" SPRAM, the
+ * cart never wrote the missing sprites in the first place. */
+void pcec_debug_vram_satb(uint16_t *out, int max_entries)
+{
+    if (!VRAM || !out || max_entries <= 0) return;
+    uint32_t base = (uint32_t)IO_VDC_13_SATB.W * 2;
+    int n = max_entries < 64 ? max_entries : 64;
+    for (int i = 0; i < n * 4; i++) {
+        uint32_t off = (base + i * 2) & 0xFFFF;
+        out[i] = (uint16_t)(VRAM[off] | (VRAM[off + 1] << 8));
+    }
+}
+
+/* Snapshot the SATB.W register (where in VRAM the cart told the VDC
+ * to find the SATB). */
+uint16_t pcec_debug_satb_addr(void) { return IO_VDC_13_SATB.W; }
+
+/* Dump 16 bytes from VRAM at a specific byte offset. Caller computes
+ * the offset from a sprite pattern with the same math the renderer
+ * uses (`(patt & 0x7FF) >> 1) * 128`). Returns 1 if all 16 bytes are
+ * zero (= cart hasn't uploaded any data here yet). */
+int pcec_debug_vram_zero(uint32_t byte_off, uint8_t *out16)
+{
+    if (!VRAM) return 1;
+    int all_zero = 1;
+    for (int i = 0; i < 16; i++) {
+        uint8_t b = VRAM[(byte_off + i) & 0xFFFF];
+        out16[i] = b;
+        if (b) all_zero = 0;
+    }
+    return all_zero;
+}
+
+/* Debug helper: snapshot the IRQ-gating state in one call so the
+ * host runner doesn't need to import hard_pce.h. Called from
+ * pce_host_main.c at exit when PCEC_DEBUG_TRACE is on. */
+void pcec_debug_irq_state(uint8_t *vdc_status, uint8_t *irq_mask,
+                           uint8_t *irq_status, uint16_t *vdc_cr,
+                           uint8_t *reg_p_out)
+{
+    if (vdc_status) *vdc_status = io.vdc_status;
+    if (irq_mask)   *irq_mask   = io.irq_mask;
+    if (irq_status) *irq_status = io.irq_status;
+    if (vdc_cr)     *vdc_cr     = IO_VDC_05_CR.W;
+    if (reg_p_out)  *reg_p_out  = reg_p;
+}
+
+#endif /* PCEC_DEBUG_TRACE */
+
 void pcec_set_buttons(uint16_t mask)
 {
     s_pad_mask = mask;

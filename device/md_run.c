@@ -788,6 +788,11 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         fps_frames++;
         if (!fast_forward) {
             next_frame = delayed_by_us(next_frame, FRAME_US);
+            /* Clamp catch-up — see nes_run.c / gb_run.c rationale. */
+            absolute_time_t now = get_absolute_time();
+            if (absolute_time_diff_us(now, next_frame) < 0) {
+                next_frame = now;
+            }
             sleep_until(next_frame);
         } else {
             next_frame = get_absolute_time();

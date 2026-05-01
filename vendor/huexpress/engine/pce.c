@@ -1481,6 +1481,21 @@ InitPCE(char *name)
 				ROMMapR[i] = ROM + ((i - 0x20) & ROMmask) * 0x2000;
 				break;
 			}
+		} else if (ROM_size == 0x40) {
+			/* THUMBYNES: 512 KB HuCards (Bonk's Revenge / PC Genjin 2)
+			 * mirror banks 0x40..0x7F to the UPPER 256 KB of the cart,
+			 * not back to the lower half. Mednafen's pce_fast/huc.cpp
+			 * (case m_len == 0x80000) and pce/huc.cpp do the same;
+			 * upstream HuExpress falls through to the linear-mirror
+			 * else-branch and so reads garbage when the cart's runtime-
+			 * computed MPR writes (`STA $2200,X`) hit any bank ≥ 0x40.
+			 * Bonk's Revenge has 9 such writes vs 0 in Bonk's Adventure
+			 * (384 KB, ROM_size==0x30), which is why Adventure's hard-
+			 * coded mapper case above worked and Revenge fell off a
+			 * cliff partway into level init. */
+			if      (i < 0x40) ROMMapR[i] = ROM + i           * 0x2000;
+			else if (i < 0x60) ROMMapR[i] = ROM + (i - 0x20)  * 0x2000;
+			else               ROMMapR[i] = ROM + (i - 0x40)  * 0x2000;
 		} else {
 			ROMMapR[i] = ROM + (i & ROMmask) * 0x2000;
 		}

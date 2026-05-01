@@ -247,7 +247,20 @@ int mdc_init(int region, int sample_rate)
     PicoIn.sndOut         = s_sndbuf;
     PicoIn.writeSound     = capture_audio;
     PicoIn.regionOverride = (unsigned short)region;
-    PicoIn.autoRgnOrder   = 0x148;   /* prefer EU, then US, then JP */
+    /* PicoIn.autoRgnOrder: 4-bit nibbles, lowest = highest priority.
+     * Region codes: 1=JP NTSC, 2=JP PAL, 4=US, 8=EU.
+     *
+     * 0x148 = prefer EU (PAL) → US (NTSC) → JP (NTSC). Counter-
+     * intuitive choice but deliberate: MD on Color hardware is CPU-
+     * bound — even with the GenPlus YM2612 + IRAM-relocated update
+     * loop + SRAM tl_tab, we top out around 56 fps with adaptive
+     * frame-skip nearly saturated. NTSC's 60 Hz frame target leaves
+     * us at ~93 % of intended speed (music plays "too deep" because
+     * the emulator can't keep up with NTSC pacing). PAL's 50 Hz
+     * target is achievable in real time, so the cart runs at the
+     * correct PAL-hardware tempo — what European Genesis owners are
+     * calibrated to. NTSC-only carts still get NTSC selected. */
+    PicoIn.autoRgnOrder   = 0x148;
 
 #ifdef MD_IRAM_DYNAMIC
     /* Copy hot Cz80_Exec bytes from flash pool into heap-allocated

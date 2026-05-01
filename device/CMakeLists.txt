@@ -230,22 +230,57 @@ list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/draw2\\.c$")
 # PsndDoYM2413 in thumby_platform.c.
 list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2413\\.c$")
 
+# YM2612 implementation selection. Same switch as the host build:
+# default = PicoDrive's stock YM2612 (small, fast). When ON, swap in
+# Genesis Plus GX's YM2612 + the PicoDrive-API shim. ThumbyOne can
+# propagate this through THUMBYNES_YM2612_GENPLUS so the parent build
+# controls which FM core ships in the firmware.
+option(THUMBYNES_YM2612_GENPLUS
+    "Use Genesis Plus GX YM2612 (vendored separately) instead of PicoDrive's"
+    OFF)
+if(THUMBYNES_YM2612_GENPLUS)
+    list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2612\\.c$")
+else()
+    list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2612_genplus\\.c$")
+    list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2612_shim\\.c$")
+endif()
+
 # Generate YM2612 log tables (213 KB) at build time — linked as
 # const flash so the MD core doesn't need 220 KB of heap at init.
-set(MD_YM_TAB_C   ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_data.c)
-set(MD_YM_TAB_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_gen)
-add_custom_command(
-    OUTPUT  ${MD_YM_TAB_GEN}
-    COMMAND cc -O2 -o ${MD_YM_TAB_GEN} ${NES_ROOT}/tools/gen_md_ym2612_tab.c -lm
-    DEPENDS ${NES_ROOT}/tools/gen_md_ym2612_tab.c
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT  ${MD_YM_TAB_C}
-    COMMAND ${MD_YM_TAB_GEN} ${MD_YM_TAB_C}
-    DEPENDS ${MD_YM_TAB_GEN}
-    VERBATIM
-)
+# Two flavours: PicoDrive's tables (gen_md_ym2612_tab.c) and Genesis
+# Plus GX's tables (gen_md_genplus_tab.c). Only the active one is
+# linked because the inactive ym2612*.c is filtered above.
+if(THUMBYNES_YM2612_GENPLUS)
+    set(MD_YM_TAB_C   ${CMAKE_CURRENT_BINARY_DIR}/md_genplus_tab_data.c)
+    set(MD_YM_TAB_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_genplus_tab_gen)
+    add_custom_command(
+        OUTPUT  ${MD_YM_TAB_GEN}
+        COMMAND cc -O2 -o ${MD_YM_TAB_GEN} ${NES_ROOT}/tools/gen_md_genplus_tab.c -lm
+        DEPENDS ${NES_ROOT}/tools/gen_md_genplus_tab.c
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${MD_YM_TAB_C}
+        COMMAND ${MD_YM_TAB_GEN} ${MD_YM_TAB_C}
+        DEPENDS ${MD_YM_TAB_GEN}
+        VERBATIM
+    )
+else()
+    set(MD_YM_TAB_C   ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_data.c)
+    set(MD_YM_TAB_GEN ${CMAKE_CURRENT_BINARY_DIR}/md_ym2612_tab_gen)
+    add_custom_command(
+        OUTPUT  ${MD_YM_TAB_GEN}
+        COMMAND cc -O2 -o ${MD_YM_TAB_GEN} ${NES_ROOT}/tools/gen_md_ym2612_tab.c -lm
+        DEPENDS ${NES_ROOT}/tools/gen_md_ym2612_tab.c
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT  ${MD_YM_TAB_C}
+        COMMAND ${MD_YM_TAB_GEN} ${MD_YM_TAB_C}
+        DEPENDS ${MD_YM_TAB_GEN}
+        VERBATIM
+    )
+endif()
 
 # Same pattern for cz80's 256 KB of SBC/ADC/SUB/ADD flag tables.
 set(MD_CZ80_SZHVC_C   ${CMAKE_CURRENT_BINARY_DIR}/md_cz80_szhvc_data.c)
@@ -340,6 +375,9 @@ target_compile_definitions(picodrive PUBLIC
     z80_unpack=pd_z80_unpack
     z80_debug=pd_z80_debug
 )
+if(THUMBYNES_YM2612_GENPLUS)
+    target_compile_definitions(picodrive PUBLIC THUMBYNES_YM2612_GENPLUS=1)
+endif()
 target_compile_options(picodrive PRIVATE
     -O3
     # pico-sdk gcc targets M33 with 16-byte function alignment, but
@@ -589,6 +627,13 @@ pico_enable_stdio_uart(nesrun_device 0)
 
 if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
     target_link_options(nesrun_device PRIVATE -Wl,--wrap=Cz80_Exec)
+    # Tried also wrapping YMGP_Update to run GenPlus YM2612's hot
+    # update loop from the .md_iram_pool heap copy. Pool grew from
+    # 17 KB to 27 KB (the loop expands with -O3 INLINE folding) and
+    # the heap copy with it — the lobby's menu allocation then ran
+    # out of SRAM. Reverted; GenPlus runs from XIP-cached flash and
+    # the cache-miss saving on tl_tab (in SRAM via heap copy in
+    # init_tables) is enough on its own.
 endif()
 # md_memmap.ld carries the .md_iram_pool section that the dynamic-
 # IRAM scheme for PicoDrive's Cz80_Exec collects into. PCE runs from

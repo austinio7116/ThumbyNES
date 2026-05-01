@@ -145,8 +145,23 @@
                  * (Final Soldier observed) writes past our 64 KB VRAM
                  * allocation, smashes adjacent malloc chunks, and
                  * leaves the heap free-list corrupted on PCE exit. */
-                VRAM[(IO_VDC_00_MAWR.W * 2 + 0) & (VRAMSIZE - 1)] = io.vdc_ratch;
-                VRAM[(IO_VDC_00_MAWR.W * 2 + 1) & (VRAMSIZE - 1)] = V;
+                {
+                    uint32_t off = (IO_VDC_00_MAWR.W * 2) & (VRAMSIZE - 1);
+                    VRAM[off + 0] = io.vdc_ratch;
+                    VRAM[off + 1] = V;
+#ifdef PCEC_DEBUG_TRACE
+                    extern uint32_t pcec_vwr_writes_total;
+                    extern uint32_t pcec_vwr_writes_target;
+                    extern uint32_t pcec_vwr_target_zero;
+                    extern uint32_t pcec_vwr_target_nonzero;
+                    pcec_vwr_writes_total++;
+                    if (off >= 0x6800 && off < 0x7400) {
+                        pcec_vwr_writes_target++;
+                        if ((io.vdc_ratch | V) == 0) pcec_vwr_target_zero++;
+                        else                        pcec_vwr_target_nonzero++;
+                    }
+#endif
+                }
 
 #ifndef PCE_SCANLINE_RENDER
                 /* Dirty-mark the tile / sprite decode caches. Scanline
@@ -203,10 +218,16 @@
                      * up to 0x20000 entries and would write past the
                      * 64 KB VRAM allocation without this gate. */
                     for (i = 0; i < (IO_VDC_12_LENR.W + 1) * 2; i++) {
-                        VRAM[dest & (VRAMSIZE - 1)] =
-                            VRAM[source & (VRAMSIZE - 1)];
+                        uint32_t doff = dest & (VRAMSIZE - 1);
+                        VRAM[doff] = VRAM[source & (VRAMSIZE - 1)];
                         dest += destcount;
                         source += sourcecount;
+#ifdef PCEC_DEBUG_TRACE
+                        extern uint32_t pcec_dma_writes_total;
+                        extern uint32_t pcec_dma_writes_target;
+                        pcec_dma_writes_total++;
+                        if (doff >= 0x6800 && doff < 0x7400) pcec_dma_writes_target++;
+#endif
                     }
 
                     /*

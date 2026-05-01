@@ -110,6 +110,25 @@ list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/debugCPU\\.c$")
 list(FILTER PICODRIVE_PICO_SRC EXCLUDE REGEX "pico/pico_cmn\\.c$")
 list(FILTER PICODRIVE_SVP_SRC  EXCLUDE REGEX "carthw/svp/compiler\\.c$")
 
+# ----------------------------------------------------------------------
+# YM2612 implementation selection. The default is PicoDrive's stock
+# YM2612 (small, fast, MAME-derived). THUMBYNES_YM2612_GENPLUS=ON
+# replaces it with the Genesis Plus GX YM2612 (larger, but matches the
+# audio quality users get from RetroArch's Genesis Plus GX core).
+# Only one of the two is compiled at any time; the unused source is
+# filtered out below.
+# ----------------------------------------------------------------------
+option(THUMBYNES_YM2612_GENPLUS
+    "Use Genesis Plus GX YM2612 (vendored separately) instead of PicoDrive's"
+    OFF)
+
+if(THUMBYNES_YM2612_GENPLUS)
+    list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2612\\.c$")
+else()
+    list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2612_genplus\\.c$")
+    list(FILTER PICODRIVE_SOUND_SRC EXCLUDE REGEX "sound/ym2612_shim\\.c$")
+endif()
+
 add_library(picodrive STATIC
     ${PICODRIVE_PICO_SRC}
     ${PICODRIVE_SOUND_SRC}
@@ -142,6 +161,9 @@ target_compile_definitions(picodrive PUBLIC
                       # Patches are all gated on FAME_BIG_ENDIAN so
                       # unflipping here restores upstream behavior.
 )
+if(THUMBYNES_YM2612_GENPLUS)
+    target_compile_definitions(picodrive PUBLIC THUMBYNES_YM2612_GENPLUS=1)
+endif()
 # TEMPORARY — diagnosing device black-screen bug. Enables the same
 # flash-resident tables the device uses (FAME JumpTable, YM2612 log
 # tables, CZ80 SZHVC flag tables). Revert once we know whether one

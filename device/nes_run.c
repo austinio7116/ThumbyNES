@@ -806,6 +806,17 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         fps_frames++;
         if (!fast_forward) {
             next_frame = delayed_by_us(next_frame, FRAME_US);
+            /* Clamp catch-up. If the frame body ran over budget and
+             * `next_frame` is now in the past, sleep_until returns
+             * immediately and the runner would turbo-loop to make up
+             * the deficit — producing audio samples faster than the
+             * PWM ring drains them, which crackles. Re-anchor to
+             * `now` so we stay at strict refresh rate with no audio
+             * sample-rate overshoot. */
+            absolute_time_t now = get_absolute_time();
+            if (absolute_time_diff_us(now, next_frame) < 0) {
+                next_frame = now;
+            }
             sleep_until(next_frame);
         } else {
             /* Reset the pacing anchor so when the user toggles back

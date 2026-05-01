@@ -287,6 +287,10 @@ static void PCE_HOT(render_bg_line)(int pce_y, int screen_w)
 
 /* ---- Sprite scan + per-line draw ---------------------------------- */
 
+#ifdef PCEC_SPRITE_SCAN_TRACE
+extern uint32_t pcec_scan_picked[256];   /* sprites picked, indexed by pce_y */
+extern uint64_t pcec_scan_frame;
+#endif
 static void PCE_HOT(scan_sprites)(int pce_y, int screen_w)
 {
     s_spr_n = 0;
@@ -309,6 +313,19 @@ static void PCE_HOT(scan_sprites)(int pce_y, int screen_w)
         int w   = (cgx + 1) * 16;
         int x   = (int)(s[n*4 + 1] & 0x3FF) - 32;
         if (x + w <= 0 || x >= screen_w) continue;
+#ifdef PCEC_SPRITE_SCAN_TRACE
+        /* Per-line picked-sprite log for diagnosis. Emits one line per
+         * accepted sprite ONLY at the animal-row scanlines we care
+         * about. Limited to once per ~120 frames so output isn't a
+         * flood. */
+        if ((pce_y == 192 || pce_y == 200 || pce_y == 210)
+            && (pcec_scan_frame % 120) == 60) {
+            fprintf(stderr, "  scan@frame%llu y=%d picked n=%d "
+                            "y(raw)=%d x=%d patt=%04X size=%dx%d\n",
+                    (unsigned long long)pcec_scan_frame, pce_y, n,
+                    y, x, (unsigned)s[n*4 + 2], (cgx+1)*16, (cgy+1)*16);
+        }
+#endif
 
         spr_t *o = &s_spr[s_spr_n++];
         o->x       = (int16_t)x;
@@ -393,8 +410,15 @@ static void PCE_HOT(draw_sprites_line)(int pce_y, int screen_w, int draw_front)
             for (int c = 0; c < 16; c++) {
                 int dx = dx0 + (hflip ? (15 - c) : c);
                 if (dx < 0 || dx >= screen_w) continue;
+#ifdef PCEC_SPRITE_BLOCK_TEST
+                /* TEMP: draw every sprite as a solid block — palette-bank
+                 * index 1 (a guaranteed non-zero) so we see WHERE sprites
+                 * are placed regardless of pixel decode. */
+                s_line[dx] = spr_pal[1];
+#else
                 uint8_t p = sprite_pixel(cell, c, row);
                 if (p) s_line[dx] = spr_pal[p];
+#endif
             }
         }
     }
@@ -621,6 +645,13 @@ void PCE_HOT(pce_render_scanline)(int pce_y)
     memset(s_line, bg, (size_t)screen_w);
 
     scan_sprites(pce_y, screen_w);
+#ifdef PCEC_SPRITE_SCAN_TRACE
+    if ((pce_y == 192 || pce_y == 200 || pce_y == 210)
+        && (pcec_scan_frame % 120) == 60 && s_spr_n == 0) {
+        fprintf(stderr, "  scan@frame%llu y=%d: NO sprites picked\n",
+                (unsigned long long)pcec_scan_frame, pce_y);
+    }
+#endif
     if (s_spr_n) draw_sprites_line(pce_y, screen_w, /*draw_front=*/0);
     render_bg_line(pce_y, screen_w);
     if (s_spr_n) draw_sprites_line(pce_y, screen_w, /*draw_front=*/1);

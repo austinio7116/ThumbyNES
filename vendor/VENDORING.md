@@ -422,6 +422,91 @@ above because they shape the runtime behaviour of the emulator:
     re-zeros BSS at chain-image boot, masking the bug — which is
     why fresh-boot launches always work.
 
+### Optional: Genesis Plus GX YM2612 (build-time switch)
+
+PicoDrive's stock YM2612 is MAME-derived and known to produce
+audibly more synthesis noise than real Mega Drive hardware. We
+vendor a second YM2612 implementation from **Genesis Plus GX**
+(the YM2612 RetroArch's `genesis_plus_gx` core uses) and provide
+a CMake option to swap it in.
+
+- Upstream: https://github.com/ekeeke/Genesis-Plus-GX
+- Commit pinned: `c7ecd07f0a08db1cdd6871d788476bfac55be638`
+- License: dual-licensed; non-commercial redistribution permitted
+  (see `Genesis-Plus-GX/LICENSE.txt`). Different terms from the
+  rest of PicoDrive's LGPLv2 — kept opt-in for that reason.
+- Files vendored:
+  - `pico/sound/ym2612_genplus.c` — verbatim core from GenPlus
+    with `shared.h` removed in favour of inline minimal type
+    typedefs, `YM2612*()` public functions renamed `YMGP_*()`
+    to avoid symbol collision with PicoDrive's `ym2612.c`, and
+    `YM2612{Save,Load}Context` dropped (state save flows through
+    the shim instead).
+  - `pico/sound/ym2612_genplus.h` — public header for the
+    renamed `YMGP_*()` API.
+  - `pico/sound/ym2612_shim.c` — translates the PicoDrive API
+    that the rest of the engine expects (`YM2612Init_`,
+    `YM2612Write_`, `YM2612UpdateOne_`, ..., plus the global
+    `extern YM2612 ym2612` struct that `pico/memory.c` reads
+    and writes directly) onto GenPlus's
+    `YMGP_Init/Write/Update/...`. Mirrors `dacen` / `dacout` /
+    `OPN.ST.mode` from the externally-visible struct into
+    GenPlus's internal state on every update tick. Timer status
+    accounting stays with `pico/memory.c` (GenPlus's
+    `INTERNAL_TIMER_A/B` are inert because we never propagate
+    the load bits into GenPlus's mode register).
+
+Build switch:
+
+```
+cmake -DTHUMBYNES_YM2612_GENPLUS=ON ..   # opt in
+cmake -DTHUMBYNES_YM2612_GENPLUS=OFF ..  # default (PicoDrive stock)
+```
+
+When ON, `pico/sound/ym2612.c` is filtered out of the picodrive
+library and the shim + GenPlus pair is compiled in its place.
+When OFF, the shim and GenPlus source are filtered out instead;
+the build is bit-for-bit identical to before this option existed.
+
+Validated host-side on Sonic 2 (see `mdhost --MDHOST_WAV` capture
+flow). Sox `stat` on a 10s music excerpt:
+
+| Build           | Max delta | RMS amplitude | Max-delta / RMS |
+|-----------------|-----------|---------------|-----------------|
+| PicoDrive stock | 0.178     | 0.0365        | 4.88            |
+| GenPlus YM2612  | 0.260     | 0.0690        | 3.77            |
+
+Lower max-delta/RMS is closer to the real-hardware reference
+(Genesis Model 1 capture: 1.73). GenPlus is louder per-sample
+(volume adjustment 2.0x vs 3.4x for headroom) which is why the
+absolute max-delta rises while the noise ratio improves. The
+user judges final quality audibly.
+
+Known issues / TODOs:
+
+  - Save state format mismatch. PicoDrive's
+    `YM2612PicoStateSave3` / `Load3` snapshot the FM internal
+    state. The shim only saves the externally-visible `REGS[]`
+    + address latch + `dacen`; on restore, `pico/memory.c`'s
+    `ym2612_unpack_state_old` replays `REGS[]` writes which
+    rebuilds the FM state, but operator phase / EG counter
+    continuity is lost across saves. Adequate for now — mdhost
+    doesn't load saves, and on-device save support for MD isn't
+    finalised.
+  - Device build (`-DTHUMBYNES_YM2612_GENPLUS=ON` on rp2350) is
+    untested. GenPlus does an `init_tables()` malloc-equivalent
+    pattern on `YMGP_Init`, but its tables are static rather
+    than heap-allocated like PicoDrive's, so it doesn't slot
+    into the existing `YM2612_TABLES_IN_FLASH` flash-resident
+    setup. A device port would either need to add equivalent
+    `__in_flash` qualifiers to GenPlus's `tl_tab` /
+    `lfo_pm_table` / etc., or accept the SRAM cost.
+  - `YM2612UpdateOne_` always returns 1 (FM was active). The
+    PicoDrive resampler skips a FIR pass when the underlying
+    update reports 0 channels active; with GenPlus we have no
+    cheap way to detect that, so we conservatively always run
+    the resampler. Cost is small (a few µs/frame on host).
+
 ## nofrendo/
 
 NES emulation core. Vendored from the **retro-go** project's `retro-core/components/nofrendo` directory.

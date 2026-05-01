@@ -52,6 +52,16 @@ exe_go(void)
       ODROID_DEBUG_PERF_START2(debug_perf_part1)
       while (cycles<=455)
       {
+#ifdef PCEC_DEBUG_TRACE
+        extern uint32_t pcec_pc_hist[65536];
+        extern uint8_t  pcec_mpr_at_pc[65536];
+        extern uint16_t pcec_pc_ring[65536];   /* ring buffer of last 64K PCs */
+        extern uint32_t pcec_pc_ring_idx;
+        pcec_pc_hist[reg_pc & 0xFFFF]++;
+        pcec_mpr_at_pc[reg_pc & 0xFFFF] = mmr[(reg_pc >> 13) & 7];
+        pcec_pc_ring[pcec_pc_ring_idx & 0xFFFF] = (uint16_t)(reg_pc & 0xFFFF);
+        pcec_pc_ring_idx++;
+#endif
 #ifdef USE_INSTR_SWITCH
         #include "h6280_instr_switch.h"
 #else
