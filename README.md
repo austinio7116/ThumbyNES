@@ -1221,17 +1221,24 @@ ThumbyNES/
 | [smsplus](https://github.com/ducalex/retro-go) SMS / GG core | GPLv2 | retro-go @ commit `4ced120`, with the LUT decomposition + state-bridge patches |
 | [Peanut-GB](https://github.com/deltabeard/Peanut-GB) DMG + CGB core | MIT | [fhoedemakers fork](https://github.com/fhoedemakers/Peanut-GB) with `PEANUT_FULL_GBC_SUPPORT`, vendored verbatim |
 | [minigb_apu](https://github.com/baines/MiniGBS) Game Boy APU | MIT | via TinyCircuits Tiny Game Engine `gbemu/`, no patches |
-| [PicoDrive](https://github.com/notaz/picodrive) MD / Genesis core | LGPLv2 | notaz master @ `dd762b8`, heavily patched for Cortex-M33 + XIP flash + heap-allocated statics + IRAM dispatch loop. See `vendor/VENDORING.md` §picodrive for 18 individual patches. |
+| [PicoDrive](https://github.com/notaz/picodrive) MD / Genesis core | LGPLv2 | notaz master @ `dd762b8`, heavily patched for Cortex-M33 + XIP flash + heap-allocated statics + IRAM dispatch loop. See `vendor/VENDORING.md` §picodrive. |
+| [Genesis Plus GX](https://github.com/ekeeke/Genesis-Plus-GX) YM2612 *(default in 1.12)* | non-commercial (see `Genesis-Plus-GX/LICENSE.txt`) | Eke-Eke @ `c7ecd07`, three files vendored under `picodrive/pico/sound/`: `ym2612_genplus.c` (verbatim core, `YMGP_*` rename), `ym2612_genplus.h`, `ym2612_shim.c` (translates PicoDrive's `YM2612_*` API onto GenPlus). Build-time switch via `THUMBYNES_YM2612_GENPLUS`. See `vendor/VENDORING.md` §picodrive sub-section. |
+| [HuExpress](https://github.com/cgsoft/huexpress) PCE / TG-16 (HuC6280 + HuC6260) core | GPLv2 (Hu-Go! lineage) | cgsoft master, HuCard-only trim (CD / Arcade Card / netplay / SDL frontend stripped), per-scanline compositor replacing `XBUF` / `SPM` / `VRAM2` / `VRAMS` (568 KB → on-the-fly), heap-relocated statics, IRAM h6280 dispatcher. See `vendor/VENDORING.md` §huexpress. |
 | [FatFs](http://elm-chan.org/fsw/ff/) R0.15 | BSD-1-clause (ChaN) | from ThumbyP8 |
 | [Pemsa](https://github.com/egordorichev/pemsa) 3×5 font glyphs | MIT | transcribed |
 
-ThumbyNES is itself **GPLv2** to remain compatible with the nofrendo
-+ smsplus cores. All three major vendored cores (nofrendo, smsplus,
-picodrive) live under `vendor/` with patches recorded in
-`vendor/VENDORING.md`. The peanut_gb + minigb_apu sources are vendored
-verbatim from the engine's GBEmu user-module (which itself wraps the
-upstream MIT projects). PicoDrive (LGPLv2) combines with our GPLv2
-main binary under the LGPL's static-linking carve-out.
+ThumbyNES is itself **GPLv2** to remain compatible with the nofrendo,
+smsplus, and huexpress cores. The four major vendored cores
+(nofrendo, smsplus, picodrive, huexpress) live under `vendor/` with
+patches recorded in `vendor/VENDORING.md`. The peanut_gb + minigb_apu
+sources are vendored verbatim from the engine's GBEmu user-module
+(which itself wraps the upstream MIT projects). PicoDrive (LGPLv2)
+combines with our GPLv2 main binary under the LGPL's static-linking
+carve-out. Genesis Plus GX YM2612 (Eke-Eke) is non-commercial-license
+and kept opt-in via the `THUMBYNES_YM2612_GENPLUS` build switch — when
+the switch is OFF the GenPlus sources are filtered out of the build
+entirely, so license-restricted distributions can compile without
+them.
 
 The MD core can be disabled at build time with `-DTHUMBYNES_WITH_MD=OFF`
 — nesrun_device drops to 643 KB (fits the backward-compatible 1 MB
