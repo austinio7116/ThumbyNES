@@ -17,6 +17,7 @@
 #include "nes_thumb.h"
 #include "nes_menu.h"
 #include "nes_flash_disk.h"
+#include "nes_crc32.h"
 
 #ifdef THUMBYONE_SLOT_MODE
 #  include "thumbyone_settings.h"
@@ -67,16 +68,47 @@ static void battery_load(const char *rom_name) {
     f_close(&f);
 }
 
+/* CRC of the battery RAM as of the last successful save (or, on
+ * runner entry, the just-loaded contents — see battery_save_init).
+ * Used to skip the f_write when nothing's changed since the last
+ * save: most carts don't touch their SRAM during ordinary gameplay
+ * and an unconditional 30 s autosave was visibly cutting the audio
+ * for the flash erase + program window. See nes_crc32.h. */
+static uint32_t s_last_save_crc;
+static int      s_last_save_valid;
+
+/* Call after battery_load() so the first autosave only fires if the
+ * cart has actually modified SRAM since load. If the cart has no
+ * battery RAM, leaves the gate disarmed (won't matter — battery_save
+ * early-returns on null RAM anyway). */
+static void battery_save_init(void) {
+    uint8_t *ram = mdc_battery_ram();
+    size_t   sz  = mdc_battery_size();
+    if (!ram || sz == 0) {
+        s_last_save_valid = 0;
+        return;
+    }
+    s_last_save_crc   = nes_crc32(ram, sz);
+    s_last_save_valid = 1;
+}
+
 static void battery_save(const char *rom_name) {
     uint8_t *ram = mdc_battery_ram();
     size_t   sz  = mdc_battery_size();
     if (!ram || sz == 0) return;
+
+    uint32_t crc = nes_crc32(ram, sz);
+    if (s_last_save_valid && crc == s_last_save_crc) return;
+
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
     UINT bw = 0;
-    f_write(&f, ram, (UINT)sz, &bw);
+    if (f_write(&f, ram, (UINT)sz, &bw) == FR_OK && bw == (UINT)sz) {
+        s_last_save_crc   = crc;
+        s_last_save_valid = 1;
+    }
     f_close(&f);
 }
 
@@ -278,6 +310,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     if (mdc_init(MDC_REGION_AUTO, sample_rate) != 0) return -2;
     if (mdc_load_rom_xip(rom_const, sz) != 0)        return -3;
     battery_load(name);
+    battery_save_init();
 
     mdc_set_blend(blend ? 1 : 0);
     volume = nes_picker_global_volume();
@@ -286,7 +319,14 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
+    /* 1 s autosave poll. battery_save() runs a CRC32 of the cart's
+     * battery RAM and skips the f_write when nothing's changed since
+     * the last write — typical CRC cost on a 32 KB Pokemon save is
+     * ~1 ms, so polling every 1 s is ~0.1% CPU even for big carts.
+     * Power-off-after-save tolerance is now ~1 s instead of ~30 s
+     * without changing flash wear (the gate means we still only
+     * write when SRAM has actually been modified). */
+    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 

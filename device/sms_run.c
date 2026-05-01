@@ -20,6 +20,7 @@
 #include "nes_thumb.h"
 #include "nes_menu.h"
 #include "nes_flash_disk.h"
+#include "nes_crc32.h"
 
 #ifdef THUMBYONE_SLOT_MODE
 #  include "thumbyone_settings.h"
@@ -70,16 +71,38 @@ static void battery_load(const char *rom_name) {
     f_close(&f);
 }
 
+/* See md_run.c / nes_crc32.h for rationale. */
+static uint32_t s_last_save_crc;
+static int      s_last_save_valid;
+
+static void battery_save_init(void) {
+    uint8_t *ram = smsc_battery_ram();
+    size_t   sz  = smsc_battery_size();
+    if (!ram || sz == 0) {
+        s_last_save_valid = 0;
+        return;
+    }
+    s_last_save_crc   = nes_crc32(ram, sz);
+    s_last_save_valid = 1;
+}
+
 static void battery_save(const char *rom_name) {
     uint8_t *ram = smsc_battery_ram();
     size_t   sz  = smsc_battery_size();
     if (!ram || sz == 0) return;
+
+    uint32_t crc = nes_crc32(ram, sz);
+    if (s_last_save_valid && crc == s_last_save_crc) return;
+
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
     UINT bw = 0;
-    f_write(&f, ram, (UINT)sz, &bw);
+    if (f_write(&f, ram, (UINT)sz, &bw) == FR_OK && bw == (UINT)sz) {
+        s_last_save_crc   = crc;
+        s_last_save_valid = 1;
+    }
     f_close(&f);
 }
 
@@ -434,6 +457,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     if (smsc_init(SMSC_SYS_AUTO, 22050) != 0) { free(rom_alloc); return -2; }
     if (smsc_load_rom(rom_const, sz) != 0)    { free(rom_alloc); return -3; }
     battery_load(name);
+    battery_save_init();
 
     bool gg = smsc_is_gg();
     int vx, vy, vw, vh;
@@ -453,7 +477,8 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
+    /* 1 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 

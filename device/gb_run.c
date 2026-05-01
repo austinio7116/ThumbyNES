@@ -28,6 +28,7 @@
 #include "nes_buttons.h"
 #include "nes_font.h"
 #include "nes_thumb.h"
+#include "nes_crc32.h"
 #include "nes_menu.h"
 #include "nes_flash_disk.h"
 
@@ -210,10 +211,28 @@ static int rtc_sidecar_load(const char *rom_name,
  * save (Pokemon's UI confirms), but the .sav file ended up 0
  * bytes; reload showed only New Game with no obvious cause. Now
  * the caller can show an OSD warning. */
+/* See md_run.c / nes_crc32.h for rationale. */
+static uint32_t s_last_save_crc;
+static int      s_last_save_valid;
+
+static void battery_save_init(void) {
+    uint8_t *ram = gbc_battery_ram();
+    size_t   sz  = gbc_battery_size();
+    if (!ram || sz == 0) {
+        s_last_save_valid = 0;
+        return;
+    }
+    s_last_save_crc   = nes_crc32(ram, sz);
+    s_last_save_valid = 1;
+}
+
 static int battery_save(const char *rom_name) {
     uint8_t *ram = gbc_battery_ram();
     size_t   sz  = gbc_battery_size();
     if (!ram || sz == 0) return 0;   /* no save needed — not an error */
+
+    uint32_t crc = nes_crc32(ram, sz);
+    if (s_last_save_valid && crc == s_last_save_crc) return 0;
 
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
@@ -256,6 +275,8 @@ static int battery_save(const char *rom_name) {
         (void)rtc_sidecar_save(rom_name, crtc, rtc_wall_unix_secs());
     }
 #endif
+    s_last_save_crc   = crc;
+    s_last_save_valid = 1;
     return 0;
 }
 
@@ -607,6 +628,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         return -13;
     }
     battery_load(name);
+    battery_save_init();
 
 #ifdef THUMBYONE_SLOT_MODE
     /* MBC3 cart RTC seed. Pokemon Crystal/Gold/Silver carry a real-
@@ -683,7 +705,8 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
+    /* 1 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 

@@ -19,6 +19,7 @@
 #include "nes_lcd_gc9107.h"
 #include "nes_audio_pwm.h"
 #include "nes_buttons.h"
+#include "nes_crc32.h"
 
 #include <stddef.h>   /* offsetof */
 #include <stdio.h>
@@ -81,10 +82,31 @@ static void battery_load(const char *rom_name) {
     f_close(&f);
 }
 
+/* CRC of cart battery RAM as of the last successful save (or, on
+ * runner entry, the just-loaded contents — see battery_save_init).
+ * Skips the f_write when nothing's changed; see md_run.c / nes_crc32.h
+ * for rationale. */
+static uint32_t s_last_save_crc;
+static int      s_last_save_valid;
+
+static void battery_save_init(void) {
+    uint8_t *ram = nesc_battery_ram();
+    size_t   sz  = nesc_battery_size();
+    if (!ram || sz == 0) {
+        s_last_save_valid = 0;
+        return;
+    }
+    s_last_save_crc   = nes_crc32(ram, sz);
+    s_last_save_valid = 1;
+}
+
 static void battery_save(const char *rom_name) {
     uint8_t *ram = nesc_battery_ram();
     size_t   sz  = nesc_battery_size();
     if (!ram || sz == 0) return;
+
+    uint32_t crc = nes_crc32(ram, sz);
+    if (s_last_save_valid && crc == s_last_save_crc) return;
 
     char path[NES_PICKER_PATH_MAX];
     make_sidecar_path(path, sizeof(path), rom_name, ".sav");
@@ -92,7 +114,10 @@ static void battery_save(const char *rom_name) {
     FIL f;
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return;
     UINT bw = 0;
-    f_write(&f, ram, (UINT)sz, &bw);
+    if (f_write(&f, ram, (UINT)sz, &bw) == FR_OK && bw == (UINT)sz) {
+        s_last_save_crc   = crc;
+        s_last_save_valid = 1;
+    }
     f_close(&f);
 }
 
@@ -344,6 +369,7 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     /* Restore the battery save (if any) before the cart starts running. */
     battery_load(name);
+    battery_save_init();
 
     /* Defaults: FIT with BLEND on, fast-forward off, FPS hidden,
      * COMPOSITE palette, comfortable mid-volume. Region defaults
@@ -368,10 +394,13 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    /* Auto-save battery: triggered every AUTOSAVE_INTERVAL of wall
-     * time when there have been gameplay frames since the last save.
-     * Cheap insurance against power loss. */
-    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
+    /* Auto-save battery: poll every AUTOSAVE_INTERVAL of wall time;
+     * battery_save() CRC32s the cart's SRAM and skips the f_write
+     * when nothing's changed since the last write. 1 s poll keeps
+     * power-off-after-in-game-save tolerance under a second without
+     * adding flash wear (writes only happen when SRAM actually
+     * changed). See nes_crc32.h. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 
