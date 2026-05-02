@@ -254,10 +254,10 @@ int mdc_init(int region, int sample_rate)
      * priority handling on some carts; the measured savings were
      * negligible. */
     const bool silent = (sample_rate == 0);
-    /* POPT_EN_SNDFILTER: post-mixer EMA low-pass — sndFilterAlpha
-     * controls cutoff. Smooths residual high-frequency hash without
-     * veiling mid-range chiptune detail. Heap-free (single IIR
-     * coefficient + state).
+    /* Tried POPT_EN_SNDFILTER (post-mixer EMA low-pass) at
+     * sndFilterAlpha = 0xC000. Audibly attenuates the very top end
+     * but also takes a small bite out of perceived loudness on the
+     * 9-bit PWM output where every dB matters; reverted in 1.12.1.
      *
      * Tried POPT_EN_FM_FILTER (polyphase FIR resampler running
      * GenPlus at native ~53 kHz then decimating to sndRate). Heap
@@ -266,16 +266,9 @@ int mdc_init(int region, int sample_rate)
      * and the shim's tmpbuf grows to fit native-rate sample bursts
      * (32 KB on first FM call). Pushed total heap past what's
      * available with cart ROM + GB battery + Cz80 IRAM pool already
-     * resident — MD then crashed on boot from a failed malloc.
-     * Reverted; SNDFILTER on its own gives most of the audible win. */
+     * resident — MD crashed on boot from a failed malloc. Reverted. */
     PicoIn.opt = POPT_ACC_SPRITES
-               | (silent ? 0 : POPT_EN_PSG | POPT_EN_FM | POPT_EN_Z80
-                                 | POPT_EN_SNDFILTER);
-    /* sndFilterAlpha is a Q16 fixed-point coefficient — out = a*in
-     * + (1-a)*prev. 0xC000 (~0.75) is a gentle low-pass that takes
-     * a few percent off the very top end (above ~6 kHz at 22050)
-     * without veiling mid-range detail. */
-    PicoIn.sndFilterAlpha = 0xC000;
+               | (silent ? 0 : POPT_EN_PSG | POPT_EN_FM | POPT_EN_Z80);
     /* PsndRerate uses PicoIn.sndRate to size its resampler tables.
      * Keep it at a sane value even in silent mode — the POPT flags
      * above prevent Z80/FM/PSG synthesis from actually running. */
