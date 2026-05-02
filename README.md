@@ -451,18 +451,55 @@ Two persistence layers:
 
 Battery-backed cart RAM is persisted to `<romname>.sav` next to the
 ROM in the FAT root. Loaded on launch, written on exit to picker,
-and **auto-saved every 30 seconds** of gameplay so a flat battery
-never costs you more than half a minute.
+and persisted in three complementary ways during gameplay:
 
-- **NES**: nofrendo's PRG-RAM (8 KB typical)
-- **SMS / GG**: smsplus's `cart.sram` (32 KB)
-- **Game Boy**: peanut_gb's `cart_ram`, sized via `gb_get_save_size_s`
-  per cart (0..32 KB depending on MBC)
-- **PC Engine**: HuExpress's HuCard BRAM (2 KB) for save-capable
-  HuCards. Most HuCards don't have battery backup and skip this
-  sidecar.
+1. **Cart-side save signal (1.12).** Each emulator core watches the
+   cart-hardware register that real silicon flips at the end of an
+   in-game save sequence — Pokemon writing `0x00` to the MBC RAM-
+   enable register, Sonic 3 flipping the MD SRAM-control register
+   back to ROM mapping, Final Fantasy on MMC1 toggling the WRAM-
+   disable bit, etc. The moment that register transition fires, the
+   runner flushes the cart's RAM to disk. No timer, no polling, no
+   debounce, no risk of catching a partial / pre-checksum save.
+2. **NES debounce-on-write fallback (1.12).** Early MMC1 boards
+   (Zelda 1, original Final Fantasy printings) don't toggle the
+   WRAM-disable register at all, so signal #1 never fires for them.
+   nofrendo's `mem_putbyte` flags any `$6000-$7FFF` write to the
+   front-end; the runner debounces 500 ms of write quiescence into
+   a save flush. Catches every NES cart regardless of mapper
+   generation.
+3. **30 s safety-net poll, CRC-gated.** As a final backstop, every
+   30 s the runner CRC32-hashes the cart's RAM and only writes if
+   the contents have changed since the last save. Idle gameplay
+   produces zero flash activity (no audio stutter from flash-erase
+   blocking the audio IRQ); a missed signal-#1 / signal-#2 event
+   still ends up on disk inside half a minute.
 
-ROMs without a battery flag in their header are unaffected.
+| Core | Cart-side signal source | Per-cart RAM size |
+|---|---|---|
+| **NES** (nofrendo) | MMC1 register 3 bit 4 (WRAM disable) `0→1`; MMC3 A001 bit 7 (WRAM enable) `1→0`; plus `$6000-$7FFF` write debounce for early-MMC1 boards | PRG-RAM, 8 KB typical |
+| **SMS / GG** (smsplus) | SEGA mapper control register bits 3/4 (SRAM-mapped) → `0` | `cart.sram`, 32 KB |
+| **GB / GBC** (peanut_gb) | MBC1/2/3/5 RAM-enable register `0x0A → not-0x0A` | `cart_ram`, 0..32 KB per cart |
+| **MD** (PicoDrive) | SRAM control register `0xA130F0/F1` MAPPED bit `1→0` | `Pico.sv.data`, 8 KB to 64 KB |
+| **PCE** (HuExpress) | (no register — runner watches BRAM CRC quiescence over 500 ms instead) | HuCard BRAM, 2 KB |
+
+**Flush after every save.** `battery_save()` calls
+`nes_flash_disk_flush()` immediately after the FatFs write
+completes. The flash-disk layer keeps a 4-block LRU write-back
+cache; without an explicit flush, FatFs's own f_close-flush leaves
+the data sitting in the cache, where a hard power-off loses it
+even though the file appears fine over USB MSC. Was the
+root-cause behind a v1.12-development NES Zelda 1 save bug; fixed
+on every battery_save call site across all five runners.
+
+The iNES battery-flag check is now relaxed (1.12): we expose
+PRG-RAM as save-able regardless of the byte-6 bit-1 flag, since a
+surprising number of widely-circulated NES dumps (Zelda 1
+especially) have that bit cleared even though the original cart
+shipped with battery RAM. The CRC gate inside `battery_save`
+prevents wasted writes for carts that genuinely don't write SRAM
+— their CRC stays at the all-zero post-load state and no .sav
+gets created.
 
 ### Save states
 

@@ -29,12 +29,29 @@ MiniGBS / minigb_apu).
 - License: MIT (both libraries; see file headers)
 - Files vendored: `peanut_gb.h`, `minigb_apu.h`, `minigb_apu.c`,
   `minigb_apu_impl.c` (the .c is a small shim that sets the audio
-  format defines and includes the impl). **Zero patches** — both
-  libraries port cleanly to standalone.
+  format defines and includes the impl). One patch (1.12, see below);
+  minigb_apu is verbatim.
 
 The MicroPython binding glue (`gb_emu_module.c` and the engine-coupled
 `gb_emu_core.c`) was **not** vendored. We write our own thin wrapper
 in `src/gb_core.[ch]` that mirrors the `nes_core` / `sms_core` shape.
+
+### Patches applied
+
+1. **`peanut_gb.h`: cart-side save-complete callback (1.12).** Added
+   a new `gb_cart_ram_disabled` function pointer to `gb_s` and fire
+   it from the MBC1/3/5 + MBC2 RAM-enable register handlers when
+   the register transitions enabled→disabled (cart writes anything
+   other than `0x0A` to the lower nibble of `0x0000-0x1FFF`). On
+   real cart hardware this is the cart's "I'm done writing the
+   save" signal — Pokemon Crystal/Gold/Silver, Zelda DX, and most
+   MBC RPGs flip this bit immediately after writing the final
+   checksum byte. `src/gb_core.c` registers the callback to set a
+   pending flag; the runner (`device/gb_run.c`) consumes it via
+   `gbc_take_save_pending()` and flushes cart RAM to disk. Replaces
+   what was a 30 s polling autosave that risked catching a partial
+   pre-checksum state and that periodically blocked the audio IRQ
+   for the unconditional flash erase + program window.
 
 ## smsplus/
 
@@ -60,6 +77,16 @@ LOG_PRINTF degrade to printf and IRAM_ATTR to nothing.
    `IRAM_ATTR int z80_execute(...)` then resolves to the Pico SDK
    section attribute on device, placing the Z80 dispatch loop in
    `.time_critical.sms` (SRAM) instead of XIP flash.
+
+2. **`sms.c`: cart-side save-complete signal (1.12).** Captured the
+   previous value of `slot.fcr[0]` in `mapper_16k_w` before it gets
+   overwritten, and at the end of `case 0` (the SEGA-mapper control
+   register write) we detect the SRAM-mapped→unmapped transition
+   (bits 3 / 4 — `$8000-$BFFF` and `$C000-$FFFF` SRAM mapping
+   bits — both going from any-set to all-clear). Phantasy Star,
+   Wonder Boy III, Ys etc. flip these bits off immediately after
+   writing the save block. Forwards to `smsc_signal_save_complete()`
+   in our wrapper; runner consumes via `smsc_take_save_pending()`.
 
 ## picodrive/
 
@@ -422,6 +449,19 @@ above because they shape the runtime behaviour of the emulator:
     re-zeros BSS at chain-image boot, masking the bug — which is
     why fresh-boot launches always work.
 
+22. **`pico/pico.h` + `pico/memory.c`: cart-side save-complete signal
+    (1.12).** Added a new `sramDisabled` callback field to
+    `PicoInterface` and fire it from both the 8-bit and 16-bit SRAM
+    access register handlers (`0xA130F0` / `0xA130F1`) on the
+    MAPPED-bit `1→0` transition. Most save-using MD carts (Sonic 3,
+    Phantasy Star IV, Shining Force, RPGs) flip SRAM mapping back
+    to ROM mapping immediately after writing their save block —
+    same pattern as GB MBC RAM-disable. `src/md_core.c` registers
+    a callback that sets a pending flag; `device/md_run.c`
+    consumes via `mdc_take_save_pending()`. Replaces what was a
+    30 s polling autosave that risked partial-state captures and
+    blocked the audio IRQ on every flush.
+
 ### Optional: Genesis Plus GX YM2612 (build-time switch)
 
 PicoDrive's stock YM2612 is MAME-derived and known to produce
@@ -559,6 +599,27 @@ build. Any such patches are listed below as they happen.
    itself; however, old `.sta` files made before the patch still
    hang SMB on load because they don't contain the missing state.
    Re-save on the patched firmware to get working saves.
+
+X. **Cart-side save-complete signal (1.12).** Two mappers patched:
+   - **`mappers/map001.c`** (MMC1) — Captured `prev_reg = regs[regnum]`
+     before `regs[regnum] = latch;`, and at the end of `case 3` (PRG
+     bank register write) detect bit-4 transition `0→1` (WRAM
+     disable). Final Fantasy / Zelda / Crystalis / Dragon Warrior
+     all toggle this bit immediately after writing their save block.
+   - **`mappers/map004.c`** (MMC3) — Filled the previously-empty
+     `case 0xA001` handler. Maintains a static `prev_a001`; on
+     bit-7 transition `1→0` (WRAM enable register going from
+     enabled to disabled) we fire the save-complete signal.
+     Kirby's Adventure, Star Tropics II et al. follow this pattern.
+     The original Nofrendo author's "Messes up Startropics I/II if
+     implemented" caveat referred to fully gating WRAM access on
+     this bit; we still allow writes through unconditionally and
+     just observe the transition for the save callback, so that
+     compatibility note doesn't apply.
+
+   Both mappers call `nesc_signal_save_complete()` (declared via
+   `extern` in the patched code, defined in `src/nes_core.c`).
+   Runner consumes via `nesc_take_save_pending()`.
 
 
 ## huexpress/
