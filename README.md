@@ -845,9 +845,13 @@ The defragmenter does an **in-place cluster-level cycle sort** over
 the entire FAT volume. This is the same strategy Norton SpeedDisk
 and ext4's `e4defrag` use: plan a target layout, then cycle each
 cluster into its destination using only two cluster-sized RAM
-buffers — regardless of how full the disk is. A file-level approach
-(copy-to-scratch + rename) can't operate on a near-full volume
-because it needs 2× the file size free at once; cluster-level doesn't.
+buffers (2 KB total on ThumbyOne's 1 KB-cluster FAT). The cycle
+machinery needs as little as **one free cluster** on disk to
+operate, which means it can compact a 99%-full volume — a
+file-level approach (copy-to-scratch + rename) can't, because
+that needs 2× the file size free at once. The planner has a
+variable cost-vs-quality knob (see Preview below) so you can pick
+between a low-write incremental tidy and a full repack on demand.
 
 ### Flash wear — don't run it habitually
 
@@ -878,6 +882,36 @@ tells you:
 - `free: XK → YK` — largest contiguous free run before vs after
 - `N files  TOTAL_K  MOVES mv` — total file count, total bytes, and
   number of cluster moves required
+- `K: <value>` — current planner weight (see below)
+
+**LEFT / RIGHT on the preview screen adjusts the planner's K
+weight** — the trade-off between writes and free-space
+consolidation. The planner enumerates every block-shift subset
+(up to 2^16 = 65 K configurations; falls back to greedy
+hill-climb above that) and picks the layout that minimises
+`moves − K × free_consolidation_gain` (with a hard penalty on
+plans that regress current free-run length). Steps are log-spaced
+so each press makes a visible difference:
+
+```
+0  1  2  3  5  8  13  25  50  100  200  500  PACK
+```
+
+- **K = 0** — pure write minimisation. Only moves clusters that
+  must move (fragmented files, no opportunistic shuffling).
+- **K = 5** (default) — moderate consolidation. A cluster of new
+  contiguous free run is "worth" five cluster writes.
+- **K = 500** — aggressive consolidation. The planner will spend
+  many writes to push fragmented free runs into one big block at
+  the end of the volume.
+- **PACK** — bypasses the optimiser and runs a guaranteed-layout
+  pack-from-cluster-0 planner. Use when even K = 500 can't reach
+  `frag → 0` on a near-full volume. Highest write count, but
+  always produces the perfectly-compacted result.
+
+Cycle right through to land on PACK; LEFT walks back. Default
+starts at K = 5. Setting persists for the duration of the picker
+session.
 
 **A** applies, **B** or **MENU** cancels. Nothing touches the FAT
 until you explicitly confirm, so you can look at the preview and
