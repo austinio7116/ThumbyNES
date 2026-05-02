@@ -112,6 +112,15 @@ int  gbc_audio_pull(int16_t *out, int n);
 uint8_t *gbc_battery_ram (void);
 size_t   gbc_battery_size(void);
 
+/* Returns 1 (and clears the flag) iff the cart has signalled
+ * save-complete since the last call. peanut_gb sets this when the
+ * MBC RAM-enable register transitions enabled→disabled, which is
+ * exactly the moment a real cart's CPU finishes its save sequence
+ * and disables RAM access. Runners use this as a precise cue to
+ * flush battery RAM to disk — no polling, no debounce, no risk of
+ * catching mid-save partial state. */
+int      gbc_take_save_pending(void);
+
 /* MBC3 cart RTC support. Pokemon Crystal/Gold/Silver and a handful of
  * other GBC carts have a real-time clock built into the cartridge
  * (used for berry growth, day-night cycles, time-of-day-only

@@ -477,8 +477,8 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    /* 1 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
-    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
+    /* 30 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 
@@ -540,6 +540,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (!sleeping &&
             (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
             battery_save(name);
+            nes_flash_disk_flush();
             unsaved_play_frames = 0;
             sleeping = true;
             nes_lcd_backlight(0);
@@ -859,9 +860,14 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             }
         }
 
-        if (unsaved_play_frames > 0 &&
-            (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
+        /* Save trigger: smsplus signals via smsc_take_save_pending()
+         * when the cart writes the SRAM-mapped→unmapped transition.
+         * 30 s timer is the safety-net fallback. */
+        if (smsc_take_save_pending() ||
+            (unsaved_play_frames > 0 &&
+             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US)) {
             battery_save(name);
+            nes_flash_disk_flush();
             last_autosave_us    = (uint64_t)time_us_64();
             unsaved_play_frames = 0;
         }
@@ -888,6 +894,7 @@ int sms_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
 
     battery_save(name);
+    nes_flash_disk_flush();
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     smsc_shutdown();

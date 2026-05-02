@@ -126,10 +126,22 @@ int nesc_refresh_rate(void)
     return (nes && nes->refresh_rate) ? nes->refresh_rate : 60;
 }
 
+/* Returns the cart's PRG-RAM regardless of the iNES header's battery
+ * flag. A surprising number of widely-circulated NES dumps (older
+ * Zelda 1 dumps especially, but also some Final Fantasy / Crystalis
+ * dumps) have the battery bit cleared in byte 6 of the iNES header
+ * even though the original cart shipped with battery RAM. The
+ * stricter check we used to do here meant those dumps silently
+ * never wrote .sav files. We now rely on the dirty-driven save path
+ * (`nesc_take_sram_dirty()` + battery_save's CRC gate): a cart that
+ * never writes SRAM keeps its CRC equal to the all-zero seed and
+ * never produces a .sav, so dropping the flag costs nothing on
+ * carts that genuinely don't have battery; carts that do write
+ * SRAM finally get their saves persisted regardless of header. */
 uint8_t *nesc_battery_ram(void)
 {
     nes_t *nes = nes_getptr();
-    if (!nes || !nes->cart || !nes->cart->battery) return NULL;
+    if (!nes || !nes->cart) return NULL;
     if (nes->cart->prg_ram_banks <= 0) return NULL;
     return nes->cart->prg_ram;
 }
@@ -137,8 +149,46 @@ uint8_t *nesc_battery_ram(void)
 size_t nesc_battery_size(void)
 {
     nes_t *nes = nes_getptr();
-    if (!nes || !nes->cart || !nes->cart->battery) return 0;
+    if (!nes || !nes->cart) return 0;
+    if (nes->cart->prg_ram_banks <= 0) return 0;
     return (size_t)nes->cart->prg_ram_banks * ROM_PRG_BANK_SIZE;
+}
+
+/* Set by mappers (MMC1, MMC3 — see vendor patches) when the cart
+ * writes the WRAM-disable transition: MMC1's register 3 bit 4
+ * going 0→1, MMC3's A001 bit 7 going 1→0. Real NES carts that use
+ * battery (Final Fantasy / Crystalis on MMC1B+, Kirby's Adventure
+ * on MMC3) flip this bit immediately after writing the save block,
+ * mirroring the GB MBC RAM-disable pattern. */
+static volatile uint8_t s_save_pending;
+
+void nesc_signal_save_complete(void)
+{
+    s_save_pending = 1;
+}
+
+int nesc_take_save_pending(void)
+{
+    if (!s_save_pending) return 0;
+    s_save_pending = 0;
+    return 1;
+}
+
+/* Set by nofrendo's mem_putbyte on every CPU write to $6000-$7FFF
+ * (cart PRG-RAM range). Catches carts that don't toggle the
+ * WRAM-disable register — notably Zelda 1, an early MMC1 (likely
+ * MMC1A) board where the disable bit was either not present or
+ * not used by the cart code. The runner debounces on this: when
+ * 500 ms have elapsed since the last SRAM write, fire battery_save.
+ * Driven by the actual writes rather than CRC scanning so the
+ * detection is free per-frame. */
+extern volatile int nesc_sram_dirty;
+
+int nesc_take_sram_dirty(void)
+{
+    if (!nesc_sram_dirty) return 0;
+    nesc_sram_dirty = 0;
+    return 1;
 }
 
 int nesc_save_state(const char *path)

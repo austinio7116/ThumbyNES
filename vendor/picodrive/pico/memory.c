@@ -1084,8 +1084,14 @@ void PicoWrite8_io(u32 a, u32 d)
   }
   if (a == 0xa130f1) { // sram access register
     elprintf(EL_SRAMIO, "sram reg=%02x", d);
+    u8 was_mapped = Pico.m.sram_reg & SRR_MAPPED;
     Pico.m.sram_reg &= ~(SRR_MAPPED|SRR_READONLY);
     Pico.m.sram_reg |= (u8)(d & 3);
+    /* SRAM-mapped→unmapped transition is the cart's save-complete
+     * signal — see PicoIn.sramDisabled doc. */
+    if (was_mapped && !(Pico.m.sram_reg & SRR_MAPPED)
+        && PicoIn.sramDisabled)
+      PicoIn.sramDisabled();
     return;
   }
   PicoWrite8_32x(a, d);
@@ -1107,8 +1113,13 @@ void PicoWrite16_io(u32 a, u32 d)
   }
   if (a == 0xa130f0) { // sram access register
     elprintf(EL_SRAMIO, "sram reg=%02x", d);
+    u8 was_mapped = Pico.m.sram_reg & SRR_MAPPED;
     Pico.m.sram_reg &= ~(SRR_MAPPED|SRR_READONLY);
     Pico.m.sram_reg |= (u8)(d & 3);
+    /* See sram_reg 8-bit path above. */
+    if (was_mapped && !(Pico.m.sram_reg & SRR_MAPPED)
+        && PicoIn.sramDisabled)
+      PicoIn.sramDisabled();
     return;
   }
   PicoWrite16_32x(a, d);

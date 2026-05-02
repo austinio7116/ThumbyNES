@@ -108,6 +108,7 @@ static void map_write(uint32 address, uint8 value)
     // Only matters on fifth write
     int regnum = (address >> 13) & 0x3;
 
+    uint8 prev_reg = regs[regnum];
     regs[regnum] = latch;
     bitcount = 0;
     latch = 0;
@@ -133,7 +134,18 @@ static void map_write(uint32 address, uint8 value)
         break;
 
     case 3:
-        // Register 3: PRG bank
+        // Register 3: PRG bank — bit 4 is WRAM disable on MMC1B+.
+        // Final Fantasy / Zelda / Crystalis flip this 0→1 immediately
+        // after writing their save block (the cart's own end-of-save
+        // signal). Forward to the front-end as a save-complete cue.
+        // We don't actually gate WRAM writes on this bit — that's
+        // unchanged historical Nofrendo behaviour, and the cart's
+        // earlier WRAM writes have already been latched. */
+        {
+            extern void nesc_signal_save_complete(void);
+            if (!(prev_reg & 0x10) && (regs[3] & 0x10))
+                nesc_signal_save_complete();
+        }
         update_prg();
         break;
     }

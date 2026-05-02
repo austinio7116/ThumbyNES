@@ -130,6 +130,14 @@ int  mdc_audio_pull(int16_t *out, int n);
 uint8_t *mdc_battery_ram (void);
 size_t   mdc_battery_size(void);
 
+/* Returns 1 (and clears the flag) iff the cart has signalled
+ * save-complete since the last call. PicoDrive sets this when the
+ * cart writes 0xA130F0/F1 transitioning the SRAM MAPPED bit from
+ * 1 to 0 — Sonic 3 / Phantasy Star IV / etc. all flip SRAM back
+ * to ROM mapping immediately after writing their save block. The
+ * runner uses this as a precise flush trigger. */
+int      mdc_take_save_pending(void);
+
 /* Save / load runtime state to a sidecar file (absolute host or FAT
  * path). Routes through PicoState, which uses the thumby_state_bridge
  * FatFs shim on the device build. Returns 0 on success. */

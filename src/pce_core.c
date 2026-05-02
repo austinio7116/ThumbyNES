@@ -645,7 +645,16 @@ int pcec_audio_pull(int16_t *out, int n)
      *
      *  5. Saturating clamp to int16 (defensive — the headroom shift
      *     should keep us inside, but DC drift from accumulated mix
-     *     bias can creep up). */
+     *     bias can creep up).
+     *
+     * SFX-vs-music balance: tried removing the >>1 for ~6 dB total
+     * boost + soft-knee clip above ±24000. Not perceptibly different
+     * — the imbalance isn't an output-stage gain issue, it's that
+     * the cart's PSG values for SFX channels are intrinsically lower
+     * than music channels in many games. A real fix would need
+     * sidechain-style ducking of music-channel amplitude when SFX
+     * channels become active, which we can't do without per-channel
+     * type classification. Left as-is for now. */
     int master = ((io.psg_volume >> 4) & 0x0F) + (io.psg_volume & 0x0F);
 
     int32_t lpf = s_audio_lpf;

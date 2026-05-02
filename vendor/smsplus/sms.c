@@ -416,6 +416,10 @@ void mapper_16k_w(int address, int data)
     page = (page + ((4 - (slot.fcr[0] & 0x03)) << 3)) % slot.pages;
   }
 
+  /* Capture previous control-register value for the SRAM-disable
+   * detection in case 0 below. */
+  uint8 prev_fcr0 = slot.fcr[0];
+
   /* save frame control register data */
   slot.fcr[address] = data;
 
@@ -467,6 +471,17 @@ void mapper_16k_w(int address, int data)
         {
           cpu_writemap[i] = cpu_readmap[i] = &sms.wram[(i & 0x07) << 10];
         }
+      }
+
+      /* SRAM-mapped→unmapped transition (bit 3 for $8000-$BFFF,
+       * bit 4 for $C000-$FFFF). Phantasy Star (SMS), Wonder Boy III,
+       * etc. flip these bits off immediately after writing the save
+       * block — same end-of-save pattern as GB MBC and MD SRAM-reg.
+       * Forward as save-complete cue to the front-end. */
+      if (((prev_fcr0 & 0x18) != 0) && ((data & 0x18) == 0))
+      {
+        extern void smsc_signal_save_complete(void);
+        smsc_signal_save_complete();
       }
       break;
     }

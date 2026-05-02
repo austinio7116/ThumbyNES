@@ -705,8 +705,8 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    /* 1 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
-    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
+    /* 30 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 
@@ -768,6 +768,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (!sleeping &&
             (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
             int srv = battery_save(name);
+            nes_flash_disk_flush();
             if (srv != 0) {
                 snprintf(osd_text, sizeof(osd_text), "save fail: disk full?");
                 osd_text_ms = 3000;
@@ -1131,9 +1132,19 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             }
         }
 
-        if (unsaved_play_frames > 0 &&
-            (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
+        /* Save trigger: peanut_gb signals save-complete by setting
+         * gbc_take_save_pending() when the cart writes the MBC RAM-
+         * enable register's enabled→disabled transition (Pokemon's
+         * own end-of-save signal). The 30 s timer below is a
+         * safety-net for the rare cart that writes SRAM without
+         * disabling RAM after; battery_save()'s CRC gate makes that
+         * timer fire at most once per real change. */
+        bool save_now = gbc_take_save_pending();
+        if (save_now ||
+            (unsaved_play_frames > 0 &&
+             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US)) {
             int srv = battery_save(name);
+            nes_flash_disk_flush();
             if (srv != 0) {
                 snprintf(osd_text, sizeof(osd_text), "save fail: disk full?");
                 osd_text_ms = 3000;
@@ -1177,6 +1188,7 @@ int gb_run_rom(const nes_rom_entry *e, uint16_t *fb) {
      * off. The 30 s autosave during play already warned the user
      * about disk-full so this case is the second line of defence. */
     (void)battery_save(name);
+    nes_flash_disk_flush();
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, palette, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
     gbc_shutdown();

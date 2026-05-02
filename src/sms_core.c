@@ -177,6 +177,25 @@ size_t smsc_battery_size(void)
     return cart.sram ? 0x8000 : 0;
 }
 
+/* Set by smsplus's SEGA mapper when the cart writes the control
+ * register transitioning the SRAM-mapped bits 3/4 from "mapped" to
+ * "unmapped" — Phantasy Star (SMS), Wonder Boy III, Ys, etc. flip
+ * these bits off immediately after writing their save block. The
+ * runner consumes via smsc_take_save_pending(). */
+static volatile uint8_t s_save_pending;
+
+void smsc_signal_save_complete(void)
+{
+    s_save_pending = 1;
+}
+
+int smsc_take_save_pending(void)
+{
+    if (!s_save_pending) return 0;
+    s_save_pending = 0;
+    return 1;
+}
+
 int smsc_save_state(const char *path)
 {
     if (!path || !s_loaded) return -1;

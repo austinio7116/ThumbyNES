@@ -186,6 +186,27 @@ static void gb_cart_ram_write_cb(struct gb_s *gb, const uint_fast32_t addr, cons
     if (addr < s_cart_ram_size) s_cart_ram[addr] = val;
 }
 
+/* Set by peanut_gb's MBC layer when the cart writes the RAM-enable
+ * register's enabled→disabled transition — i.e. the cart's own
+ * "I'm done writing the save" signal. The runner consumes this via
+ * gbc_take_save_pending() and flushes cart RAM to its .sav file
+ * exactly when the cart is ready, no polling needed. Also covers
+ * loaders that disable RAM while reading (Pokemon does this on
+ * load-game) — those harmless extra trips through battery_save are
+ * absorbed by the CRC gate. */
+static volatile uint8_t s_save_pending;
+
+static void gb_cart_ram_disabled_cb(struct gb_s *gb) {
+    (void)gb;
+    s_save_pending = 1;
+}
+
+int gbc_take_save_pending(void) {
+    if (!s_save_pending) return 0;
+    s_save_pending = 0;
+    return 1;
+}
+
 static void gb_error_cb(struct gb_s *gb, const enum gb_error_e err, const uint16_t addr) {
     (void)gb; (void)err; (void)addr;
 }
@@ -283,6 +304,11 @@ static int gbc_finish_load(void) {
                                         gb_error_cb,
                                         NULL);
     if (err != GB_INIT_NO_ERROR) return -(int)err - 1;
+    /* Save-complete callback. peanut_gb fires this when the cart
+     * writes the MBC RAM-enable register's enabled→disabled
+     * transition — Pokemon's "save just finished" signal. */
+    s_gb.gb_cart_ram_disabled = gb_cart_ram_disabled_cb;
+    s_save_pending = 0;
 
     size_t want = (size_t)gb_get_save_size(&s_gb);
     if (want > GBC_CART_RAM_MAX) want = GBC_CART_RAM_MAX;
@@ -589,10 +615,11 @@ int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
      * deserialized values point into the old wrapper's text section
      * (or in our case, the same wrapper, but the principle is the
      * same — clobber them with known-good pointers anyway). */
-    s_gb.gb_rom_read       = gb_rom_read_cb;
-    s_gb.gb_cart_ram_read  = gb_cart_ram_read_cb;
-    s_gb.gb_cart_ram_write = gb_cart_ram_write_cb;
-    s_gb.gb_error          = gb_error_cb;
+    s_gb.gb_rom_read           = gb_rom_read_cb;
+    s_gb.gb_cart_ram_read      = gb_cart_ram_read_cb;
+    s_gb.gb_cart_ram_write     = gb_cart_ram_write_cb;
+    s_gb.gb_cart_ram_disabled  = gb_cart_ram_disabled_cb;
+    s_gb.gb_error              = gb_error_cb;
     s_gb.display.lcd_draw_line = lcd_draw_line_cb;
     s_gb.gb_serial_tx = NULL;
     s_gb.gb_serial_rx = NULL;

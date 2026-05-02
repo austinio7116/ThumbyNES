@@ -79,6 +79,23 @@ int  nesc_audio_pull(int16_t *out, int n);
 uint8_t *nesc_battery_ram   (void);
 size_t   nesc_battery_size  (void);
 
+/* Save-complete signal. Mappers (MMC1, MMC3 — see vendor patches)
+ * fire nesc_signal_save_complete() on the cart's WRAM-disable
+ * register transition (MMC1 register 3 bit 4 going 0→1; MMC3 A001
+ * bit 7 going 1→0). Runners consume via nesc_take_save_pending()
+ * to flush battery RAM exactly when the cart's save sequence is
+ * complete — no polling, no debounce, no partial-state risk. */
+void     nesc_signal_save_complete(void);
+int      nesc_take_save_pending   (void);
+
+/* Returns 1 (and clears the flag) iff the cart has written to its
+ * PRG-RAM range $6000-$7FFF since the last call. Set by nofrendo's
+ * mem_putbyte. Runners debounce on it (~500 ms quiescence after a
+ * recent change → fire battery_save) to catch early-MMC1 carts
+ * like Zelda 1 that don't toggle the WRAM-disable register and so
+ * never produce a nesc_take_save_pending() event. */
+int      nesc_take_sram_dirty     (void);
+
 /* Save / load runtime state to a sidecar file. Filename is the
  * absolute FAT path (e.g. "/Sonic.sta"). Returns 0 on success.
  * Wraps nofrendo's state_save / state_load which now route through

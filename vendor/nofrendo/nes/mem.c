@@ -113,10 +113,21 @@ uint8 mem_getbyte(uint32 address)
    return 0xFF;
 }
 
+/* Set on every CPU write to the cart-PRG-RAM range $6000-$7FFF.
+ * Drives the front-end's debounce-on-quiescence save trigger:
+ * after the cart stops writing SRAM, the runner waits ~500 ms then
+ * flushes prg_ram to disk. Catches Zelda 1 and other early MMC1
+ * carts that don't have a WRAM-disable register transition we
+ * could hook for a precise end-of-save signal. */
+volatile int nesc_sram_dirty;
+
 /* write a byte of data to 6502 memory space */
 void mem_putbyte(uint32 address, uint8 value)
 {
    uint32 flags = mem.flags[address >> MEM_PAGESHIFT];
+
+   if (address >= 0x6000 && address < 0x8000)
+      nesc_sram_dirty = 1;
 
    if (flags & MEM_PAGE_HAS_WRITE_HANDLER)
    {

@@ -359,10 +359,27 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    /* 1 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
-    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
+    /* 30 s poll, CRC-gated; see md_run.c / nes_crc32.h. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
+
+    /* Cart-side save signal for PCE — HuCards have no clean RAM-
+     * enable/disable register, so we infer "save sequence finished"
+     * from BRAM quiescence: CRC the 2 KB BRAM each frame (~80 µs at
+     * 250 MHz, 0.5 % CPU), and when the CRC has been stable for
+     * 500 ms after a recent change, fire battery_save. The CRC
+     * gate inside battery_save will then no-op if it matches the
+     * last on-disk write, so harmless reads-after-load don't churn
+     * flash. */
+    uint32_t pce_bram_seen_crc      = 0;
+    uint64_t pce_bram_changed_us    = 0;
+    int      pce_bram_save_pending  = 0;
+    {
+        uint8_t *_bram = pcec_battery_ram();
+        size_t   _sz   = pcec_battery_size();
+        if (_bram && _sz) pce_bram_seen_crc = nes_crc32(_bram, _sz);
+    }
 
     const int IDLE_SLEEP_S = 90;
     uint64_t  last_input_us = (uint64_t)time_us_64();
@@ -452,6 +469,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (!sleeping &&
             (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
             battery_save(name);
+            nes_flash_disk_flush();
             unsaved_play_frames = 0;
             sleeping = true;
             nes_lcd_backlight(0);
@@ -795,9 +813,37 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             prev_aud_us = (uint32_t)time_us_64() - t_aud0;
         }
 
+        /* PCE BRAM quiescence detector: CRC the 2 KB BRAM, watch
+         * for it to stabilise after recent writes, then fire a
+         * save. See pce_bram_* state above. */
+        {
+            uint8_t *_bram = pcec_battery_ram();
+            size_t   _sz   = pcec_battery_size();
+            if (_bram && _sz) {
+                uint32_t _crc = nes_crc32(_bram, _sz);
+                if (_crc != pce_bram_seen_crc) {
+                    pce_bram_seen_crc     = _crc;
+                    pce_bram_changed_us   = (uint64_t)time_us_64();
+                    pce_bram_save_pending = 1;
+                } else if (pce_bram_save_pending &&
+                           (uint64_t)time_us_64() - pce_bram_changed_us
+                               > 500000) {
+                    /* Stable for 500 ms — cart's save sequence
+                     * has settled. battery_save's CRC gate ensures
+                     * we no-op if the data already matches disk. */
+                    battery_save(name);
+                    nes_flash_disk_flush();
+                    last_autosave_us      = (uint64_t)time_us_64();
+                    unsaved_play_frames   = 0;
+                    pce_bram_save_pending = 0;
+                }
+            }
+        }
+
         if (unsaved_play_frames > 0 &&
             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
             battery_save(name);
+            nes_flash_disk_flush();
             last_autosave_us    = (uint64_t)time_us_64();
             unsaved_play_frames = 0;
         }
@@ -839,6 +885,7 @@ int pce_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
 
     battery_save(name);
+    nes_flash_disk_flush();
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, blend, cart_clock_mhz);
     nes_lcd_backlight(1);
 

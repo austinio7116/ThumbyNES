@@ -96,8 +96,21 @@ static void map_write(uint32 address, uint8 value)
         break;
 
     case 0xA001:
-        /* Save RAM enable / disable */
-        /* Messes up Startropics I/II if implemented -- bah */
+        /* Save RAM enable / disable. Don't actually gate WRAM access on
+         * this bit — fully implementing the enable/disable was found
+         * to break Startropics I/II per the original Nofrendo author.
+         * But we DO observe the bit-7 enable→disable transition and
+         * forward it as a save-complete cue: MMC3 carts that use
+         * battery RAM (Kirby's Adventure, Star Tropics II, etc.) flip
+         * this bit immediately after their save sequence finishes,
+         * mirroring the GB MBC RAM-disable pattern. */
+        {
+            static uint8 prev_a001;
+            extern void nesc_signal_save_complete(void);
+            if ((prev_a001 & 0x80) && !(value & 0x80))
+                nesc_signal_save_complete();
+            prev_a001 = value;
+        }
         break;
 
     case 0xC000:

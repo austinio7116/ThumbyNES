@@ -319,14 +319,21 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    /* 1 s autosave poll. battery_save() runs a CRC32 of the cart's
-     * battery RAM and skips the f_write when nothing's changed since
-     * the last write — typical CRC cost on a 32 KB Pokemon save is
-     * ~1 ms, so polling every 1 s is ~0.1% CPU even for big carts.
-     * Power-off-after-save tolerance is now ~1 s instead of ~30 s
-     * without changing flash wear (the gate means we still only
-     * write when SRAM has actually been modified). */
-    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
+    /* 30 s autosave poll. CRC-gated by battery_save() so the f_write
+     * only fires when SRAM actually changed since the last save —
+     * eliminates the periodic stutter for cart-save games during
+     * ordinary play.
+     *
+     * KNOWN ISSUE: a faster poll (e.g. 1 s) catches the cart in the
+     * middle of a multi-step save sequence (Pokemon Crystal writes
+     * save data + checksum across several frames). Writing the
+     * partial state to .sav produces an invalid checksum that the
+     * cart's loader rejects on next boot, falling back to the
+     * previous save. 30 s makes the partial-capture window
+     * statistically rare but doesn't eliminate it; a debounce
+     * (write only after CRC has been stable for ~500 ms) is the
+     * proper fix and is on the 1.13 list. */
+    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 
@@ -430,6 +437,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         if (!sleeping &&
             (uint64_t)time_us_64() - last_input_us > (uint64_t)IDLE_SLEEP_S * 1000000u) {
             battery_save(name);
+            nes_flash_disk_flush();
             unsaved_play_frames = 0;
             sleeping = true;
             nes_lcd_backlight(0);
@@ -826,9 +834,17 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
         phase_pres_acc += (t_pres - t_emu1);
         phase_aud_acc  += (t_aud  - t_pres);
 
-        if (unsaved_play_frames > 0 &&
-            (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
+        /* Save trigger: PicoDrive signals save-complete by setting
+         * mdc_take_save_pending() when the cart writes 0xA130F0/F1
+         * transitioning SRAM from mapped to unmapped — most save-
+         * using MD carts do this immediately after writing the save
+         * block. The 30 s timer below is a safety-net for carts
+         * that leave SRAM mapped permanently. */
+        if (mdc_take_save_pending() ||
+            (unsaved_play_frames > 0 &&
+             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US)) {
             battery_save(name);
+            nes_flash_disk_flush();
             last_autosave_us    = (uint64_t)time_us_64();
             unsaved_play_frames = 0;
         }
@@ -872,6 +888,7 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     }
 
     battery_save(name);
+    nes_flash_disk_flush();
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, volume, six_button,
                              audio_mode, blend, cart_clock_mhz);
     nes_lcd_backlight(1);

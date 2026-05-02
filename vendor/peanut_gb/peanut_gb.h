@@ -571,6 +571,25 @@ struct gb_s
 				  const uint8_t val);
 
 	/**
+	 * Optional. Notifies the front-end that the cart has just
+	 * disabled MBC RAM access (transitioned the RAM-enable
+	 * register from `0x0A` to anything else). On real cart hardware
+	 * this is the cart's own "I'm done writing the save" signal —
+	 * Pokemon Crystal / Gold / Silver, Zelda DX, and most MBC1/3/5
+	 * games disable RAM immediately after writing the final
+	 * checksum byte of an in-game save, both to prevent stray writes
+	 * corrupting save state and so that real cart hardware can
+	 * safely cut power. Front-ends use this as a clean save-complete
+	 * trigger to flush cart RAM to disk — no polling, no CRC, no
+	 * debounce, fires exactly once per cart save.
+	 *
+	 * Set NULL to opt out.
+	 *
+	 * \param gb_s	emulator context
+	 */
+	void (*gb_cart_ram_disabled)(struct gb_s *);
+
+	/**
 	 * Notify front-end of error.
 	 *
 	 * \param gb_s		emulator context
@@ -946,7 +965,13 @@ void __not_in_flash_func(__gb_write)(struct gb_s *gb, uint_fast16_t addr, uint8_
 		/* Set RAM enable bit. MBC2 is handled in fall-through. */
 		if(gb->mbc > 0 && gb->mbc != 2 && gb->cart_ram)
 		{
+			uint8_t was_enabled = gb->enable_cart_ram;
 			gb->enable_cart_ram = ((val & 0x0F) == 0x0A);
+			/* Fire save-complete signal on enabled→disabled
+			 * transition. See struct field doc. */
+			if(was_enabled && !gb->enable_cart_ram
+			   && gb->gb_cart_ram_disabled)
+				gb->gb_cart_ram_disabled(gb);
 			return;
 		}
 
@@ -983,7 +1008,13 @@ void __not_in_flash_func(__gb_write)(struct gb_s *gb, uint_fast16_t addr, uint8_
 			/* Otherwise set whether RAM is enabled or not. */
 			else
 			{
+				uint8_t was_enabled = gb->enable_cart_ram;
 				gb->enable_cart_ram = ((val & 0x0F) == 0x0A);
+				/* Fire save-complete signal on
+				 * enabled→disabled transition (MBC2). */
+				if(was_enabled && !gb->enable_cart_ram
+				   && gb->gb_cart_ram_disabled)
+					gb->gb_cart_ram_disabled(gb);
 				return;
 			}
 		}

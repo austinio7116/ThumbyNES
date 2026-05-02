@@ -394,13 +394,19 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     int  osd_text_ms  = 0;
     char osd_text[24] = {0};
 
-    /* Auto-save battery: poll every AUTOSAVE_INTERVAL of wall time;
-     * battery_save() CRC32s the cart's SRAM and skips the f_write
-     * when nothing's changed since the last write. 1 s poll keeps
-     * power-off-after-in-game-save tolerance under a second without
-     * adding flash wear (writes only happen when SRAM actually
-     * changed). See nes_crc32.h. */
-    const uint64_t AUTOSAVE_INTERVAL_US = 1u * 1000u * 1000u;
+    /* 30 s autosave poll, CRC-gated. See md_run.c for the
+     * partial-save-capture issue that ruled out a shorter poll
+     * (debounce-on-stable is the 1.13 fix). */
+    const uint64_t AUTOSAVE_INTERVAL_US = 30u * 1000u * 1000u;
+
+    /* Debounce-on-write fallback for carts that don't toggle the
+     * WRAM-disable register (Zelda 1 et al. — early MMC1 boards).
+     * nofrendo's mem_putbyte sets nesc_sram_dirty on every $6000-
+     * $7FFF write; we debounce 500 ms of write quiescence into a
+     * pending save. Acts as a second-line trigger alongside the
+     * nesc_take_save_pending() callback for cart-disable boards. */
+    uint64_t sram_last_write_us  = 0;
+    int      sram_save_pending   = 0;
     uint64_t       last_autosave_us     = (uint64_t)time_us_64();
     int            unsaved_play_frames  = 0;
 
@@ -487,6 +493,7 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             /* Persist state before going dark in case the user
              * never wakes the device back up. */
             battery_save(name);
+            nes_flash_disk_flush();
             unsaved_play_frames = 0;
             sleeping = true;
             nes_lcd_backlight(0);
@@ -820,13 +827,42 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
             }
         }
 
-        /* Auto-save battery every AUTOSAVE_INTERVAL of wall time
-         * when there have been play frames since the last save. */
-        if (unsaved_play_frames > 0 &&
+        /* Drain SRAM-dirty events from nofrendo's mem_putbyte and
+         * push the debounce timer forward each time the cart
+         * touches PRG-RAM. */
+        if (nesc_take_sram_dirty()) {
+            sram_last_write_us = (uint64_t)time_us_64();
+            sram_save_pending  = 1;
+        }
+
+        /* Save triggers, in priority order:
+         *  - nesc_take_save_pending(): MMC1B+ / MMC3 cart-side
+         *    WRAM-disable signal — fires immediately at end of save.
+         *  - sram_save_pending && >500 ms quiescence: catches early
+         *    MMC1 carts (Zelda 1) that never toggle the disable bit.
+         *  - 30 s autosave poll: safety net; battery_save's CRC
+         *    gate makes it free when nothing changed. */
+        bool fire_save = nesc_take_save_pending();
+        if (!fire_save && sram_save_pending &&
+            (uint64_t)time_us_64() - sram_last_write_us > 500000) {
+            fire_save = true;
+        }
+        if (!fire_save && unsaved_play_frames > 0 &&
             (uint64_t)time_us_64() - last_autosave_us > AUTOSAVE_INTERVAL_US) {
+            fire_save = true;
+        }
+        if (fire_save) {
             battery_save(name);
+            /* Drain the nes_flash_disk write-back cache to flash.
+             * Without this, f_close-flushed-FatFs data sits in the
+             * flash-disk RAM cache and is lost on power-off — even
+             * though the FS sees the .sav file fine, the bytes
+             * never reached the flash chip. Soft-quit and idle-
+             * sleep paths need the same flush. */
+            nes_flash_disk_flush();
             last_autosave_us    = (uint64_t)time_us_64();
             unsaved_play_frames = 0;
+            sram_save_pending   = 0;
         }
 
         /* Frame pacing: cap at 60 fps unless the user asked for
@@ -869,6 +905,7 @@ int nes_run_rom(const nes_rom_entry *e, uint16_t *fb) {
 
     /* Persist the battery save before tearing the cart down. */
     battery_save(name);
+    nes_flash_disk_flush();
     if (cfg_dirty) cfg_save(name, scale_mode, show_fps, palette, volume, blend, pal_mode, cart_clock_mhz);
     /* Make sure the backlight is on for whatever comes next. */
     nes_lcd_backlight(1);

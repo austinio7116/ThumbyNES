@@ -83,6 +83,12 @@ int  smsc_audio_pull(int16_t *out, int n);
 uint8_t *smsc_battery_ram (void);
 size_t   smsc_battery_size(void);
 
+/* Save-complete signal (see GB / MD equivalents). smsplus's SEGA
+ * mapper fires smsc_signal_save_complete() on the SRAM-mapped→
+ * unmapped transition. */
+void     smsc_signal_save_complete(void);
+int      smsc_take_save_pending   (void);
+
 /* Save / load runtime state to a sidecar file (absolute FAT path,
  * e.g. "/Sonic.sta"). Returns 0 on success. Routes through
  * smsplus's system_save_state / system_load_state which use the

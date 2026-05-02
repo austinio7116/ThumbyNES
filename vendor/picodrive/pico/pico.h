@@ -138,6 +138,16 @@ typedef struct PicoInterface
 
 	void (*mcdTrayOpen)(void);
 	void (*mcdTrayClose)(void);
+
+	/* Optional. Fired when the cart writes the SRAM access register
+	 * at 0xA130F0/F1 transitioning the MAPPED bit from 1 to 0 — the
+	 * MD equivalent of the GB MBC RAM-disable signal. Most save-using
+	 * MD carts (Sonic 3, Phantasy Star IV, RPGs) flip SRAM back to
+	 * ROM mapping immediately after writing the save block, so this
+	 * fires exactly when the cart's save sequence is complete and
+	 * SRAM contents are consistent. Front-end uses it to flush
+	 * Pico.sv.data to disk without polling. Set NULL to opt out. */
+	void (*sramDisabled)(void);
 } PicoInterface;
 
 extern PicoInterface PicoIn;

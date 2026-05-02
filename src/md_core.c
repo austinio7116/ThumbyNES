@@ -174,6 +174,23 @@ static void capture_audio(int len_bytes)
     s_mixcount = n;
 }
 
+/* Set by PicoIn.sramDisabled when the cart writes the SRAM access
+ * register transitioning the MAPPED bit from 1 to 0 — Sonic 3 /
+ * Phantasy Star IV / Shining Force etc. flip back to ROM mapping
+ * immediately after writing their save block. The runner consumes
+ * this via mdc_take_save_pending(). */
+static volatile uint8_t s_save_pending;
+
+static void md_sram_disabled_cb(void) {
+    s_save_pending = 1;
+}
+
+int mdc_take_save_pending(void) {
+    if (!s_save_pending) return 0;
+    s_save_pending = 0;
+    return 1;
+}
+
 int mdc_init(int region, int sample_rate)
 {
     s_loaded   = false;
@@ -237,8 +254,28 @@ int mdc_init(int region, int sample_rate)
      * priority handling on some carts; the measured savings were
      * negligible. */
     const bool silent = (sample_rate == 0);
+    /* POPT_EN_SNDFILTER: post-mixer EMA low-pass — sndFilterAlpha
+     * controls cutoff. Smooths residual high-frequency hash without
+     * veiling mid-range chiptune detail. Heap-free (single IIR
+     * coefficient + state).
+     *
+     * Tried POPT_EN_FM_FILTER (polyphase FIR resampler running
+     * GenPlus at native ~53 kHz then decimating to sndRate). Heap
+     * cost is ~40-45 KB combined: resampler_new allocates its
+     * sinc-filter table + a buffer sized for max_input=2*inrate/50,
+     * and the shim's tmpbuf grows to fit native-rate sample bursts
+     * (32 KB on first FM call). Pushed total heap past what's
+     * available with cart ROM + GB battery + Cz80 IRAM pool already
+     * resident — MD then crashed on boot from a failed malloc.
+     * Reverted; SNDFILTER on its own gives most of the audible win. */
     PicoIn.opt = POPT_ACC_SPRITES
-               | (silent ? 0 : POPT_EN_PSG | POPT_EN_FM | POPT_EN_Z80);
+               | (silent ? 0 : POPT_EN_PSG | POPT_EN_FM | POPT_EN_Z80
+                                 | POPT_EN_SNDFILTER);
+    /* sndFilterAlpha is a Q16 fixed-point coefficient — out = a*in
+     * + (1-a)*prev. 0xC000 (~0.75) is a gentle low-pass that takes
+     * a few percent off the very top end (above ~6 kHz at 22050)
+     * without veiling mid-range detail. */
+    PicoIn.sndFilterAlpha = 0xC000;
     /* PsndRerate uses PicoIn.sndRate to size its resampler tables.
      * Keep it at a sane value even in silent mode — the POPT flags
      * above prevent Z80/FM/PSG synthesis from actually running. */
@@ -246,6 +283,8 @@ int mdc_init(int region, int sample_rate)
     PicoIn.sndRate        = sample_rate;
     PicoIn.sndOut         = s_sndbuf;
     PicoIn.writeSound     = capture_audio;
+    PicoIn.sramDisabled   = md_sram_disabled_cb;
+    s_save_pending        = 0;
     PicoIn.regionOverride = (unsigned short)region;
     /* PicoIn.autoRgnOrder: 4-bit nibbles, lowest = highest priority.
      * Region codes: 1=JP NTSC, 2=JP PAL, 4=US, 8=EU.
