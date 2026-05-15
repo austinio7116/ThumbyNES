@@ -645,24 +645,15 @@ if (THUMBYNES_WITH_MD AND MD_IRAM_DYNAMIC)
 endif()
 
 if (THUMBYONE_SLOT_MODE)
-    # Embedded in ThumbyOne's NES partition. See common/slot_layout.h
-    # in the ThumbyOne repo for the canonical flash-offset values.
-    # THUMBYONE_WITH_MD (set by the parent build) shifts the FAT up by
-    # 1 MB to make room for the 2 MB NES partition that holds MD
-    # emulation. Without MD the original 9.6 MB FAT is retained.
+    # Embedded in ThumbyOne's NES partition.  Flash-disk offsets used
+    # to be hardcoded per-layout here; they now derive from
+    # ../../../ThumbyOne/common/slot_layout.h via the
+    # THUMBYONE_FAT_OFFSET / THUMBYONE_FAT_SIZE macros (consumed by
+    # nes_flash_disk.h under #ifdef THUMBYONE_SLOT_MODE).  This block
+    # only needs to flag slot mode + propagate THUMBYONE_WITH_MD.
+    target_compile_definitions(nesrun_device PRIVATE THUMBYONE_SLOT_MODE=1)
     if (THUMBYONE_WITH_MD)
-        target_compile_definitions(nesrun_device PRIVATE
-            THUMBYONE_SLOT_MODE=1
-            THUMBYONE_WITH_MD=1
-            FLASH_DISK_OFFSET=0x760000u
-            FLASH_DISK_SIZE=0x8A0000u   # 8.6 MB (down from 9.6 MB)
-        )
-    else()
-        target_compile_definitions(nesrun_device PRIVATE
-            THUMBYONE_SLOT_MODE=1
-            FLASH_DISK_OFFSET=0x660000u
-            FLASH_DISK_SIZE=0x9A0000u   # 9.6 MB
-        )
+        target_compile_definitions(nesrun_device PRIVATE THUMBYONE_WITH_MD=1)
     endif()
     # Compile ThumbyOne's handoff source into this target directly
     # (common is not a CMake library — see common/CMakeLists.txt

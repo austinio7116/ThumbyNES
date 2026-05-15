@@ -28,22 +28,43 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Flash-disk region. Defaults target the standalone-firmware
- * flash map (3 MB firmware + 12 MB FAT). Parent projects that
- * embed ThumbyNES into a larger partition-table layout (notably
- * ThumbyOne) override these via -D at build time to point at the
- * shared FAT region rather than the slot's own code space. */
-#ifndef FLASH_DISK_OFFSET
-#define FLASH_DISK_OFFSET   (3u * 1024u * 1024u)    /* 3 MB into flash  */
-#endif
-#ifndef FLASH_DISK_SIZE
-#define FLASH_DISK_SIZE     (12u * 1024u * 1024u)   /* 12 MB usable     */
+/* Flash-disk region.  Two paths:
+ *
+ *   - Standalone ThumbyNES (no THUMBYONE_SLOT_MODE): default 3 MB
+ *     firmware + 12 MB FAT.  Overridable via -D at build time.
+ *
+ *   - As a ThumbyOne slot: pull THUMBYONE_FAT_OFFSET /
+ *     THUMBYONE_FAT_SIZE from common/slot_layout.h so the slot
+ *     always agrees with the lobby on where the shared FAT lives.
+ *     No -D plumbing in CMakeLists; layout changes propagate via
+ *     slot_layout.h's preprocessor cascade alone. */
+#ifdef THUMBYONE_SLOT_MODE
+#  include "slot_layout.h"
+#  define FLASH_DISK_OFFSET  THUMBYONE_FAT_OFFSET
+#  define FLASH_DISK_SIZE    THUMBYONE_FAT_SIZE
+#else
+#  ifndef FLASH_DISK_OFFSET
+#    define FLASH_DISK_OFFSET   (3u * 1024u * 1024u)    /* 3 MB into flash */
+#  endif
+#  ifndef FLASH_DISK_SIZE
+#    define FLASH_DISK_SIZE     (12u * 1024u * 1024u)   /* 12 MB usable   */
+#  endif
 #endif
 #define FLASH_DISK_SECTOR_SIZE 512
 #define FLASH_DISK_SECTORS  (FLASH_DISK_SIZE / FLASH_DISK_SECTOR_SIZE)
 #define FLASH_DISK_ERASE    4096
 
 void nes_flash_disk_init(void);
+
+/* Free / re-allocate the 32 KB block cache. Slots that are SRAM-pressed
+ * (the GBA slot in particular) call _release after they've finished
+ * reading sidecar files at slot entry, then _acquire on slot exit
+ * before returning control to the picker. While released, FAT writes
+ * fail and FAT reads bypass the cache (slow but safe). The caller
+ * MUST nes_flash_disk_flush() before _release — _release calls flush
+ * internally for paranoia. */
+void nes_flash_disk_cache_release(void);
+void nes_flash_disk_cache_acquire(void);
 
 /* Sector-level R/W (matches TinyUSB MSC + FatFs diskio signatures). */
 int  nes_flash_disk_read (uint8_t *dst, uint32_t sector, uint32_t count);
