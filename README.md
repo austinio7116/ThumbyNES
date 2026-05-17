@@ -14,10 +14,10 @@ ROMs onto the device over USB, browse them in a tabbed picker with thumbnail
 screenshots, play with sound. Per-ROM saves and **save states**, per-ROM and global
 settings, in-game pause menu, idle sleep, fast-forward, palettes,
 in-game screenshot capture, live-pan read mode for the handhelds,
-**cluster-level FAT defragmenter with live cluster map**,
 **chained-XIP fallback** so fragmented carts still load at full
-speed, configurable system clock — all in a single ~1.2 MB
-firmware image.
+speed, configurable system clock — all in a single ~1.0 MB
+firmware image.  FAT defragmentation lives in the ThumbyOne lobby
+(MENU → "defrag fat") since the FAT is shared across slots.
 
 <p align="center">
 <img src="images/nes-smb3.jpg" width="360" alt="NES — Super Mario Bros. 3 title screen">
@@ -60,9 +60,6 @@ to the repo if you want to flash without setting up the toolchain.
 
 5. **Hold MENU at boot** to force-reformat the FAT volume (only takes
    effect if the volume can't otherwise be mounted).
-
-6. **Hold B at boot** to force the FAT defragmenter to run (normally
-   it auto-runs only when needed).
 
 ---
 
@@ -146,7 +143,6 @@ system-wide settings, current device status, and one-shot actions:
 | Sort | Choice ALPHA / FAVS / SIZE | favs-first puts your starred carts on top, size sorts descending |
 | Battery | Info row | live percent + voltage; flips to `CHRG` when external power is detected; bar strip shows level |
 | Storage | Info row | `<used>.<dec>/<total>.<dec> MB`; bar strip shows used fraction |
-| Defragment now | Action | manual trigger of the same FAT defragmenter that runs at boot |
 | About | Info row | firmware identifier |
 
 D-pad UP/DOWN walks the items, LEFT/RIGHT changes values for
@@ -281,7 +277,6 @@ On release of LB:
 | Gesture | Action |
 |---|---|
 | **MENU held** | Force a FAT reformat if the volume can't be mounted. |
-| **B held**    | Force the FAT defragmenter pass even if the pre-flight thinks nothing's fragmented. |
 
 ---
 
@@ -782,14 +777,12 @@ on hardware is identical between ThumbyNES and the engine builds.
 
 ---
 
-## Defragmenter
-
-### Why you might (or might not) want to defragment
+## XIP mmap and fragmented carts
 
 ThumbyNES runs carts straight out of flash via **XIP mmap** rather
 than copying them to RAM. That's how a 1 MB GBC cart fits on a
-device with a ~330 KB heap budget: the core reads each byte directly
-from its memory-mapped address in flash.
+device with a ~330 KB heap budget: the core reads each byte
+directly from its memory-mapped address in flash.
 
 There are two XIP paths:
 
@@ -813,172 +806,31 @@ GG carts have plenty of CPU headroom to absorb the lookup overhead.
 The ones that can drop frames when fragmented are the busy ones:
 dense NES mapper carts (MMC3/MMC5 games with big tilemap bandwidth),
 some GBC titles with heavy per-scanline palette work, a handful of
-SMS titles hammering the PSG. If a fragmented cart feels sluggish,
-the defragmenter is the fix.
+SMS titles hammering the PSG.
 
-**What defragmenting actually buys you:**
+Large MD carts (up to 2 MB) use the **contiguous-only** mmap path
+because PicoDrive reads too aggressively for the chained lookup
+overhead.  If that returns `-5` (fragmented), the runner errors
+out — `defrag fat` from the lobby first, then try again.
 
-- **Existing fragmented carts get moved onto the fast path.**
-  Every cart on the volume ends up as a contiguous cluster chain,
-  so every cart runs through direct mmap with no per-byte
-  indirection. If a cart was dropping frames because it was
-  fragmented, defrag puts it right.
-- **New uploads stay on the fast path too.** Defragging
-  consolidates all free space into one run at the end of the
-  volume. The next ROM you drop over USB lands in that contiguous
-  run, so it starts life as a contiguous file — no fragmentation,
-  no chained XIP, no re-defrag needed. Writing a file to a
-  fragmented free list *works* (the host's FAT driver is happy to
-  chain scattered clusters into a fragmented file), but the
-  resulting file is then fragmented itself and needs chained XIP
-  to run.
-- **Cleaner cluster map.** Satisfying to look at.
+### Defragmentation: ThumbyOne lobby
 
-**What it doesn't do:** ROMs still load and play correctly whether
-the volume is defragmented or not. Chained XIP is the safety net —
-you can drop a ROM, play it immediately, and defragment later (or
-never) if the cart runs fine either way.
+Defragmentation used to live inside the ThumbyNES picker (a
+"Defragment now" menu item + an auto-boot pre-flight).  Because the
+FAT volume is now shared across slots in ThumbyOne — NES ROMs,
+SCUMM game data, MicroPython games, Pico-8 carts all coexist on the
+same volume — the defragmenter was promoted out of the NES slot
+into the **ThumbyOne lobby**.  Open the lobby menu (MENU button),
+scroll to **"defrag fat"**, press A.  The preview + cluster-level
+cycle-sort UI is unchanged from what used to live here; see
+[ThumbyOne README → Lobby defrag](../ThumbyOne/README.md) for the
+full description.
 
-### The cluster-level defragmenter
-
-The defragmenter does an **in-place cluster-level cycle sort** over
-the entire FAT volume. This is the same strategy Norton SpeedDisk
-and ext4's `e4defrag` use: plan a target layout, then cycle each
-cluster into its destination using only two cluster-sized RAM
-buffers (2 KB total on ThumbyOne's 1 KB-cluster FAT). The cycle
-machinery needs as little as **one free cluster** on disk to
-operate, which means it can compact a 99%-full volume — a
-file-level approach (copy-to-scratch + rename) can't, because
-that needs 2× the file size free at once. The planner has a
-variable cost-vs-quality knob (see Preview below) so you can pick
-between a low-write incremental tidy and a full repack on demand.
-
-### Flash wear — don't run it habitually
-
-A full defrag rewrites every moved cluster to flash. The RP2350's
-internal QSPI flash is a consumer-grade chip with a finite
-erase/program endurance (spec is ~100k cycles per sector), so
-treat defrag as an **occasional cleanup / optimisation**, not
-something to fire off after every USB session. One pass after a
-big batch of uploads is fine; running it for its own sake every
-boot is wasteful.
-
-The preview-and-confirm step partly exists to make accidental
-runs hard. Repeat runs on an already-clean volume are also a true
-no-op — preview shows `0 mv` and zero writes land on flash.
-
-### Preview + confirm
-
-<p align="center">
-<img src="images/defrag-preview.png" width="360" alt="Defrag preview — cluster map before and after, frag/free/file stats, A=apply/B=cancel">
-</p>
-
-The preview screen shows the **current cluster layout** (top) and the
-**planned layout** (bottom), colour-coded per-file. The summary line
-tells you:
-
-- `frag: X → Y` — files currently fragmented vs files that would
-  remain unplaceable after the pass
-- `free: XK → YK` — largest contiguous free run before vs after
-- `N files  TOTAL_K  MOVES mv` — total file count, total bytes, and
-  number of cluster moves required
-- `K: <value>` — current planner weight (see below)
-
-**LEFT / RIGHT on the preview screen adjusts the planner's K
-weight** — the trade-off between writes and free-space
-consolidation. The planner enumerates every block-shift subset
-(up to 2^16 = 65 K configurations; falls back to greedy
-hill-climb above that) and picks the layout that minimises
-`moves − K × free_consolidation_gain` (with a hard penalty on
-plans that regress current free-run length). Steps are log-spaced
-so each press makes a visible difference:
-
-```
-0  1  2  3  5  8  13  25  50  100  200  500  PACK
-```
-
-- **K = 0** — pure write minimisation. Only moves clusters that
-  must move (fragmented files, no opportunistic shuffling).
-- **K = 5** (default) — moderate consolidation. A cluster of new
-  contiguous free run is "worth" five cluster writes.
-- **K = 500** — aggressive consolidation. The planner will spend
-  many writes to push fragmented free runs into one big block at
-  the end of the volume.
-- **PACK** — bypasses the optimiser and runs a guaranteed-layout
-  pack-from-cluster-0 planner. Use when even K = 500 can't reach
-  `frag → 0` on a near-full volume. Highest write count, but
-  always produces the perfectly-compacted result.
-
-Cycle right through to land on PACK; LEFT walks back. Default
-starts at K = 5. Setting persists for the duration of the picker
-session.
-
-**A** applies, **B** or **MENU** cancels. Nothing touches the FAT
-until you explicitly confirm, so you can look at the preview and
-back out if the numbers don't make sense.
-
-### Live execution view
-
-<p align="center">
-<img src="images/defrag-moving.png" width="360" alt="Defrag running — MOVING CLUSTERS overlay with live per-file colour map and progress counter">
-</p>
-
-During execution the cluster map redraws as clusters move, so you
-can watch files physically reorder. Cells are coloured per-file
-(a 15-hue palette, cycled mod-15 for big volumes). A **red "DO NOT
-POWER OFF" banner** across the top doubles as a hardware indicator
-(the front LED stays solid red for the same duration).
-
-Phase breakdown during a pass:
-
-1. **Cycle sort** — moves cluster data to match the target layout,
-   using two 1 KB buffers (carry + swap) without ever needing more
-   free clusters than the size of one cluster. Cluster moves are
-   serialised through the flash disk's write-back cache; USB MSC
-   stays alive via `tud_task()` between moves.
-2. **FAT rebuild** — writes a fresh FAT image with every placed
-   file getting a straight cluster chain (`n → n+1 → … → EOC`).
-   Unplaceable files (rare; only if the volume is over-committed
-   from a prior bad state) keep their existing chain via a
-   preservation pass.
-3. **Directory patch** — updates every moved file's SFN slot bytes
-   26/27 (first-cluster-low) in its parent directory, plus the
-   `.` and `..` entries inside each moved subdirectory.
-4. **Remount** — `f_unmount` + `f_mount` so FatFs drops every
-   cached FAT / dir-entry sector and re-reads fresh state.
-
-The pass is idempotent: running it on an already-clean volume is a
-no-op (preview shows `0 mv`, zero cluster writes).
-
-### How it's triggered
-
-- **Auto pre-flight** at every cold boot — walks `/`, checks each
-  non-trivial file with `chain_is_contiguous()`, and if any are
-  fragmented runs the pass with a brief confirm.
-- **Pick "Defragment now"** in the picker menu — same pass, no
-  reboot required.
-- **Hold B at boot** — forces the pass to run even if the pre-flight
-  thinks nothing is fragmented.
-- **Per-ROM fallback** — when a runner tries to mmap a cart and the
-  contiguous path returns `-5` (fragmented), it first attempts
-  chained XIP. If the cart is small enough to fall back to a RAM
-  load it can also trigger a targeted rewrite of just that one
-  file.
-
-### Safety belts
-
-- **Preview is mandatory.** No cluster writes until you press A.
-- **Enumeration cap of 2000 files.** Covers worst-case MicroPython
-  game trees with many small asset files alongside ROMs + sidecars.
-  Dynamic heap only — 0 permanent SRAM cost.
-- **Orphan FAT scan.** Before building the target layout, the
-  analyser walks the raw FAT and pins any cluster the FAT says is
-  in-use but that the directory walk didn't account for. Even if
-  enumeration misses a file (corrupt parent dir, truncated path,
-  etc.) its cluster chain is preserved rather than zeroed in the
-  FAT rebuild. Defence in depth, not the main correctness story.
-- **Red LED + banner** while the FAT is mid-write so the user
-  doesn't power-cycle in the worst possible window.
+Standalone-ThumbyNES builds (firmware/nesrun_device.uf2 from this
+repo, not the unified ThumbyOne firmware) ship without a built-in
+defragmenter.  If you're running standalone and care about
+defragmentation, flash ThumbyOne instead — its lobby provides the
+tool while still running ThumbyNES as one of its slots.
 
 ---
 
@@ -1117,7 +969,7 @@ GG + GB live-pan CROP keeps audio flowing.
 | Menu backdrop snapshot (32 KB)                  | BSS, only used while menu is open |
 | Audio ring (4096 samples × 2 bytes)            | 8 KB BSS |
 | FatFs work area + flash disk write cache       | ~12 KB BSS |
-| Picker / favorites / cfg / view pref / defrag snapshot | ~10 KB BSS |
+| Picker / favorites / cfg / view pref                   | ~6 KB BSS |
 | ROM (XIP-mapped from flash for everything ≥ 256 KB) | ≤ 8 MB |
 | **Free heap (typical NES/SMS/GB session)** | **~330 KB** |
 | **Free heap (MD session — PicoMem + IRAM)** | **~170 KB** |
@@ -1247,11 +1099,11 @@ ThumbyNES/
 │   └── gb_bench_main.c      ← Game Boy headless benchmark
 └── device/                  ← Thumby Color firmware
     ├── CMakeLists.txt       ← Pico SDK device build
-    ├── nes_device_main.c    ← entry, lobby, defrag pre-flight, picker dispatch, clock apply
+    ├── nes_device_main.c    ← entry, lobby, picker dispatch, clock apply
     ├── nes_run.[ch]         ← NES runner (input + scaler + audio + autosave + sleep + menu)
     ├── sms_run.[ch]         ← SMS / GG runner (mirror of nes_run for smsplus)
     ├── gb_run.[ch]          ← Game Boy runner (mirror of nes_run for peanut_gb)
-    ├── nes_picker.[ch]      ← tabbed picker UI + extension scanner + defragmenter + picker menu
+    ├── nes_picker.[ch]      ← tabbed picker UI + extension scanner + picker menu
     ├── nes_menu.[ch]        ← reusable in-game / picker menu module
     ├── nes_thumb.[ch]       ← procedural icons + screenshot sidecar I/O
     ├── nes_battery.[ch]     ← ADC battery monitor (voltage / percent / charging)
@@ -1280,7 +1132,6 @@ ThumbyNES/
 | `/.favs`        | Newline-separated list of favorited ROM names. |
 | `/.picker_view` | Persisted picker view + active tab + sort mode + per-tab last-selected ROM names. |
 | `/.global`      | Global master volume + global overclock value. |
-| `/.defrag.tmp`  | Transient — only present mid-defrag if the device was unplugged during a rewrite. |
 
 ---
 
@@ -1701,18 +1552,11 @@ FILL/CROP behaviour up across every core.
   per-cluster pointer table so the file still maps straight out of
   flash — no RAM load. Most games run at full speed either way;
   heavier carts (dense NES mappers, some GBC titles) can drop
-  frames on chained XIP when they wouldn't on contiguous mmap.
-  Defragment if a fragmented cart feels sluggish; otherwise it's
-  optional. See [Defragmenter](#defragmenter) for the full
-  explanation.
-- **New cluster-level defragmenter** with live cluster-map
-  visualisation. Replaces the old file-level `f_expand` approach.
-  Works on near-full volumes (the file-level path couldn't — it
-  needed 2× the largest file free). Preview-then-confirm UX with
-  A = apply / B = cancel; moves render live per-file with a red
-  `DO NOT POWER OFF` banner + front LED while the FAT is
-  mid-write. See the [Defragmenter](#defragmenter) section for
-  why you might want (or not need) to run it.
+  frames on chained XIP when they wouldn't on contiguous mmap.  If
+  a fragmented cart feels sluggish, defragment from the ThumbyOne
+  lobby (MENU → "defrag fat"); otherwise it's optional.  See
+  [XIP mmap and fragmented carts](#xip-mmap-and-fragmented-carts)
+  for the full explanation.
 
 ### v1.02
 
@@ -1771,6 +1615,6 @@ The Thumby Color hardware is by [TinyCircuits](https://tinycircuits.com).
 ---
 
 *ThumbyNES — a pocket NES + SMS + Game Gear + Game Boy with battery
-saves, save states, an in-game pause menu, screenshots, in-firmware
-defragmenter, configurable system clock, and a tabbed browser that
-boots back to where you left off.*
+saves, save states, an in-game pause menu, screenshots, configurable
+system clock, and a tabbed browser that boots back to where you
+left off.*

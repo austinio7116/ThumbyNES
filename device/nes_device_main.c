@@ -39,14 +39,19 @@
 #include "nes_flash_disk.h"
 #include "nes_picker.h"
 #include "nes_font.h"
+#ifndef THUMBYNES_GBA_ONLY
 #include "nes_run.h"
 #include "sms_run.h"
 #include "gb_run.h"
+#endif
 #ifdef THUMBYNES_WITH_MD
 #include "md_run.h"
 #endif
 #ifdef THUMBYNES_WITH_PCE
 #include "pce_run.h"
+#endif
+#ifdef THUMBYNES_WITH_GBA
+#include "gba_run.h"
 #endif
 
 #ifdef THUMBYONE_SLOT_MODE
@@ -363,9 +368,10 @@ int main(void) {
      * every boot and flashed a "checking files" / "DEFRAGMENTING"
      * pair before the picker. The actual XIP-mmap failure it was
      * meant to avoid turned out to have a different root cause, so
-     * there's no reason to keep the pre-flight. Removed entirely —
-     * nes_picker_defrag() is still linked in case we want to wire it
-     * to an explicit menu entry later. */
+     * there's no reason to keep the pre-flight. The whole defrag
+     * code path has since been lifted into the ThumbyOne lobby
+     * (MENU → "defrag fat") — it owns the shared FAT, so cross-slot
+     * compaction lives there, not inside any one slot's binary. */
 
     /* Lobby + picker. Loops forever in Phase 3. */
     int current_clock_mhz = nes_picker_global_clock_mhz();
@@ -382,12 +388,23 @@ int main(void) {
         {
             int per_cart = 0;
             switch (roms[sel].system) {
+#ifndef THUMBYNES_GBA_ONLY
             case ROM_SYS_NES: per_cart = nes_run_clock_override(roms[sel].name); break;
             case ROM_SYS_GB:  per_cart = gb_run_clock_override (roms[sel].name); break;
+#endif
 #ifdef THUMBYNES_WITH_MD
             case ROM_SYS_MD:  per_cart = md_run_clock_override (roms[sel].name); break;
 #endif
-            default:          per_cart = sms_run_clock_override(roms[sel].name); break;
+#ifdef THUMBYNES_WITH_GBA
+            case ROM_SYS_GBA: per_cart = gba_run_clock_override(roms[sel].name); break;
+#endif
+            default:
+#ifndef THUMBYNES_GBA_ONLY
+                per_cart = sms_run_clock_override(roms[sel].name);
+#else
+                per_cart = 0;
+#endif
+                break;
             }
             int target = per_cart ? per_cart : nes_picker_global_clock_mhz();
             /* Upper bound 250 (was 400): 300 MHz removed for
@@ -407,15 +424,28 @@ int main(void) {
          * another pick. */
         int rc;
         switch (roms[sel].system) {
+#ifndef THUMBYNES_GBA_ONLY
         case ROM_SYS_NES: rc = nes_run_rom(&roms[sel], fb); break;
         case ROM_SYS_GB:  rc = gb_run_rom (&roms[sel], fb); break;
+#endif
 #ifdef THUMBYNES_WITH_MD
         case ROM_SYS_MD:  rc = md_run_rom (&roms[sel], fb); break;
 #endif
 #ifdef THUMBYNES_WITH_PCE
         case ROM_SYS_PCE: rc = pce_run_rom(&roms[sel], fb); break;
 #endif
-        default:          rc = sms_run_rom(&roms[sel], fb); break;
+#ifdef THUMBYNES_WITH_GBA
+        case ROM_SYS_GBA: rc = gba_run_rom(&roms[sel], fb); break;
+#endif
+        default:
+#ifndef THUMBYNES_GBA_ONLY
+            rc = sms_run_rom(&roms[sel], fb);
+#else
+            rc = -99;     /* No SMS in GBA-only build — unreachable
+                           * in practice because the picker only
+                           * surfaces ROM_SYS_GBA carts. */
+#endif
+            break;
         }
         if (rc != 0) {
             /* Visible error: red splash held until the user presses

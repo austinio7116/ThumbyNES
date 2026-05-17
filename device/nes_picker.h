@@ -41,6 +41,7 @@
 #define ROM_SYS_GB   3
 #define ROM_SYS_MD   4   /* Sega Mega Drive / Genesis — .md/.bin/.gen */
 #define ROM_SYS_PCE  5   /* PC Engine / TurboGrafx-16 HuCard — .pce */
+#define ROM_SYS_GBA  6   /* Game Boy Advance — .gba */
 
 typedef struct {
     char     name[NES_PICKER_NAME_MAX];   /* base file name in / */
@@ -84,52 +85,15 @@ uint8_t *nes_picker_load_rom(const char *name, size_t *out_len);
 int nes_picker_mmap_rom(const char *name,
                           const uint8_t **out_data, size_t *out_len);
 
-/* Defragmenter — rewrites every fragmented file in / so its cluster
- * chain becomes contiguous, which lets the XIP mmap path serve large
- * carts that would otherwise fall back to malloc and OOM. Walks the
- * root, checks each file with the same chain_is_contiguous logic the
- * mmap path uses, and rewrites the offenders via the f_expand
- * temp-file dance. Progress is drawn into `fb` so the user sees what
- * the picker is doing.
- *
- * Returns the number of files rewritten (>= 0) or a negative error
- * code if the pass aborted. The function pumps tud_task() between
- * files so USB stays alive while it runs. */
-int nes_picker_defrag(uint16_t *fb);
-
-/* Defragment one named ROM in /roms/ — rewrites the file so its
- * cluster chain is contiguous. Used by the runner loaders when
- * nes_picker_mmap_rom returns -5 (fragmented) and the cart is too
- * large to fall back to a RAM load. Draws a progress splash into
- * `fb` so the user sees the pause. Returns 0 on success. */
-int nes_picker_defrag_one(const char *name, uint16_t *fb);
-
-/* Compacting pass — rewrites every non-trivial file in /roms/,
- * including files that are already individually contiguous. That's
- * what actually consolidates free space into one big run at the
- * end of the volume, which is what a new upload (or a fresh big
- * ROM's f_expand) needs. This is the one the runners fall back to
- * when a targeted rewrite can't land a 1 MB ROM because scattered
- * already-contiguous files are blocking consolidation.
- *
- * Loud overlay: full-screen "DO NOT POWER OFF" message plus red
- * front indicator for the duration of the pass. Returns the number
- * of files rewritten (>= 0) or a negative error. */
-int nes_picker_defrag_compact(uint16_t *fb);
-
-/* Error code of the first defrag_one_path failure during the most
- * recent nes_picker_defrag_compact pass. 0 = every file succeeded.
- * Use it to differentiate failure modes in the summary UI. */
-int nes_picker_defrag_last_error(void);
-
 /* Chained-XIP mmap for fragmented carts. Builds a per-cluster table
  * of XIP pointers so a fragmented file can still be read straight
  * out of flash without copying anything — reads walk the LBA table
  * instead of assuming the cluster chain is contiguous.
  *
  * Use when the contiguous path (nes_picker_mmap_rom) returns -5 and
- * a compacting defrag can't fix it (volume too full to hold a
- * rewrite copy).
+ * the user hasn't yet run the lobby's FAT defragmenter (MENU →
+ * "defrag fat" from the ThumbyOne lobby) to lay the file out
+ * contiguously.
  *
  * On success:
  *   out->cluster_ptrs[i] = XIP pointer to cluster i's first byte
@@ -152,19 +116,6 @@ typedef struct {
 
 int  nes_picker_mmap_rom_chain(const char *name, nes_picker_rom_chain_t *out);
 void nes_picker_mmap_rom_chain_free(nes_picker_rom_chain_t *chain);
-
-/* Walk the whole shared FAT (same traversal as defrag_compact) and
- * count files whose cluster chain isn't contiguous. Useful as a
- * post-compact verification: if the pass rewrote N files but this
- * still returns > 0, the compact algorithm itself (or our
- * chain_is_contiguous probe) is broken. */
-int  nes_picker_count_fragmented(void);
-
-/* Same as nes_picker_count_fragmented but also writes the absolute
- * path of the FIRST fragmented file encountered into the caller's
- * buffer. If none are fragmented, out_first_name[0] is set to 0.
- * Useful for debugging a stuck rewrite. */
-int  nes_picker_count_fragmented_named(char *out_first_name, size_t out_sz);
 
 /* Global preferences — applies across every cart. Lives in /.global
  * on the FAT volume. The picker menu and the in-game menus both

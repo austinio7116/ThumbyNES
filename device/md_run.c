@@ -274,16 +274,12 @@ int md_run_rom(const nes_rom_entry *e, uint16_t *fb) {
     const char *name = e->name;
 
     /* XIP mmap is the only viable path on device — a 2 MB ROM won't
-     * fit in heap. If the file is fragmented, defrag inline before
-     * giving up. */
+     * fit in heap. -5 means the file is fragmented; the user has to
+     * run the lobby's FAT defragmenter (MENU → "defrag fat" in the
+     * ThumbyOne lobby) before launching this ROM. */
     const uint8_t *rom_const = NULL;
     size_t         sz        = 0;
     int mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
-    if (mmap_rc == -5) {
-        /* -5 = fragmented. Try to compact and retry once. */
-        nes_picker_defrag_one(name, fb);
-        mmap_rc = nes_picker_mmap_rom(name, &rom_const, &sz);
-    }
     if (mmap_rc != 0) return -30 + mmap_rc;
 
     /* Load the per-cart .cfg FIRST so we know the desired audio_mode

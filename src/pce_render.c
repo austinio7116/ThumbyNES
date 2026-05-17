@@ -410,15 +410,8 @@ static void PCE_HOT(draw_sprites_line)(int pce_y, int screen_w, int draw_front)
             for (int c = 0; c < 16; c++) {
                 int dx = dx0 + (hflip ? (15 - c) : c);
                 if (dx < 0 || dx >= screen_w) continue;
-#ifdef PCEC_SPRITE_BLOCK_TEST
-                /* TEMP: draw every sprite as a solid block — palette-bank
-                 * index 1 (a guaranteed non-zero) so we see WHERE sprites
-                 * are placed regardless of pixel decode. */
-                s_line[dx] = spr_pal[1];
-#else
                 uint8_t p = sprite_pixel(cell, c, row);
                 if (p) s_line[dx] = spr_pal[p];
-#endif
             }
         }
     }
