@@ -150,10 +150,17 @@ static int boot_filesystem(void) {
         memset(&g_fs, 0, sizeof(g_fs));
 
         BYTE work[FF_MAX_SS * 4];
-        /* FAT16, 1 KB clusters → 12288 clusters, well above the
-         * FAT12 4084-cluster cap. Forcing FAT16 sidesteps Windows
-         * quirks with FAT12 on removable drives larger than 8 MB. */
-        MKFS_PARM opt = { FM_FAT, 1, 0, 0, 1024 };
+        /* FAT12, 4 KB clusters. 4 KB is required for ThumbyOne's Mote
+         * slot, which XIP-executes .mote modules from the FAT via QMI
+         * ATRANS (4 KB-granular pages) — a module's first cluster must
+         * be 4 KB-aligned, which 4 KB clusters guarantee. The read-only
+         * slots (NES included) read at any offset and don't care. At
+         * 4 KB the cluster count stays under FAT12's 4084 cap for every
+         * FAT size. The old worry about Windows + FAT12 on >8 MB
+         * removables proved over-cautious — a 13 MB FAT12 volume mounts
+         * and reads/writes fine on Windows. MUST match thumbyone_fs.c,
+         * mp-thumby/vfs_fat.c, and ThumbyP8's copy byte-for-byte. */
+        MKFS_PARM opt = { FM_FAT, 1, 0, 0, 4096 };
         if (f_mkfs("", &opt, work, sizeof(work)) != FR_OK) {
             splash_color(0xf800);   /* red = mkfs failed */
             return -1;
