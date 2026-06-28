@@ -1195,6 +1195,13 @@ Explicit scope cuts to protect the RAM/CPU budget:
 
 ## Changelog
 
+### v1.10 — supports ThumbyOne 1.28's new shared drive
+
+- **ROMs load from ThumbyOne 1.28's new 4 KB-cluster (FAT12) shared
+  drive.** ThumbyOne 1.28 reformats its shared drive to larger clusters;
+  the ROM picker reads the new layout, so a ROM you copy into `/roms/`
+  loads and launches normally.
+
 ### v1.09 — PCE FILL centring + LB+d-pad pan harmonisation across all cores
 
 Small follow-up release that finishes 1.08's PCE work and lines the

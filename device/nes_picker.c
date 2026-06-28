@@ -321,35 +321,42 @@ static LBA_t cluster_to_lba(DWORD cluster) {
  * This pokes FatFs internals via the public-but-undocumented
  * `get_fat()` helper, which we replace with a sector-level read
  * of the FAT itself to stay portable across FatFs configs. */
+/* Read the FAT entry for `clst` (its next-cluster pointer, or an end-of-chain /
+ * bad value), correct for BOTH FAT16 and FAT12. The shared FAT is FAT12 when it
+ * uses 4 KB clusters (ThumbyOne's au_size=4096 → <4085 clusters), and FAT12
+ * entries are 12 bits packed 1.5 bytes apiece — which a flat *2 read misreads.
+ * Returns 0xFFFFFFFF on a disk error. The two bytes can straddle a sector, so
+ * each is fetched from its own (1-sector-cached) read. */
+static DWORD fat_next_cluster(DWORD clst) {
+    static uint8_t fsec[512];
+    static LBA_t   cached = (LBA_t)-1;
+    int   is12 = (g_fs.fs_type == FS_FAT12);
+    DWORD bo   = is12 ? (clst + (clst >> 1)) : (clst * 2);   /* byte offset of the entry */
+    DWORD bytes[2];
+    for (int k = 0; k < 2; k++) {
+        DWORD bb = bo + (DWORD)k;
+        LBA_t l  = (LBA_t)g_fs.fatbase + bb / 512;
+        if (l != cached) {
+            if (nes_flash_disk_read(fsec, (uint32_t)l, 1) != 0) return 0xFFFFFFFFu;
+            cached = l;
+        }
+        bytes[k] = fsec[bb % 512];
+    }
+    DWORD v = bytes[0] | (bytes[1] << 8);
+    if (is12) v = (clst & 1) ? (v >> 4) : (v & 0x0FFFu);
+    return v;
+}
+static int fat_is_eoc(DWORD v) {
+    return (g_fs.fs_type == FS_FAT12) ? (v >= 0x0FF8u) : (v >= 0xFFF8u);
+}
+
 static int chain_is_contiguous(DWORD start_cluster, DWORD n_clusters) {
     if (n_clusters <= 1) return 1;
-
-    /* The FAT lives at sector `g_fs.fatbase` and each FAT16 entry
-     * is 2 bytes. Read the table sector-by-sector via diskio. */
     DWORD prev = start_cluster;
-    DWORD sector_buf_lba = (DWORD)-1;
-    static uint8_t fat_sec[512];
-
     for (DWORD i = 1; i < n_clusters; i++) {
-        DWORD entry_byte = prev * 2;     /* FAT16 */
-        DWORD entry_sec  = entry_byte / 512;
-        DWORD entry_off  = entry_byte % 512;
-        LBA_t lba = (LBA_t)g_fs.fatbase + entry_sec;
-        if (lba != sector_buf_lba) {
-            if (nes_flash_disk_read(fat_sec, (uint32_t)lba, 1) != 0) return 0;
-            sector_buf_lba = lba;
-        }
-        DWORD next = (DWORD)fat_sec[entry_off] | ((DWORD)fat_sec[entry_off + 1] << 8);
-        /* FAT16 end-of-chain is ANY value in 0xFFF8..0xFFFF. Checking
-         * only 0xFFFF misses valid EOC variants that FatFs and other
-         * FAT writers may produce, causing chain_is_contiguous to
-         * treat a legitimate EOC as an invalid next-cluster pointer
-         * and incorrectly return 0 (fragmented). */
-        if (next >= 0xFFF8) {
-            /* End-of-chain. Should only happen at i == n_clusters - 1.
-             * If it happens earlier the file is shorter than expected. */
-            return (i == n_clusters - 1);
-        }
+        DWORD next = fat_next_cluster(prev);
+        if (next == 0xFFFFFFFFu) return 0;                 /* read error */
+        if (fat_is_eoc(next)) return (i == n_clusters - 1);/* short tail unless last */
         if (next != prev + 1) return 0;
         prev = next;
     }
@@ -452,12 +459,10 @@ int nes_picker_mmap_rom_chain(const char *name, nes_picker_rom_chain_t *out) {
     const uint8_t **ptrs = (const uint8_t **)malloc((size_t)n_clusters * sizeof(const uint8_t *));
     if (!ptrs) return -6;
 
-    /* Walk the FAT16 chain, recording each cluster's XIP pointer.
-     * Mirrors the sector-level FAT read used by chain_is_contiguous;
-     * we need the LBA of every cluster, contiguous or not. */
+    /* Walk the cluster chain (FAT12 or FAT16 — fat_next_cluster handles both,
+     * since the shared ThumbyOne FAT is FAT12), recording each cluster's XIP
+     * pointer. We need the LBA of every cluster, contiguous or not. */
     DWORD clst = start_cluster;
-    DWORD sector_buf_lba = (DWORD)-1;
-    static uint8_t fat_sec[512];
 
     for (DWORD i = 0; i < n_clusters; i++) {
         LBA_t lba = cluster_to_lba(clst);
@@ -467,20 +472,9 @@ int nes_picker_mmap_rom_chain(const char *name, nes_picker_rom_chain_t *out) {
 
         if (i == n_clusters - 1) break;
 
-        DWORD entry_byte = clst * 2;   /* FAT16 */
-        DWORD entry_sec  = entry_byte / 512;
-        DWORD entry_off  = entry_byte % 512;
-        LBA_t fat_lba = (LBA_t)g_fs.fatbase + entry_sec;
-        if (fat_lba != sector_buf_lba) {
-            if (nes_flash_disk_read(fat_sec, (uint32_t)fat_lba, 1) != 0) {
-                free(ptrs);
-                return -7;
-            }
-            sector_buf_lba = fat_lba;
-        }
-        DWORD next = (DWORD)fat_sec[entry_off]
-                   | ((DWORD)fat_sec[entry_off + 1] << 8);
-        if (next == 0xFFFF || next < 2) {
+        DWORD next = fat_next_cluster(clst);
+        if (next == 0xFFFFFFFFu) { free(ptrs); return -7; }   /* disk read error */
+        if (fat_is_eoc(next) || next < 2) {
             /* Chain ended earlier than expected. Treat the short
              * tail as readable (file_size header might have lied). */
             out->n_clusters = i + 1;
