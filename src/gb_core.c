@@ -523,6 +523,17 @@ void gbc_poke_cart_rtc(const uint8_t in[5]) {
 
 #ifdef THUMBY_STATE_BRIDGE
 #  include "thumby_state_bridge.h"
+typedef thumby_state_io_t *gbc_state_file;
+#  define GBC_FOPEN(p, m)            thumby_state_open((p), (m))
+#  define GBC_FCLOSE(f)              thumby_state_close((f))
+#  define GBC_FWRITE(b, sz, n, f)    thumby_state_write((b), (sz), (n), (f))
+#  define GBC_FREAD(b, sz, n, f)     thumby_state_read((b), (sz), (n), (f))
+#else
+typedef FILE *gbc_state_file;
+#  define GBC_FOPEN(p, m)            fopen((p), (m))
+#  define GBC_FCLOSE(f)              fclose((f))
+#  define GBC_FWRITE(b, sz, n, f)    fwrite((b), (sz), (n), (f))
+#  define GBC_FREAD(b, sz, n, f)     fread((b), (sz), (n), (f))
 #endif
 
 static void gbc_reattach_callbacks(void)
@@ -555,34 +566,20 @@ int gbc_save_state(const char *path, int64_t wall_clock_unix_secs) {
         GBC_STATE_VERSION,
         payload_sz,
     };
-#ifdef THUMBY_STATE_BRIDGE
-    thumby_state_io_t *io = thumby_state_open(path, "wb");
-    if (!io) return -2;
-    if (thumby_state_write(hdr, sizeof(hdr), 1, io) != 1
-     || thumby_state_write(&s_gb,  sizeof(s_gb),  1, io) != 1
-     || thumby_state_write(&s_apu, sizeof(s_apu), 1, io) != 1
-     || thumby_state_write(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, io) != 1
-     || thumby_state_write(&cart_len, sizeof(cart_len), 1, io) != 1
+    gbc_state_file f = GBC_FOPEN(path, "wb");
+    if (!f) return -2;
+    if (GBC_FWRITE(hdr, sizeof(hdr), 1, f) != 1
+     || GBC_FWRITE(&s_gb,  sizeof(s_gb),  1, f) != 1
+     || GBC_FWRITE(&s_apu, sizeof(s_apu), 1, f) != 1
+     || GBC_FWRITE(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, f) != 1
+     || GBC_FWRITE(&cart_len, sizeof(cart_len), 1, f) != 1
      || (cart_len > 0 && (!s_cart_ram
-         || thumby_state_write(s_cart_ram, cart_len, 1, io) != 1))) {
-        thumby_state_close(io);
+         || GBC_FWRITE(s_cart_ram, cart_len, 1, f) != 1))) {
+        GBC_FCLOSE(f);
         return -3;
     }
-    thumby_state_close(io);
+    GBC_FCLOSE(f);
     return 0;
-#else
-    FILE *f = fopen(path, "wb");
-    if (!f) return -2;
-    int ok = fwrite(hdr, sizeof(hdr), 1, f) == 1
-          && fwrite(&s_gb,  sizeof(s_gb),  1, f) == 1
-          && fwrite(&s_apu, sizeof(s_apu), 1, f) == 1
-          && fwrite(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, f) == 1
-          && fwrite(&cart_len, sizeof(cart_len), 1, f) == 1
-          && (cart_len == 0
-              || (s_cart_ram && fwrite(s_cart_ram, cart_len, 1, f) == 1));
-    fclose(f);
-    return ok ? 0 : -3;
-#endif
 }
 
 int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
@@ -600,11 +597,11 @@ int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
     int rc = -4;
     bool mutated = false;
 
-#ifdef THUMBY_STATE_BRIDGE
-    thumby_state_io_t *io = thumby_state_open(path, "rb");
-    if (!io) return -2;
-    if (thumby_state_read(hdr, sizeof(hdr), 1, io) != 1) { rc = -3; goto fail_bridge; }
-    if (hdr[0] != GBC_STATE_MAGIC) { rc = -4; goto fail_bridge; }
+    gbc_state_file f = GBC_FOPEN(path, "rb");
+    if (!f) return -2;
+
+    if (GBC_FREAD(hdr, sizeof(hdr), 1, f) != 1) { rc = -3; goto fail; }
+    if (hdr[0] != GBC_STATE_MAGIC) { rc = -4; goto fail; }
     if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
         ver = VER_V1;
     } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
@@ -613,7 +610,7 @@ int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
             && hdr[2] >= v2_payload + sizeof(uint32_t)) {
         ver = VER_V3;
     } else {
-        rc = -4; goto fail_bridge;
+        rc = -4; goto fail;
     }
 
     /* V3: derive cart_ram_len from hdr[2] and hard-fail size mismatch
@@ -622,100 +619,44 @@ int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
     uint32_t cart_len = 0;
     if (ver == VER_V3) {
         cart_len = hdr[2] - v2_payload - (uint32_t)sizeof(uint32_t);
-        if (cart_len != (uint32_t)s_cart_ram_size) { rc = -6; goto fail_bridge; }
-        if (cart_len > 0 && !s_cart_ram) { rc = -6; goto fail_bridge; }
+        if (cart_len != (uint32_t)s_cart_ram_size) { rc = -6; goto fail; }
+        if (cart_len > 0 && !s_cart_ram) { rc = -6; goto fail; }
     }
 
-    if (thumby_state_read(&s_gb,  sizeof(s_gb),  1, io) != 1
-     || thumby_state_read(&s_apu, sizeof(s_apu), 1, io) != 1) {
+    if (GBC_FREAD(&s_gb,  sizeof(s_gb),  1, f) != 1
+     || GBC_FREAD(&s_apu, sizeof(s_apu), 1, f) != 1) {
         mutated = true;
-        rc = -5; goto fail_bridge;
+        rc = -5; goto fail;
     }
     mutated = true;
 
     if (ver >= VER_V2) {
         int64_t wall = 0;
-        if (thumby_state_read(&wall, sizeof(wall), 1, io) != 1) {
-            rc = -5; goto fail_bridge;
-        }
+        if (GBC_FREAD(&wall, sizeof(wall), 1, f) != 1) { rc = -5; goto fail; }
         if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
     }
     if (ver == VER_V3) {
         uint32_t file_cart_len = 0;
-        if (thumby_state_read(&file_cart_len, sizeof(file_cart_len), 1, io) != 1) {
-            rc = -5; goto fail_bridge;
+        if (GBC_FREAD(&file_cart_len, sizeof(file_cart_len), 1, f) != 1) {
+            rc = -5; goto fail;
         }
-        if (file_cart_len != cart_len) { rc = -4; goto fail_bridge; }
+        if (file_cart_len != cart_len) { rc = -4; goto fail; }
         if (cart_len > 0
-         && thumby_state_read(s_cart_ram, cart_len, 1, io) != 1) {
-            rc = -5; goto fail_bridge;
+         && GBC_FREAD(s_cart_ram, cart_len, 1, f) != 1) {
+            rc = -5; goto fail;
         }
     }
-    thumby_state_close(io);
+
+    GBC_FCLOSE(f);
     gbc_reattach_callbacks();
     return 0;
 
-fail_bridge:
-    thumby_state_close(io);
+fail:
+    GBC_FCLOSE(f);
     /* After s_gb is overwritten, function pointers are garbage until
      * reattached — runner still shows "load fail" and keeps running. */
     if (mutated) gbc_reattach_callbacks();
     return rc;
-#else
-    FILE *f = fopen(path, "rb");
-    if (!f) return -2;
-    if (fread(hdr, sizeof(hdr), 1, f) != 1) { rc = -3; goto fail_file; }
-    if (hdr[0] != GBC_STATE_MAGIC) { rc = -4; goto fail_file; }
-    if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
-        ver = VER_V1;
-    } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
-        ver = VER_V2;
-    } else if (hdr[1] == GBC_STATE_VERSION_3
-            && hdr[2] >= v2_payload + sizeof(uint32_t)) {
-        ver = VER_V3;
-    } else {
-        rc = -4; goto fail_file;
-    }
-
-    uint32_t cart_len = 0;
-    if (ver == VER_V3) {
-        cart_len = hdr[2] - v2_payload - (uint32_t)sizeof(uint32_t);
-        if (cart_len != (uint32_t)s_cart_ram_size) { rc = -6; goto fail_file; }
-        if (cart_len > 0 && !s_cart_ram) { rc = -6; goto fail_file; }
-    }
-
-    if (fread(&s_gb,  sizeof(s_gb),  1, f) != 1
-     || fread(&s_apu, sizeof(s_apu), 1, f) != 1) {
-        mutated = true;
-        rc = -5; goto fail_file;
-    }
-    mutated = true;
-
-    if (ver >= VER_V2) {
-        int64_t wall = 0;
-        if (fread(&wall, sizeof(wall), 1, f) != 1) { rc = -5; goto fail_file; }
-        if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
-    }
-    if (ver == VER_V3) {
-        uint32_t file_cart_len = 0;
-        if (fread(&file_cart_len, sizeof(file_cart_len), 1, f) != 1) {
-            rc = -5; goto fail_file;
-        }
-        if (file_cart_len != cart_len) { rc = -4; goto fail_file; }
-        if (cart_len > 0
-         && fread(s_cart_ram, cart_len, 1, f) != 1) {
-            rc = -5; goto fail_file;
-        }
-    }
-    fclose(f);
-    gbc_reattach_callbacks();
-    return 0;
-
-fail_file:
-    fclose(f);
-    if (mutated) gbc_reattach_callbacks();
-    return rc;
-#endif
 }
 
 void gbc_shutdown(void) {
