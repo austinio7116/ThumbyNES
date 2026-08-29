@@ -506,7 +506,7 @@ core state to a single `<rom>.sta` sidecar via the in-game menu's
 |---|---|---|
 | **nofrendo** | full machine state via its `state_save` / `state_load` | uses an `SNSS`-format file written through the FatFs bridge |
 | **smsplus** | full machine state via its `system_save_state` / `system_load_state` | same FatFs bridge |
-| **peanut_gb** | `struct gb_s` + `minigb_apu_ctx` (~17 KB) | direct memcpy with a `'GBCS'` header (magic / version / size); function pointers re-attached on load |
+| **peanut_gb** | `struct gb_s` + `minigb_apu_ctx` + cart RAM (~17 KB + up to 32 KB SRAM) | `'GBCS'` V3: magic / version / size; V1/V2 still loadable; function pointers re-attached on load |
 | **PicoDrive (MD)** | full PicoDrive `PicoStateFP` chunked serializer (~130–200 KB per slot) | same FatFs bridge; routes `state_save` / `state_load`'s internal mallocs through a 4 KB scratch buffer pre-allocated at `mdc_init` (see below) |
 | **HuExpress (PCE)** | `THPE` format — magic + `hard_pce` + RAM + VRAM + Pal + SPRAM + IO blocks | direct FatFs writer (no upstream `state.c` to bridge — HuExpress has no portable serialiser, so we wrote our own) |
 

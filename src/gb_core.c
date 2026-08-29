@@ -508,109 +508,36 @@ void gbc_poke_cart_rtc(const uint8_t in[5]) {
  *     runner can advance cart_rtc by (now - saved) so Pokemon's day/
  *     night and berry growth track real wall clock across the time
  *     a state was sitting on disk. V1 still loadable (we read 0 for
- *     wall-clock and skip the advance). */
+ *     wall-clock and skip the advance).
+ * V3: same as V2, then uint32 cart_ram_len + cart_ram[cart_ram_len].
+ *     Cart SRAM lives in a wrapper-owned buffer, not inside struct gb_s;
+ *     without it, load restores CPU/WRAM against stale SRAM — broken
+ *     for titles that use cart RAM as working memory (e.g. Wario Land).
+ *     Older loaders reject V3; this loader still accepts V1 and V2 (cart
+ *     RAM left untouched on those — incomplete restore for such games). */
 #define GBC_STATE_MAGIC     0x47424353u   /* 'GBCS' */
 #define GBC_STATE_VERSION_1 1u
 #define GBC_STATE_VERSION_2 2u
-#define GBC_STATE_VERSION   GBC_STATE_VERSION_2
+#define GBC_STATE_VERSION_3 3u
+#define GBC_STATE_VERSION   GBC_STATE_VERSION_3
 
 #ifdef THUMBY_STATE_BRIDGE
 #  include "thumby_state_bridge.h"
-#endif
-
-int gbc_save_state(const char *path, int64_t wall_clock_unix_secs) {
-    if (!s_loaded || !path) return -1;
-    uint32_t payload_sz = (uint32_t)(sizeof(s_gb) + sizeof(s_apu) + sizeof(int64_t));
-    uint32_t hdr[3] = {
-        GBC_STATE_MAGIC,
-        GBC_STATE_VERSION,
-        payload_sz,
-    };
-#ifdef THUMBY_STATE_BRIDGE
-    thumby_state_io_t *io = thumby_state_open(path, "wb");
-    if (!io) return -2;
-    if (thumby_state_write(hdr, sizeof(hdr), 1, io) != 1
-     || thumby_state_write(&s_gb,  sizeof(s_gb),  1, io) != 1
-     || thumby_state_write(&s_apu, sizeof(s_apu), 1, io) != 1
-     || thumby_state_write(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, io) != 1) {
-        thumby_state_close(io);
-        return -3;
-    }
-    thumby_state_close(io);
-    return 0;
+typedef thumby_state_io_t *gbc_state_file;
+#  define GBC_FOPEN(p, m)            thumby_state_open((p), (m))
+#  define GBC_FCLOSE(f)              thumby_state_close((f))
+#  define GBC_FWRITE(b, sz, n, f)    thumby_state_write((b), (sz), (n), (f))
+#  define GBC_FREAD(b, sz, n, f)     thumby_state_read((b), (sz), (n), (f))
 #else
-    FILE *f = fopen(path, "wb");
-    if (!f) return -2;
-    int ok = fwrite(hdr, sizeof(hdr), 1, f) == 1
-          && fwrite(&s_gb,  sizeof(s_gb),  1, f) == 1
-          && fwrite(&s_apu, sizeof(s_apu), 1, f) == 1
-          && fwrite(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, f) == 1;
-    fclose(f);
-    return ok ? 0 : -3;
+typedef FILE *gbc_state_file;
+#  define GBC_FOPEN(p, m)            fopen((p), (m))
+#  define GBC_FCLOSE(f)              fclose((f))
+#  define GBC_FWRITE(b, sz, n, f)    fwrite((b), (sz), (n), (f))
+#  define GBC_FREAD(b, sz, n, f)     fread((b), (sz), (n), (f))
 #endif
-}
 
-int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
-    if (!s_loaded || !path) return -1;
-    uint32_t hdr[3];
-    /* Pre-zero the out pointer so a V1 file (which lacks the wall-
-     * clock tail) leaves the runner with 0 — runner treats that as
-     * "no wall-delta info, advance nothing". */
-    if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = 0;
-
-    /* Accept V1 (no wall-clock tail) or V2 (with wall-clock tail).
-     * Payload size is what tells V1/V2 apart at parse time. */
-    uint32_t v1_payload = (uint32_t)(sizeof(s_gb) + sizeof(s_apu));
-    uint32_t v2_payload = v1_payload + (uint32_t)sizeof(int64_t);
-#ifdef THUMBY_STATE_BRIDGE
-    thumby_state_io_t *io = thumby_state_open(path, "rb");
-    if (!io) return -2;
-    if (thumby_state_read(hdr, sizeof(hdr), 1, io) != 1) { thumby_state_close(io); return -3; }
-    if (hdr[0] != GBC_STATE_MAGIC) { thumby_state_close(io); return -4; }
-    bool is_v2 = false;
-    if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
-        is_v2 = false;
-    } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
-        is_v2 = true;
-    } else {
-        thumby_state_close(io); return -4;
-    }
-    if (thumby_state_read(&s_gb,  sizeof(s_gb),  1, io) != 1
-     || thumby_state_read(&s_apu, sizeof(s_apu), 1, io) != 1) {
-        thumby_state_close(io); return -5;
-    }
-    if (is_v2) {
-        int64_t wall = 0;
-        if (thumby_state_read(&wall, sizeof(wall), 1, io) != 1) {
-            thumby_state_close(io); return -5;
-        }
-        if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
-    }
-    thumby_state_close(io);
-#else
-    FILE *f = fopen(path, "rb");
-    if (!f) return -2;
-    if (fread(hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return -3; }
-    if (hdr[0] != GBC_STATE_MAGIC) { fclose(f); return -4; }
-    bool is_v2 = false;
-    if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
-        is_v2 = false;
-    } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
-        is_v2 = true;
-    } else {
-        fclose(f); return -4;
-    }
-    if (fread(&s_gb,  sizeof(s_gb),  1, f) != 1
-     || fread(&s_apu, sizeof(s_apu), 1, f) != 1) {
-        fclose(f); return -5;
-    }
-    if (is_v2) {
-        int64_t wall = 0;
-        if (fread(&wall, sizeof(wall), 1, f) != 1) { fclose(f); return -5; }
-        if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
-    }
-    fclose(f);
-#endif
+static void gbc_reattach_callbacks(void)
+{
     /* Re-attach function pointers — they were serialized but the
      * deserialized values point into the old wrapper's text section
      * (or in our case, the same wrapper, but the principle is the
@@ -625,7 +552,111 @@ int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
     s_gb.gb_serial_rx = NULL;
     s_gb.gb_bootrom_read = NULL;
     s_gb.direct.priv = NULL;
+}
+
+int gbc_save_state(const char *path, int64_t wall_clock_unix_secs) {
+    if (!s_loaded || !path) return -1;
+    uint32_t cart_len = (uint32_t)s_cart_ram_size;
+    uint32_t payload_sz = (uint32_t)(sizeof(s_gb) + sizeof(s_apu)
+                                   + sizeof(int64_t)
+                                   + sizeof(uint32_t)
+                                   + cart_len);
+    uint32_t hdr[3] = {
+        GBC_STATE_MAGIC,
+        GBC_STATE_VERSION,
+        payload_sz,
+    };
+    gbc_state_file f = GBC_FOPEN(path, "wb");
+    if (!f) return -2;
+    if (GBC_FWRITE(hdr, sizeof(hdr), 1, f) != 1
+     || GBC_FWRITE(&s_gb,  sizeof(s_gb),  1, f) != 1
+     || GBC_FWRITE(&s_apu, sizeof(s_apu), 1, f) != 1
+     || GBC_FWRITE(&wall_clock_unix_secs, sizeof(wall_clock_unix_secs), 1, f) != 1
+     || GBC_FWRITE(&cart_len, sizeof(cart_len), 1, f) != 1
+     || (cart_len > 0 && (!s_cart_ram
+         || GBC_FWRITE(s_cart_ram, cart_len, 1, f) != 1))) {
+        GBC_FCLOSE(f);
+        return -3;
+    }
+    GBC_FCLOSE(f);
     return 0;
+}
+
+int gbc_load_state(const char *path, int64_t *out_saved_wall_unix_secs) {
+    if (!s_loaded || !path) return -1;
+    uint32_t hdr[3];
+    /* Pre-zero the out pointer so a V1 file (which lacks the wall-
+     * clock tail) leaves the runner with 0 — runner treats that as
+     * "no wall-delta info, advance nothing". */
+    if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = 0;
+
+    uint32_t v1_payload = (uint32_t)(sizeof(s_gb) + sizeof(s_apu));
+    uint32_t v2_payload = v1_payload + (uint32_t)sizeof(int64_t);
+    enum { VER_V1 = 1, VER_V2 = 2, VER_V3 = 3 };
+    int ver = 0;
+    int rc = -4;
+    bool mutated = false;
+
+    gbc_state_file f = GBC_FOPEN(path, "rb");
+    if (!f) return -2;
+
+    if (GBC_FREAD(hdr, sizeof(hdr), 1, f) != 1) { rc = -3; goto fail; }
+    if (hdr[0] != GBC_STATE_MAGIC) { rc = -4; goto fail; }
+    if (hdr[1] == GBC_STATE_VERSION_1 && hdr[2] == v1_payload) {
+        ver = VER_V1;
+    } else if (hdr[1] == GBC_STATE_VERSION_2 && hdr[2] == v2_payload) {
+        ver = VER_V2;
+    } else if (hdr[1] == GBC_STATE_VERSION_3
+            && hdr[2] >= v2_payload + sizeof(uint32_t)) {
+        ver = VER_V3;
+    } else {
+        rc = -4; goto fail;
+    }
+
+    /* V3: derive cart_ram_len from hdr[2] and hard-fail size mismatch
+     * before mutating s_gb/s_apu. Same ROM always has a fixed
+     * gb_get_save_size — mismatch means wrong ROM / corrupt / truncated. */
+    uint32_t cart_len = 0;
+    if (ver == VER_V3) {
+        cart_len = hdr[2] - v2_payload - (uint32_t)sizeof(uint32_t);
+        if (cart_len != (uint32_t)s_cart_ram_size) { rc = -6; goto fail; }
+        if (cart_len > 0 && !s_cart_ram) { rc = -6; goto fail; }
+    }
+
+    if (GBC_FREAD(&s_gb,  sizeof(s_gb),  1, f) != 1
+     || GBC_FREAD(&s_apu, sizeof(s_apu), 1, f) != 1) {
+        mutated = true;
+        rc = -5; goto fail;
+    }
+    mutated = true;
+
+    if (ver >= VER_V2) {
+        int64_t wall = 0;
+        if (GBC_FREAD(&wall, sizeof(wall), 1, f) != 1) { rc = -5; goto fail; }
+        if (out_saved_wall_unix_secs) *out_saved_wall_unix_secs = wall;
+    }
+    if (ver == VER_V3) {
+        uint32_t file_cart_len = 0;
+        if (GBC_FREAD(&file_cart_len, sizeof(file_cart_len), 1, f) != 1) {
+            rc = -5; goto fail;
+        }
+        if (file_cart_len != cart_len) { rc = -4; goto fail; }
+        if (cart_len > 0
+         && GBC_FREAD(s_cart_ram, cart_len, 1, f) != 1) {
+            rc = -5; goto fail;
+        }
+    }
+
+    GBC_FCLOSE(f);
+    gbc_reattach_callbacks();
+    return 0;
+
+fail:
+    GBC_FCLOSE(f);
+    /* After s_gb is overwritten, function pointers are garbage until
+     * reattached — runner still shows "load fail" and keeps running. */
+    if (mutated) gbc_reattach_callbacks();
+    return rc;
 }
 
 void gbc_shutdown(void) {

@@ -150,14 +150,15 @@ void gbc_peek_cart_rtc(uint8_t out[5]);
 void gbc_poke_cart_rtc(const uint8_t in[5]);
 
 /* Save / load runtime state to a sidecar file (absolute FAT path,
- * e.g. "/Tetris.sta"). peanut_gb's struct gb_s plus minigb_apu_ctx
- * is small enough (~17 KB total) to memcpy whole — we just write
- * both blobs to disk and reverse on load. Returns 0 on success.
+ * e.g. "/Tetris.sta"). Returns 0 on success.
  *
- * V2 file format also embeds the wall-clock unix seconds at save
- * moment; on load the runner uses (now - saved) to advance the
- * cart_rtc so MBC3 carts (Pokemon Crystal/Gold/Silver) track real
- * elapsed wall clock across the time a state was sitting on disk.
+ * Format versions (GBCS magic):
+ *   V1 — struct gb_s + minigb_apu_ctx
+ *   V2 — V1 + int64 wall-clock unix seconds at save (Pokemon RTC)
+ *   V3 — V2 + uint32 cart_ram_len + cart_ram bytes (external SRAM buffer)
+ *
+ * Writers always emit V3. Loaders accept V1/V2/V3; older firmware
+ * that only knows V1/V2 will reject V3 files.
  *
  * gbc_save_state(): pass the current wall-clock unix-seconds via
  * `wall_clock_unix_secs` (or 0 if unavailable — load will then
